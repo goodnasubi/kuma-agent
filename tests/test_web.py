@@ -74,3 +74,11 @@ def test_history_endpoint_returns_conversation(server: str):
     messages = json.loads(body)["messages"]
     assert {"role": "user", "content": "やあ"} in messages
     assert {"role": "assistant", "content": "返答: やあ"} in messages
+
+
+def test_page_supports_drag_and_drop():
+    from kuma_agent.web import render_page
+
+    page = render_page("muse")
+    assert "dragover" in page and "drop" in page
+    assert "dataTransfer" in page and "dropHint" in page

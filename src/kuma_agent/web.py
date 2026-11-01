@@ -71,6 +71,10 @@ _PAGE_TEMPLATE = """\
            background: __HONEY__; color: #fff; cursor: pointer; }
   button:disabled { opacity: .5; }
   #attach { background: #fff; color: __COCOA__; border: 1px solid __COCOA__; }
+  body.dragover #log { outline: 3px dashed __HONEY__; outline-offset: -8px; }
+  #dropHint { display: none; text-align: center; padding: 8px; font-size: 14px;
+              background: #fff; border-top: 1px solid __HONEY__; }
+  body.dragover #dropHint { display: block; }
 </style>
 </head>
 <body>
@@ -82,6 +86,7 @@ _PAGE_TEMPLATE = """\
   </div>
 </header>
 <div id="log"></div>
+<div id="dropHint">ファイルを離すと添付します</div>
 <form id="form">
   <div id="files"></div>
   <button id="attach" type="button">添付</button>
@@ -125,11 +130,29 @@ async function loadHistory() {
   } catch (e) { /* 履歴が取れなくても会話は続けられる */ }
 }
 
-attachBtn.addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', () => {
-  pendingFiles = Array.from(fileInput.files);
+function setPending(files) {
+  pendingFiles = Array.from(files);
   filesLabel.textContent = pendingFiles.length
     ? '添付: ' + pendingFiles.map((f) => f.name).join('、') : '';
+}
+
+attachBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => setPending(fileInput.files));
+
+// ドラッグ＆ドロップでも添付できる（画面全体がドロップ先）
+document.addEventListener('dragover', (ev) => {
+  ev.preventDefault();
+  document.body.classList.add('dragover');
+});
+document.addEventListener('dragleave', (ev) => {
+  if (!ev.relatedTarget) document.body.classList.remove('dragover');
+});
+document.addEventListener('drop', (ev) => {
+  ev.preventDefault();
+  document.body.classList.remove('dragover');
+  if (ev.dataTransfer && ev.dataTransfer.files.length) {
+    setPending(ev.dataTransfer.files);
+  }
 });
 
 function readAttachment(file) {
