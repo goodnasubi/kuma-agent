@@ -132,7 +132,7 @@ def test_users_in_same_tenant_are_isolated(tmp_path: Path):
     assert not (dir_b / "MEMORY.md").exists()
     assert not (tenant_dir / "MEMORY.md").exists()
 
-    # 部屋の記録: ユーザーが違えば混ざらない（既定の寄り添いモードでは
+    # 部屋の記録: ユーザーが違えば混ざらない（既定の相棒モードでは
     # 部屋は main に固定される）
     a.say("アリスの相談")
     b_sessions = Session(cfg_b, _EchoModel(), "room")

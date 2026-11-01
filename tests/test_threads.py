@@ -74,7 +74,7 @@ class _EchoModel:
 @pytest.fixture()
 def server(tmp_path: Path):
     # スレッドを扱うテストなので、部屋を分けられるスレッドモードにする
-    # （寄り添いモードでは部屋が main に固定される）
+    # （相棒モードでは部屋が main に固定される）
     session = Session(Config(data_dir=tmp_path, mode="wall"), _EchoModel())
     httpd = build_server(session, host="127.0.0.1", port=0)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)

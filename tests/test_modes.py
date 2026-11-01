@@ -1,7 +1,7 @@
-"""モード切替（寄り添いモード / スレッドモード）のテスト。
+"""モード切替（相棒モード / スレッドモード）のテスト。
 
 内部の識別子は wall / ledger で、表示名は config.MODE_LABELS に
-集約する。既定は寄り添いモード（ledger）で、旧値 both は後方互換の
+集約する。既定は相棒モード（ledger）で、旧値 both は後方互換の
 ため ledger に読み替える。台帳はユーザーごとに 1 冊で持つ。
 """
 import json
@@ -46,7 +46,7 @@ def test_normalize_mode():
 
 def test_config_mode_default_env_and_invalid(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("KUMA_MODE", raising=False)
-    assert Config().mode == "ledger"  # 既定は寄り添いモード
+    assert Config().mode == "ledger"  # 既定は相棒モード
     monkeypatch.setenv("KUMA_MODE", "wall")
     assert Config().mode == "wall"
     monkeypatch.setenv("KUMA_MODE", "both")
@@ -62,10 +62,10 @@ def test_config_mode_default_env_and_invalid(monkeypatch: pytest.MonkeyPatch):
 def test_mode_labels_cover_all_modes():
     assert set(MODE_LABELS) == set(MODES) == {"wall", "ledger"}
     assert MODE_LABELS["wall"] == "スレッドモード"
-    assert MODE_LABELS["ledger"] == "寄り添いモード"
+    assert MODE_LABELS["ledger"] == "相棒モード"
     assert mode_label("wall") == "スレッドモード"
-    assert mode_label("both") == "寄り添いモード"  # 旧値も読み替え先の表示名
-    assert mode_label("不正な値") == "寄り添いモード"
+    assert mode_label("both") == "相棒モード"  # 旧値も読み替え先の表示名
+    assert mode_label("不正な値") == "相棒モード"
 
 
 # ---------------------------------------------------------------- スレッドモード（wall）
@@ -91,7 +91,7 @@ def test_wall_mode_keeps_named_rooms(tmp_path: Path):
     assert all("内緒" not in c for c in contents)
 
 
-# ---------------------------------------------------------------- 寄り添いモード（ledger）
+# ---------------------------------------------------------------- 相棒モード（ledger）
 
 def test_ledger_mode_is_default(tmp_path: Path):
     session = Session(Config(data_dir=tmp_path), _EchoModel(), "main")
@@ -185,7 +185,7 @@ def test_api_meta_returns_mode_and_label(_server):
     base = _server("ledger")
     meta = _get_json(base + "/api/meta")
     assert meta["mode"] == "ledger"
-    assert meta["mode_label"] == "寄り添いモード"
+    assert meta["mode_label"] == "相棒モード"
     assert meta["tenant"] == "default"
     assert meta["user"] == "default"
 

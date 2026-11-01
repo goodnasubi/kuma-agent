@@ -20,7 +20,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 # 文脈の分け方のモード（詳細は docs/DESIGN.md の「モード」節）:
-# - ledger（寄り添いモード、既定）: 部屋は実質 1 つ（main）に固定し、
+# - ledger（相棒モード、既定）: 部屋は実質 1 つ（main）に固定し、
 #   抱えている用事は台帳で分けて覚える
 # - wall（スレッドモード）: 会話を部屋（スレッド）ごとに分ける。台帳は無効
 MODES = ("wall", "ledger")
@@ -44,7 +44,7 @@ def normalize_mode(raw: str | None) -> str:
 # 対応付けはこの辞書に集約する
 MODE_LABELS: dict[str, str] = {
     "wall": "スレッドモード",
-    "ledger": "寄り添いモード",
+    "ledger": "相棒モード",
 }
 
 

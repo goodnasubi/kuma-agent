@@ -17,7 +17,7 @@
 tasks.json に置く。
 
 会話の分け方はモード（Config.mode）で選べる:
-- ledger（寄り添いモード、既定）: 部屋は実質 1 つ（main）に固定し、
+- ledger（相棒モード、既定）: 部屋は実質 1 つ（main）に固定し、
   進行中の用事はすべて注入する。セッション ID の指定は無視される
 - wall（スレッドモード）: 会話を部屋（スレッド）ごとに分ける。
   台帳は無効で、道具に台帳系を登録せず、進行中の用事の注入もしない
@@ -84,7 +84,7 @@ class Session:
         self.tenant = normalize_tenant_name(cfg.tenant)
         self.user = normalize_user_name(cfg.user)
         self.mode = normalize_mode(cfg.mode)
-        # 寄り添いモードでは部屋は実質 1 つに固定する（指定は無視する）
+        # 相棒モードでは部屋は実質 1 つに固定する（指定は無視する）
         if self.mode == "ledger":
             self.session_id = DEFAULT_SESSION_ID
         else:
@@ -111,7 +111,7 @@ class Session:
     def _open_tasks_text(self) -> str:
         """進行中の用事をシステムプロンプト用の箇条書きにする。
 
-        寄り添いモードでは進行中の用事をすべて出す。用事がない
+        相棒モードでは進行中の用事をすべて出す。用事がない
         場合は空文字列（節自体を足さない）。
         """
         lines = []

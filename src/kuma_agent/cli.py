@@ -108,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     chat_parser.add_argument("--user", default=None,
                              help="ユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     chat_parser.add_argument("--mode", default=None,
-                             help="モード: ledger（寄り添いモード）/ wall（スレッドモード）"
+                             help="モード: ledger（相棒モード）/ wall（スレッドモード）"
                                   "（既定: 環境変数 KUMA_MODE、無ければ ledger）")
     web_parser = sub.add_parser("web", help="Web UI を起動する")
     web_parser.add_argument("--host", default="127.0.0.1",
@@ -120,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     web_parser.add_argument("--user", default=None,
                             help="起動時のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     web_parser.add_argument("--mode", default=None,
-                            help="モード: ledger（寄り添いモード）/ wall（スレッドモード）"
+                            help="モード: ledger（相棒モード）/ wall（スレッドモード）"
                                  "（既定: 環境変数 KUMA_MODE、無ければ ledger）")
     cleanup_parser = sub.add_parser("cleanup", help="保持期限を過ぎた記録を掃除する")
     cleanup_parser.add_argument("--dry-run", action="store_true",
@@ -165,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     session = Session(cfg, client, session_id=args.session)
     if (cfg.mode == "ledger"
             and normalize_session_id(args.session) != session.session_id):
-        # 寄り添いモードでは部屋が固定されることを起動時に知らせる
+        # 相棒モードでは部屋が固定されることを起動時に知らせる
         print(f"「{mode_label(cfg.mode)}」モードのため"
               f"部屋は {session.session_id} に固定されます")
     if args.tui:

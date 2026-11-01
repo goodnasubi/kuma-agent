@@ -112,7 +112,7 @@ def test_tenants_are_isolated(tmp_path: Path):
     assert not (dir_b / "MEMORY.md").exists()
     assert not (tmp_path / "MEMORY.md").exists()  # 既定テナント側にも漏れない
 
-    # 部屋の記録: テナントが違えば混ざらない（既定の寄り添いモードでは
+    # 部屋の記録: テナントが違えば混ざらない（既定の相棒モードでは
     # 部屋は main に固定される）
     a.say("Aの相談")
     b_sessions = Session(cfg_b, _EchoModel(), "room")
