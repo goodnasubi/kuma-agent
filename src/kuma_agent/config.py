@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .memory import tenant_dir
+from .memory import tenant_dir, user_dir
 
 
 def _env_int(name: str, default: int) -> int:
@@ -23,6 +23,7 @@ def _env_int(name: str, default: int) -> int:
 class Config:
     data_dir: Path = field(default_factory=lambda: Path(os.environ.get("KUMA_DATA_DIR", "data")))
     tenant: str = field(default_factory=lambda: os.environ.get("KUMA_TENANT", "default"))
+    user: str = field(default_factory=lambda: os.environ.get("KUMA_USER", "default"))
     provider: str = field(default_factory=lambda: os.environ.get("KUMA_LLM_PROVIDER", "muse"))
     model: str | None = field(default_factory=lambda: os.environ.get("KUMA_LLM_MODEL") or None)
     model_api_key: str = ""
@@ -63,9 +64,20 @@ class Config:
         return tenant_dir(self.data_dir, self.tenant)
 
     @property
+    def user_data_dir(self) -> Path:
+        """このユーザーの実効データ置き場。
+
+        既定ユーザー（"default"）は後方互換のためテナントの置き場を
+        そのまま返し、それ以外は
+        <テナント置き場> / "users" / <ユーザー名> を返す。
+        人格・長期記憶・部屋・台帳はすべてこの置き場の下に分かれる。
+        """
+        return user_dir(self.tenant_data_dir, self.user)
+
+    @property
     def memory_file(self) -> Path:
-        return self.tenant_data_dir / "MEMORY.md"
+        return self.user_data_dir / "MEMORY.md"
 
     @property
     def conversations_dir(self) -> Path:
-        return self.tenant_data_dir / "conversations"
+        return self.user_data_dir / "conversations"

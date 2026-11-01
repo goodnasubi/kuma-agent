@@ -3,6 +3,9 @@
 文脈の区切りは外側から階層になっている（詳細は docs/DESIGN.md）:
 - テナント: 一番外側の区切り。人格・長期記憶・部屋・台帳の置き場が
   テナントごとに分かれる（実効データ置き場は Config.tenant_data_dir）
+- ユーザー: テナントの下の区切り。同じテナントでもユーザーごとに
+  置き場が分かれ、混ざらない（実効データ置き場は Config.user_data_dir）。
+  識別は宣言によるもので認証ではない
 - 部屋: 名前付きセッションごとに記録が分かれ、再開時に復元される
 - 圧縮: 履歴が長くなったら古い発話をモデル自身に要約させて置き換える
 - 長期記憶: セッションを越える事実は Memory（MEMORY.md）が持つ
@@ -16,7 +19,12 @@ from pathlib import Path
 
 from .config import Config
 from .llm import Attachment, ChatModel, Message, quoted_content
-from .memory import Memory, normalize_session_id, normalize_tenant_name
+from .memory import (
+    Memory,
+    normalize_session_id,
+    normalize_tenant_name,
+    normalize_user_name,
+)
 from .persona import load_persona
 from .tasks import TaskBoard
 from .tools import ToolBox
@@ -52,9 +60,10 @@ class Session:
         self.cfg = cfg
         self.model = model
         self.tenant = normalize_tenant_name(cfg.tenant)
+        self.user = normalize_user_name(cfg.user)
         self.session_id = normalize_session_id(session_id)
-        # 人格・長期記憶・部屋・台帳はテナントの実効データ置き場で分ける
-        data_dir = cfg.tenant_data_dir
+        # 人格・長期記憶・部屋・台帳はユーザーの実効データ置き場で分ける
+        data_dir = cfg.user_data_dir
         self.memory = Memory(data_dir, self.session_id)
         self.task_board = TaskBoard(data_dir)
         self.tools = ToolBox(Path.cwd(), task_board=self.task_board)

@@ -21,8 +21,10 @@ from .memory import (
     DEFAULT_SESSION_ID,
     list_session_ids,
     list_tenant_names,
+    list_user_names,
     normalize_session_id,
     normalize_tenant_name,
+    normalize_user_name,
 )
 from .session import Session
 
@@ -121,6 +123,12 @@ _PAGE_TEMPLATE = """\
     <button id="createTenant" type="button">作成</button>
   </div>
   <div class="sessions">
+    <label for="userSelect">ユーザー</label>
+    <select id="userSelect"></select>
+    <input id="newUser" placeholder="新しいユーザー" size="10">
+    <button id="createUser" type="button">作成</button>
+  </div>
+  <div class="sessions">
     <label for="sessionSelect">部屋</label>
     <select id="sessionSelect"></select>
     <input id="newSession" placeholder="新しい部屋" size="10">
@@ -151,6 +159,9 @@ const filesLabel = document.getElementById('files');
 const tenantSelect = document.getElementById('tenantSelect');
 const newTenantInput = document.getElementById('newTenant');
 const createTenantBtn = document.getElementById('createTenant');
+const userSelect = document.getElementById('userSelect');
+const newUserInput = document.getElementById('newUser');
+const createUserBtn = document.getElementById('createUser');
 const sessionSelect = document.getElementById('sessionSelect');
 const newSessionInput = document.getElementById('newSession');
 const createSessionBtn = document.getElementById('createSession');
@@ -160,6 +171,7 @@ const clearQuoteBtn = document.getElementById('clearQuote');
 let pendingFiles = [];
 let pendingQuote = null;
 let currentTenant = 'default';
+let currentUser = 'default';
 let currentSession = 'main';
 
 function setQuote(text) {
@@ -210,6 +222,7 @@ function describe(text, names) {
 async function loadHistory() {
   try {
     const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser)
       + '&session=' + encodeURIComponent(currentSession);
     const res = await fetch('/api/history' + query);
     const data = await res.json();
@@ -234,7 +247,9 @@ function applySession(name) {
 
 async function loadSessions() {
   try {
-    const res = await fetch('/api/sessions?tenant=' + encodeURIComponent(currentTenant));
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser);
+    const res = await fetch('/api/sessions' + query);
     const data = await res.json();
     sessionSelect.innerHTML = '';
     for (const name of data.sessions) {
@@ -250,11 +265,41 @@ async function loadSessions() {
   } catch (e) { /* 一覧が取れなくても既定の部屋で続けられる */ }
 }
 
-// テナントの切り替え。テナントが変われば、そのテナントの部屋一覧と
+// ユーザーの切り替え。ユーザーが変われば、そのユーザーの部屋一覧と
 // 履歴に切り替える（部屋名は引き継ぎ、無ければ先頭の部屋にする）
+async function applyUser(name) {
+  currentUser = name;
+  userSelect.value = name;
+  await loadSessions();
+  applySession(currentSession);
+}
+
+async function loadUsers() {
+  try {
+    const res = await fetch('/api/users?tenant=' + encodeURIComponent(currentTenant));
+    const data = await res.json();
+    userSelect.innerHTML = '';
+    for (const name of data.users) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      userSelect.appendChild(opt);
+    }
+    if (!data.users.includes(currentUser)) {
+      currentUser = (data.current && data.users.includes(data.current))
+        ? data.current : (data.users[0] || 'default');
+    }
+    userSelect.value = currentUser;
+  } catch (e) { /* 一覧が取れなくても既定のユーザーで続けられる */ }
+}
+
+// テナントの切り替え。テナントが変われば、そのテナントのユーザー一覧・
+// 部屋一覧と履歴に切り替える（ユーザー名・部屋名は引き継ぎ、
+// 無ければそのテナントの既定にする）
 async function applyTenant(name) {
   currentTenant = name;
   tenantSelect.value = name;
+  await loadUsers();
   await loadSessions();
   applySession(currentSession);
 }
@@ -296,6 +341,24 @@ createTenantBtn.addEventListener('click', () => {
     tenantSelect.appendChild(opt);
   }
   applyTenant(name);
+});
+
+userSelect.addEventListener('change', () => {
+  if (userSelect.value && userSelect.value !== currentUser) {
+    applyUser(userSelect.value);
+  }
+});
+createUserBtn.addEventListener('click', () => {
+  const name = newUserInput.value.trim();
+  if (!name) return;
+  newUserInput.value = '';
+  if (![...userSelect.options].some((o) => o.value === name)) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    userSelect.appendChild(opt);
+  }
+  applyUser(name);
 });
 
 sessionSelect.addEventListener('change', () => {
@@ -373,7 +436,8 @@ form.addEventListener('submit', async (ev) => {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({message: text, attachments, quote,
-                            session: currentSession, tenant: currentTenant}),
+                            session: currentSession, tenant: currentTenant,
+                            user: currentUser}),
     });
     const data = await res.json();
     addMsg('assistant', data.reply || ('エラー: ' + (data.error || res.status)));
@@ -387,6 +451,7 @@ form.addEventListener('submit', async (ev) => {
 
 (async () => {
   await loadTenants();
+  await loadUsers();
   await loadSessions();
   loadHistory();
 })();
@@ -441,6 +506,7 @@ class SessionStore:
 
     初回アクセス時に factory で Session を作る。factory を省略すると
     最初の Session と同じ設定・モデルを共有して新しい部屋を作る。
+    1 つの SessionStore は 1 テナント・1 ユーザー分だけを扱う。
     """
 
     def __init__(self, initial: Session,
@@ -449,7 +515,8 @@ class SessionStore:
         self._factory = factory or (
             lambda name: Session(initial.cfg, initial.model, name))
         self.tenant = initial.tenant
-        self._data_dir = initial.cfg.tenant_data_dir
+        self.user = initial.user
+        self._data_dir = initial.cfg.user_data_dir
         self._lock = threading.Lock()
 
     def get(self, name: str | None) -> Session:
@@ -468,34 +535,30 @@ class SessionStore:
         return sorted(set(loaded) | set(list_session_ids(self._data_dir)))
 
 
-class TenantStore:
-    """テナント → SessionStore の対応を管理する（Web UI のテナント切替用）。
+class UserStore:
+    """ユーザー → SessionStore の対応を管理する（1 テナント分）。
 
-    サーバーはテナントごとに SessionStore を持ち、初回アクセス時に
-    そのテナントの Session を作る。新しいテナントの Session は、
-    起動時の設定（プロバイダやモデルなど）を引き継ぎ、テナントだけを
-    差し替えた Config で作るため、データの置き場はテナントごとに
-    分かれる。session_factory は起動時テナントの部屋の作り方だけを
-    差し替える（テスト用）。
+    テナントの中ではユーザーごとに SessionStore を持ち、初回アクセス
+    時にそのユーザーの Session を作る。Session は make_session
+    （ユーザー名と部屋名から Session を作る関数）で作るため、データの
+    置き場はユーザーごとに分かれる。
     """
 
-    def __init__(self, initial: Session,
-                 session_factory: Callable[[str], Session] | None = None,
-                 ) -> None:
-        self._cfg = initial.cfg
-        self._model = initial.model
-        self.default_tenant = initial.tenant
-        self._stores: dict[str, SessionStore] = {
-            self.default_tenant: SessionStore(initial, session_factory),
-        }
+    def __init__(self, tenant: str, tenant_data_dir: Path,
+                 default_user: str,
+                 make_session: Callable[[str, str], Session],
+                 initial: SessionStore | None = None) -> None:
+        self.tenant = tenant
+        self.default_user = default_user
+        self._tenant_data_dir = tenant_data_dir
+        self._make_session = make_session
+        self._stores: dict[str, SessionStore] = {}
+        if initial is not None:
+            self._stores[initial.user] = initial
         self._lock = threading.Lock()
 
-    def _make_session(self, tenant: str, session_id: str) -> Session:
-        cfg = replace(self._cfg, tenant=normalize_tenant_name(tenant))
-        return Session(cfg, self._model, session_id)
-
-    def store(self, tenant: str | None) -> SessionStore:
-        name = normalize_tenant_name(tenant)
+    def store(self, user: str | None) -> SessionStore:
+        name = normalize_user_name(user)
         with self._lock:
             store = self._stores.get(name)
             if store is None:
@@ -505,9 +568,67 @@ class TenantStore:
             return store
 
     def names(self) -> list[str]:
-        """開いているテナントと、保存済みテナントの一覧。"""
+        """開いているユーザーと、保存済みユーザーの一覧。"""
         with self._lock:
             loaded = list(self._stores)
+        return sorted(set(loaded) | set(list_user_names(self._tenant_data_dir)))
+
+
+class TenantStore:
+    """テナント → UserStore の対応を管理する（Web UI のテナント切替用）。
+
+    サーバーはテナントごとに UserStore を持ち、その中ではユーザー
+    ごとに SessionStore を持つ。初回アクセス時にその組み合わせの
+    Session を作る。新しい組み合わせの Session は、起動時の設定
+    （プロバイダやモデルなど）を引き継ぎ、テナントとユーザーだけを
+    差し替えた Config で作るため、データの置き場は組み合わせごとに
+    分かれる。session_factory は起動時テナント・起動時ユーザーの
+    部屋の作り方だけを差し替える（テスト用）。
+    """
+
+    def __init__(self, initial: Session,
+                 session_factory: Callable[[str], Session] | None = None,
+                 ) -> None:
+        self._cfg = initial.cfg
+        self._model = initial.model
+        self.default_tenant = initial.tenant
+        self.default_user = initial.user
+        seeded = UserStore(
+            self.default_tenant, initial.cfg.tenant_data_dir,
+            self.default_user, self._session_maker(self.default_tenant),
+            initial=SessionStore(initial, session_factory))
+        self._user_stores: dict[str, UserStore] = {self.default_tenant: seeded}
+        self._lock = threading.Lock()
+
+    def _session_maker(self, tenant: str) -> Callable[[str, str], Session]:
+        def make(user: str, session_id: str) -> Session:
+            cfg = replace(self._cfg,
+                          tenant=normalize_tenant_name(tenant),
+                          user=normalize_user_name(user))
+            return Session(cfg, self._model, session_id)
+        return make
+
+    def _make_session(self, tenant: str, user: str, session_id: str) -> Session:
+        return self._session_maker(tenant)(user, session_id)
+
+    def users(self, tenant: str | None) -> UserStore:
+        name = normalize_tenant_name(tenant)
+        with self._lock:
+            store = self._user_stores.get(name)
+            if store is None:
+                cfg = replace(self._cfg, tenant=name)
+                store = UserStore(name, cfg.tenant_data_dir,
+                                  self.default_user, self._session_maker(name))
+                self._user_stores[name] = store
+            return store
+
+    def store(self, tenant: str | None, user: str | None = None) -> SessionStore:
+        return self.users(tenant).store(user)
+
+    def names(self) -> list[str]:
+        """開いているテナントと、保存済みテナントの一覧。"""
+        with self._lock:
+            loaded = list(self._user_stores)
         return sorted(set(loaded) | set(list_tenant_names(self._cfg.data_dir)))
 
 
@@ -538,11 +659,17 @@ def make_handler(tenants: TenantStore, page: str):
             elif split.path == "/api/tenants":
                 self._send_json(200, {"tenants": tenants.names(),
                                       "current": tenants.default_tenant})
+            elif split.path == "/api/users":
+                users = tenants.users(_first(query.get("tenant")))
+                self._send_json(200, {"users": users.names(),
+                                      "current": users.default_user})
             elif split.path == "/api/sessions":
-                store = tenants.store(_first(query.get("tenant")))
+                store = tenants.store(_first(query.get("tenant")),
+                                      _first(query.get("user")))
                 self._send_json(200, {"sessions": store.names()})
             elif split.path == "/api/history":
-                store = tenants.store(_first(query.get("tenant")))
+                store = tenants.store(_first(query.get("tenant")),
+                                      _first(query.get("user")))
                 session = store.get(_first(query.get("session")))
                 messages = []
                 for m in session.history:
@@ -575,7 +702,8 @@ def make_handler(tenants: TenantStore, page: str):
             except (ValueError, KeyError, TypeError):
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
-            session = tenants.store(data.get("tenant")).get(data.get("session"))
+            session = tenants.store(
+                data.get("tenant"), data.get("user")).get(data.get("session"))
             try:
                 with lock:  # Session はスレッド安全ではないので直列化する
                     reply = session.say(message, attachments, quote=quote)
@@ -599,8 +727,8 @@ def build_server(session: Session, host: str = "127.0.0.1",
 
     session_factory を渡すと、ページから新しい部屋を開いたときに
     その factory で Session を作る。省略時は session と同じ設定・
-    モデルを共有する。テナントは TenantStore がテナントごとに
-    SessionStore を持ち、ページからの切り替えに応じる。
+    モデルを共有する。テナントとユーザーは TenantStore が組み合わせ
+    ごとに SessionStore を持ち、ページからの切り替えに応じる。
     """
     page = render_page(session.cfg.provider)
     tenants = TenantStore(session, session_factory)

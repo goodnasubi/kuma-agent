@@ -11,6 +11,9 @@ _MAX_SESSION_ID_LEN = 64
 DEFAULT_TENANT = "default"
 TENANTS_DIRNAME = "tenants"
 
+DEFAULT_USER = "default"
+USERS_DIRNAME = "users"
+
 
 def _normalize_name(raw: str | None, fallback: str) -> str:
     """名前をファイル名に安全な形へ正規化する（共通処理）。"""
@@ -52,6 +55,37 @@ def tenant_dir(data_dir: Path, tenant: str | None) -> Path:
     if name == DEFAULT_TENANT:
         return data_dir
     return data_dir / TENANTS_DIRNAME / name
+
+
+def normalize_user_name(raw: str | None) -> str:
+    """ユーザー名をファイル名に安全な形へ正規化する。
+
+    テナント名と同じ正規化を通し、空になった場合は既定の
+    "default" にする。
+    """
+    return _normalize_name(raw, DEFAULT_USER)
+
+
+def user_dir(tenant_data_dir: Path, user: str | None) -> Path:
+    """テナントの置き場の中での、ユーザーの実効データ置き場を返す。
+
+    既定ユーザー（"default"）は後方互換のためテナントの置き場を
+    そのまま使い、それ以外は
+    <テナント置き場> / "users" / <ユーザー名> を使う。
+    """
+    name = normalize_user_name(user)
+    if name == DEFAULT_USER:
+        return tenant_data_dir
+    return tenant_data_dir / USERS_DIRNAME / name
+
+
+def list_user_names(tenant_data_dir: Path) -> list[str]:
+    """ユーザー名の一覧（既定ユーザー＋保存済みユーザーのディレクトリ名）。"""
+    names = [DEFAULT_USER]
+    root = tenant_data_dir / USERS_DIRNAME
+    if root.is_dir():
+        names += sorted(p.name for p in root.iterdir() if p.is_dir())
+    return names
 
 
 def list_tenant_names(data_dir: Path) -> list[str]:

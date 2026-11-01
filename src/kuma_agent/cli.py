@@ -19,6 +19,8 @@ def main(argv: list[str] | None = None) -> int:
                              help="会話の部屋（セッション）の名前（既定: main）")
     chat_parser.add_argument("--tenant", default=None,
                              help="テナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
+    chat_parser.add_argument("--user", default=None,
+                             help="ユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     web_parser = sub.add_parser("web", help="Web UI を起動する")
     web_parser.add_argument("--host", default="127.0.0.1",
                             help="バインドするホスト（既定: 127.0.0.1）")
@@ -26,11 +28,15 @@ def main(argv: list[str] | None = None) -> int:
                             help="待ち受けるポート（既定: 8765）")
     web_parser.add_argument("--tenant", default=None,
                             help="起動時のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
+    web_parser.add_argument("--user", default=None,
+                            help="起動時のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     args = parser.parse_args(argv)
 
     cfg = Config()
     if args.tenant is not None:  # CLI 引数は環境変数より優先する
         cfg.tenant = args.tenant
+    if args.user is not None:
+        cfg.user = args.user
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)
