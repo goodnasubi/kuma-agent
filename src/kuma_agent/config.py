@@ -9,8 +9,8 @@ from pathlib import Path
 @dataclass
 class Config:
     data_dir: Path = field(default_factory=lambda: Path(os.environ.get("KUMA_DATA_DIR", "data")))
-    model: str = "muse-wonder"
-    model_api_key: str = field(default_factory=lambda: os.environ.get("META_MODEL_API_KEY", ""))
+    model: str = "muse-wonder-1.0"
+    model_api_key: str = field(default_factory=lambda: os.environ.get("META_MODEL_API_KEY") or os.environ.get("MODEL_API_KEY", ""))
     max_tool_rounds: int = 16
 
     @property

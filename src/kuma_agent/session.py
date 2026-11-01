@@ -34,5 +34,5 @@ class Session:
                 return reply.content
             for call in reply.tool_calls:
                 result = self.tools.call(call["name"], call.get("args", {}))
-                self.history.append(Message("tool", result, tool_name=call["name"]))
+                self.history.append(Message("tool", result, tool_call_id=call.get("id")))
         return "（道具の呼び出しが上限に達しました）"

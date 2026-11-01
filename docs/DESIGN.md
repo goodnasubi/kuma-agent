@@ -62,9 +62,16 @@ data/（実行時に作る、リポジトリには入れない）
 - API キーは環境変数からのみ読む（`META_MODEL_API_KEY`）
 - 道具の実行範囲は作業ディレクトリと許可リストに制限する
 
+## Meta Model API の使い方（決定済み）
+
+- OpenAI 互換の Chat Completions 形式（`https://api.meta.ai/v1`、
+  モデル `muse-wonder-1.0`、Bearer 認証）
+- 人格などの誘導は `developer` ロールで渡す
+- 関数ツールは OpenAI 形式。`stop`・`logit_bias`・
+  `reasoning_effort="none"` は送らない（400 になる）
+
 ## 未決事項
 
-- Meta Model API の関数呼び出し形式への対応詳細
 - 記憶の抽出（会話 → MEMORY.md）をいつ、どのモデルでやるか
 - 音声入出力、メッセージングアプリ（WhatsApp 等）への接続
 - 複数セッション・先回り通知（朝の予定連絡など）の仕組み
