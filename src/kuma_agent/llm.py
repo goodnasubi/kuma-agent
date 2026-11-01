@@ -99,7 +99,7 @@ class AnthropicClient:
     """Anthropic Messages API（Claude）。"""
 
     BASE_URL = "https://api.anthropic.com"
-    DEFAULT_MODEL = "claude-sonnet-4-5"
+    DEFAULT_MODEL = "claude-sonnet-5-5"
     VERSION = "2023-06-01"
 
     def __init__(self, api_key: str, model: str | None = None,
@@ -173,7 +173,7 @@ class GeminiClient:
     """Google Gemini API（generateContent）。道具は名前で対応付ける。"""
 
     BASE_URL = "https://generativelanguage.googleapis.com"
-    DEFAULT_MODEL = "gemini-2.5-flash"
+    DEFAULT_MODEL = "gemini-3.8-flash"
 
     def __init__(self, api_key: str, model: str | None = None,
                  base_url: str | None = None, transport=None) -> None:

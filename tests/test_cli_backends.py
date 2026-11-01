@@ -46,3 +46,30 @@ def test_missing_cli_is_clear_error(tmp_path: Path):
 def test_factory_cli_providers_need_no_key():
     assert isinstance(create_client("claude-code"), ClaudeCodeClient)
     assert isinstance(create_client("gemini-cli"), GeminiCliClient)
+
+
+def test_codex_backend_args(tmp_path: Path):
+    from kuma_agent.agent_cli import CodexClient
+
+    exe = _fake_cli(tmp_path, "fake-codex", "codex-done")
+    client = CodexClient(command=str(exe), work_dir=tmp_path)
+    reply = client.chat("人格", [Message("user", "直して")], tools=[])
+    assert reply.content == "codex-done"
+    args = (tmp_path / "args.txt").read_text(encoding="utf-8")
+    assert "exec" in args and "workspace-write" in args and "直して" in args
+
+
+def test_cli_default_models():
+    from kuma_agent.agent_cli import ClaudeCodeClient, GeminiCliClient
+
+    cc = ClaudeCodeClient(command="claude", work_dir=Path("."))
+    assert "--model" in cc.build_args("x")
+    assert "claude-opus-5-5" in cc.build_args("x")
+    gem = GeminiCliClient(command="gemini", work_dir=Path("."))
+    assert "gemini-4-argon" in gem.build_args("x")
+
+
+def test_factory_codex():
+    from kuma_agent.agent_cli import CodexClient
+
+    assert isinstance(create_client("codex"), CodexClient)

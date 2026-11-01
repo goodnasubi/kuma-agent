@@ -77,6 +77,11 @@ CLI 系（相手側が道具ループを持つ。文脈をプロンプトで渡�
 ディレクトリでヘッドレス実行する。認証は各 CLI のログインを使う）:
 - `claude-code`: Claude Code CLI（`claude -p`）
 - `gemini-cli`: Gemini CLI（`gemini -p`）
+- `codex`: OpenAI Codex CLI（`codex exec`、workspace-write サンドボックス）
+
+既定モデルは 2026-11 時点の最新に合わせている（Claude Sonnet 5.5 /
+Opus 5.5、Gemini 3.8 Flash / 4 Argon）。モデルは移り変わりが速いので、
+既定値は定期的に見直す前提で各クライアントに明記する。
 
 ## Meta Model API の使い方
 

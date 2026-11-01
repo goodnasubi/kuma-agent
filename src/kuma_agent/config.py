@@ -15,7 +15,7 @@ class Config:
 
     @property
     def is_cli_provider(self) -> bool:
-        return self.provider.endswith("-cli") or self.provider == "claude-code"
+        return self.provider in ("claude-code", "gemini-cli", "codex")
 
     def resolve_api_key(self) -> str:
         """プロバイダに応じた環境変数から API キーを引く。"""

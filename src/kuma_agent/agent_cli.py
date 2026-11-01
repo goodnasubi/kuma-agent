@@ -69,12 +69,13 @@ class ClaudeCodeClient(CliAgentClient):
 
     COMMAND = "claude"
     PROVIDER = "claude-code"
-    DEFAULT_MODEL = None  # CLI 側の既定に任せる
+    DEFAULT_MODEL = "claude-opus-5-5"  # Claude Code の現在の既定（2026-11 時点）
 
     def build_args(self, prompt: str) -> list[str]:
         args = [self.command, "-p", prompt]
-        if self.model:
-            args += ["--model", self.model]
+        model = self.model or self.DEFAULT_MODEL
+        if model:
+            args += ["--model", model]
         return args
 
 
@@ -83,20 +84,47 @@ class GeminiCliClient(CliAgentClient):
 
     COMMAND = "gemini"
     PROVIDER = "gemini-cli"
-    DEFAULT_MODEL = None
+    DEFAULT_MODEL = "gemini-4-argon"  # 最新の旗艦（2026-11 時点）
 
     def build_args(self, prompt: str) -> list[str]:
         args = [self.command, "-p", prompt]
-        if self.model:
-            args += ["--model", self.model]
+        model = self.model or self.DEFAULT_MODEL
+        if model:
+            args += ["--model", model]
         return args
 
 
-CLI_PROVIDERS = ("claude-code", "gemini-cli")
+class CodexClient(CliAgentClient):
+    """OpenAI Codex CLI（`codex exec` ヘッドレス実行）。
+
+    exec は既定で読み取り専用サンドボックス＋承認なしのため、
+    作業できるよう workspace-write と承認ポリシー never を明示する
+    （--full-auto は CLI 0.151 で廃止された）。
+    """
+
+    COMMAND = "codex"
+    PROVIDER = "codex"
+    DEFAULT_MODEL = None  # CLI 側の推奨既定（GPT-6 系）に任せる
+
+    def build_args(self, prompt: str) -> list[str]:
+        args = [
+            self.command, "exec",
+            "--sandbox", "workspace-write",
+            "-c", 'approval_policy="never"',
+            "--skip-git-repo-check",
+        ]
+        if self.model:
+            args += ["--model", self.model]
+        args.append(prompt)
+        return args
+
+
+CLI_PROVIDERS = ("claude-code", "gemini-cli", "codex")
 
 _CLI_CLIENTS = {
     "claude-code": ClaudeCodeClient,
     "gemini-cli": GeminiCliClient,
+    "codex": CodexClient,
 }
 
 

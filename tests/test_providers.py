@@ -33,7 +33,7 @@ def test_claude_request_and_tool_use_parsing():
     assert reply.content == "調べます"
     assert reply.tool_calls == [{"id": "toolu_1", "name": "now", "args": {}}]
     assert seen["system"] == "人格"
-    assert seen["model"] == "claude-sonnet-4-5"
+    assert seen["model"] == "claude-sonnet-5-5"
     assert seen["tools"][0]["input_schema"] == {"type": "object", "properties": {}}
 
 
@@ -73,7 +73,7 @@ def test_gemini_request_and_function_call_parsing():
               "parameters": {"type": "object", "properties": {}}}]
     reply = client.chat("人格", [Message("user", "今何時？")], tools)
     assert reply.tool_calls[0]["name"] == "now"
-    assert seen["path"].endswith("/v1beta/models/gemini-2.5-flash:generateContent")
+    assert seen["path"].endswith("/v1beta/models/gemini-3.8-flash:generateContent")
     assert seen["systemInstruction"]["parts"][0]["text"] == "人格"
     assert seen["tools"][0]["functionDeclarations"][0]["name"] == "now"
 
