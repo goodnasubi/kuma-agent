@@ -63,11 +63,13 @@ webp）と文書（PDF、.txt / .md / .csv / .json など）で、1 件の
 
 ## 画面イメージ
 
-Web UI（`kuma-agent web`）:
+どちらの画面からも、画像や文書（PDF・テキスト）を添付して送れます。
+
+Web UI（`kuma-agent web`）。入力欄の「添付」ボタンからファイルを選べます:
 
 ![Web UI の画面](assets/screenshot-web.png)
 
-TUI（`kuma-agent chat --tui`）:
+TUI（`kuma-agent chat --tui`）。`/attach <パス>` で添付します:
 
 ![TUI の画面](assets/screenshot-tui.png)
 
