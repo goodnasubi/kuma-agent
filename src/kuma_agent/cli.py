@@ -5,33 +5,29 @@ import argparse
 import sys
 
 from .config import Config
-from .github import GitHub
 from .llm import ModelClient
-from .worker import pick_issue, work_on_issue
+from .session import Session
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kuma-agent")
     sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run", help="Issue を処理する")
-    run.add_argument("--repo", required=True, help="owner/name")
-    run.add_argument("--once", action="store_true", help="1 件だけ処理して終了")
-    run.add_argument("--verify", action="append", default=[], help="検証コマンド（複数可）")
+    sub.add_parser("chat", help="対話を開始する")
     args = parser.parse_args(argv)
 
-    cfg = Config(repo=args.repo, verify_commands=args.verify)
-    if not cfg.github_token:
-        print("GITHUB_TOKEN が未設定です", file=sys.stderr)
+    cfg = Config()
+    if not cfg.model_api_key:
+        print("META_MODEL_API_KEY が未設定です", file=sys.stderr)
         return 2
-
-    gh = GitHub(cfg.github_token)
-    model = ModelClient(cfg.model_api_key, cfg.model)
-    issue = pick_issue(gh.list_open_issues(cfg.repo), cfg)
-    if issue is None:
-        print("処理できる Issue はありません")
-        return 0
-    url = work_on_issue(cfg, gh, model, issue)
-    print(f"PR: {url}")
+    session = Session(cfg, ModelClient(cfg.model_api_key, cfg.model))
+    print("クマです。話しかけてください（終了は Ctrl-D）")
+    try:
+        while True:
+            text = input("> ").strip()
+            if text:
+                print(session.say(text))
+    except EOFError:
+        print()
     return 0
 
 

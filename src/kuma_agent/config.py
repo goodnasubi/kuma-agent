@@ -3,27 +3,20 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
 class Config:
-    repo: str  # "owner/name"
-    agent_name: str = "kuma"
-    lock_label: str = "agent:kuma"
-    blocked_label: str = "blocked"
-    needs_human_label: str = "needs-human"
-    poll_interval_sec: int = 300
-    max_fix_attempts: int = 3
-    verify_commands: list[str] = field(default_factory=list)
-    work_dir: str = "work"
+    data_dir: Path = field(default_factory=lambda: Path(os.environ.get("KUMA_DATA_DIR", "data")))
     model: str = "muse-wonder"
-    github_token: str = field(default_factory=lambda: os.environ.get("GITHUB_TOKEN", ""))
     model_api_key: str = field(default_factory=lambda: os.environ.get("META_MODEL_API_KEY", ""))
+    max_tool_rounds: int = 16
 
     @property
-    def owner(self) -> str:
-        return self.repo.split("/", 1)[0]
+    def memory_file(self) -> Path:
+        return self.data_dir / "MEMORY.md"
 
     @property
-    def name(self) -> str:
-        return self.repo.split("/", 1)[1]
+    def conversations_dir(self) -> Path:
+        return self.data_dir / "conversations"

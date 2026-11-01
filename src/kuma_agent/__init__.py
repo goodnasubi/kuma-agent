@@ -1,3 +1,3 @@
-"""kuma-agent: Muse を頭脳にした自律開発エージェント。"""
+"""kuma-agent: Muse を頭脳にした対話型の相棒エージェント。"""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

@@ -1,17 +1,18 @@
-"""Meta Model API（Muse）のクライアントとツール実行ループ。
+"""Meta Model API（Muse）のクライアント。
 
-TODO: 関数呼び出しの形式は Meta Model API の仕様に合わせて実装する。
+TODO: 対話と関数呼び出しの形式は Meta Model API の仕様に合わせて実装する。
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
-class ToolResult:
-    name: str
-    output: str
-    is_error: bool = False
+class Message:
+    role: str  # "user" | "assistant" | "tool"
+    content: str
+    tool_calls: list[dict] = field(default_factory=list)
+    tool_name: str | None = None
 
 
 class ModelClient:
@@ -19,7 +20,6 @@ class ModelClient:
         self.api_key = api_key
         self.model = model
 
-    def run_task(self, system_prompt: str, user_prompt: str, work_dir: str) -> str:
-        """作業ディレクトリ内でツールを実行しながらタスクを進め、
-        最終報告のテキストを返す。未実装（設計フェーズ）。"""
-        raise NotImplementedError("Meta Model API のツール実行ループは未実装")
+    def chat(self, system_prompt: str, messages: list[Message], tools: list[dict]) -> Message:
+        """1 回の応答（道具呼び出しを含む場合がある）を返す。未実装。"""
+        raise NotImplementedError("Meta Model API の対話呼び出しは未実装")
