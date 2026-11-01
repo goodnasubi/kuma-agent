@@ -6,6 +6,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def _env_int(name: str, default: int) -> int:
+    """環境変数を整数として読む。不正な値なら既定値にする。"""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 @dataclass
 class Config:
     data_dir: Path = field(default_factory=lambda: Path(os.environ.get("KUMA_DATA_DIR", "data")))
@@ -31,6 +42,12 @@ class Config:
                 return os.environ[name]
         return ""
     max_tool_rounds: int = 16
+    # 会話の圧縮（コンパクション）: user/assistant の発話数が compact_after を
+    # 超えたら古い発話を要約に置き換える。0 で無効。直近 compact_keep 件は残す
+    compact_after: int = field(
+        default_factory=lambda: _env_int("KUMA_COMPACT_AFTER_MESSAGES", 40))
+    compact_keep: int = field(
+        default_factory=lambda: _env_int("KUMA_COMPACT_KEEP_MESSAGES", 10))
 
     @property
     def memory_file(self) -> Path:

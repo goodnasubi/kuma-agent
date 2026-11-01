@@ -12,8 +12,11 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Callable
+from urllib.parse import parse_qs, urlsplit
 
 from .llm import MAX_ATTACHMENT_BYTES, Attachment, guess_media_type
+from .memory import list_session_ids, normalize_session_id
 from .session import Session
 
 # ブランド色（README のイメージカラー）
@@ -49,11 +52,17 @@ _PAGE_TEMPLATE = """\
   body { margin: 0; font-family: sans-serif; background: __CREAM__; color: __COCOA__;
          display: flex; flex-direction: column; height: 100dvh; }
   header { background: __COCOA__; color: __CREAM__; display: flex; align-items: center;
-           gap: 12px; padding: 8px 16px; }
+           flex-wrap: wrap; gap: 12px; padding: 8px 16px; }
   header .avatar { width: 44px; height: 44px; flex: none; }
   header .avatar svg { width: 100%; height: 100%; display: block; }
   header h1 { font-size: 18px; margin: 0; }
   header .provider { font-size: 12px; opacity: .8; }
+  .sessions { display: flex; gap: 6px; align-items: center; margin-left: auto;
+              flex-wrap: wrap; font-size: 13px; }
+  .sessions select, .sessions input { padding: 6px; font-size: 13px;
+           border-radius: 6px; border: 1px solid __COCOA__; }
+  .sessions button { padding: 6px 12px; font-size: 13px; background: #fff;
+           color: __COCOA__; border: 1px solid __COCOA__; }
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex;
          flex-direction: column; gap: 10px; }
   .msg { max-width: 80%; padding: 10px 14px; border-radius: 14px;
@@ -84,6 +93,12 @@ _PAGE_TEMPLATE = """\
     <h1>クマ</h1>
     <div class="provider">provider: __PROVIDER__</div>
   </div>
+  <div class="sessions">
+    <label for="sessionSelect">部屋</label>
+    <select id="sessionSelect"></select>
+    <input id="newSession" placeholder="新しい部屋" size="10">
+    <button id="createSession" type="button">作成</button>
+  </div>
 </header>
 <div id="log"></div>
 <div id="dropHint">ファイルを離すと添付します</div>
@@ -102,7 +117,11 @@ const send = document.getElementById('send');
 const attachBtn = document.getElementById('attach');
 const fileInput = document.getElementById('file');
 const filesLabel = document.getElementById('files');
+const sessionSelect = document.getElementById('sessionSelect');
+const newSessionInput = document.getElementById('newSession');
+const createSessionBtn = document.getElementById('createSession');
 let pendingFiles = [];
+let currentSession = 'main';
 
 function addMsg(role, text) {
   const div = document.createElement('div');
@@ -120,7 +139,7 @@ function describe(text, names) {
 
 async function loadHistory() {
   try {
-    const res = await fetch('/api/history');
+    const res = await fetch('/api/history?session=' + encodeURIComponent(currentSession));
     const data = await res.json();
     for (const m of data.messages) {
       if ((m.role === 'user' || m.role === 'assistant') && (m.content || m.attachments)) {
@@ -129,6 +148,51 @@ async function loadHistory() {
     }
   } catch (e) { /* 履歴が取れなくても会話は続けられる */ }
 }
+
+// 部屋（セッション）の切り替え。一覧はサーバーから取り、
+// 選んだ部屋の履歴だけを表示する
+function applySession(name) {
+  currentSession = name;
+  sessionSelect.value = name;
+  log.innerHTML = '';
+  loadHistory();
+}
+
+async function loadSessions() {
+  try {
+    const res = await fetch('/api/sessions');
+    const data = await res.json();
+    sessionSelect.innerHTML = '';
+    for (const name of data.sessions) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      sessionSelect.appendChild(opt);
+    }
+    if (!data.sessions.includes(currentSession)) {
+      currentSession = data.sessions[0] || 'main';
+    }
+    sessionSelect.value = currentSession;
+  } catch (e) { /* 一覧が取れなくても既定の部屋で続けられる */ }
+}
+
+sessionSelect.addEventListener('change', () => {
+  if (sessionSelect.value && sessionSelect.value !== currentSession) {
+    applySession(sessionSelect.value);
+  }
+});
+createSessionBtn.addEventListener('click', () => {
+  const name = newSessionInput.value.trim();
+  if (!name) return;
+  newSessionInput.value = '';
+  if (![...sessionSelect.options].some((o) => o.value === name)) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    sessionSelect.appendChild(opt);
+  }
+  applySession(name);
+});
 
 function setPending(files) {
   pendingFiles = Array.from(files);
@@ -184,7 +248,7 @@ form.addEventListener('submit', async (ev) => {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text, attachments}),
+      body: JSON.stringify({message: text, attachments, session: currentSession}),
     });
     const data = await res.json();
     addMsg('assistant', data.reply || ('エラー: ' + (data.error || res.status)));
@@ -196,6 +260,7 @@ form.addEventListener('submit', async (ev) => {
   }
 });
 
+loadSessions();
 loadHistory();
 input.focus();
 </script>
@@ -243,8 +308,39 @@ def parse_attachments(raw: object) -> list[Attachment]:
     return attachments
 
 
-def make_handler(session: Session, page: str):
-    """Session を受け取るリクエストハンドラクラスを作る。"""
+class SessionStore:
+    """名前 → Session の対応を管理する（Web UI の部屋の切り替え用）。
+
+    初回アクセス時に factory で Session を作る。factory を省略すると
+    最初の Session と同じ設定・モデルを共有して新しい部屋を作る。
+    """
+
+    def __init__(self, initial: Session,
+                 factory: Callable[[str], Session] | None = None) -> None:
+        self._sessions: dict[str, Session] = {initial.session_id: initial}
+        self._factory = factory or (
+            lambda name: Session(initial.cfg, initial.model, name))
+        self._data_dir = initial.cfg.data_dir
+        self._lock = threading.Lock()
+
+    def get(self, name: str | None) -> Session:
+        session_id = normalize_session_id(name)
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                session = self._factory(session_id)
+                self._sessions[session_id] = session
+            return session
+
+    def names(self) -> list[str]:
+        """開いている部屋と、記録が残っている部屋の一覧。"""
+        with self._lock:
+            loaded = list(self._sessions)
+        return sorted(set(loaded) | set(list_session_ids(self._data_dir)))
+
+
+def make_handler(store: SessionStore, page: str):
+    """SessionStore を受け取るリクエストハンドラクラスを作る。"""
     lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
@@ -263,9 +359,14 @@ def make_handler(session: Session, page: str):
                        "application/json; charset=utf-8")
 
         def do_GET(self) -> None:
-            if self.path == "/":
+            split = urlsplit(self.path)
+            query = parse_qs(split.query)
+            if split.path == "/":
                 self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
-            elif self.path == "/api/history":
+            elif split.path == "/api/sessions":
+                self._send_json(200, {"sessions": store.names()})
+            elif split.path == "/api/history":
+                session = store.get(_first(query.get("session")))
                 messages = []
                 for m in session.history:
                     entry: dict = {"role": m.role, "content": m.content}
@@ -277,7 +378,7 @@ def make_handler(session: Session, page: str):
                 self._send_json(404, {"error": "not found"})
 
         def do_POST(self) -> None:
-            if self.path != "/api/chat":
+            if urlsplit(self.path).path != "/api/chat":
                 self._send_json(404, {"error": "not found"})
                 return
             try:
@@ -290,6 +391,7 @@ def make_handler(session: Session, page: str):
             except (ValueError, KeyError, TypeError):
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
+            session = store.get(data.get("session"))
             try:
                 with lock:  # Session はスレッド安全ではないので直列化する
                     reply = session.say(message, attachments)
@@ -301,11 +403,23 @@ def make_handler(session: Session, page: str):
     return Handler
 
 
+def _first(values: list[str] | None) -> str | None:
+    return values[0] if values else None
+
+
 def build_server(session: Session, host: str = "127.0.0.1",
-                 port: int = 8765) -> ThreadingHTTPServer:
-    """Session を差し込んだ HTTP サーバーを作る（テストからも使う）。"""
+                 port: int = 8765,
+                 session_factory: Callable[[str], Session] | None = None,
+                 ) -> ThreadingHTTPServer:
+    """Session を差し込んだ HTTP サーバーを作る（テストからも使う）。
+
+    session_factory を渡すと、ページから新しい部屋を開いたときに
+    その factory で Session を作る。省略時は session と同じ設定・
+    モデルを共有する。
+    """
     page = render_page(session.cfg.provider)
-    return ThreadingHTTPServer((host, port), make_handler(session, page))
+    store = SessionStore(session, session_factory)
+    return ThreadingHTTPServer((host, port), make_handler(store, page))
 
 
 def serve(session: Session, host: str = "127.0.0.1", port: int = 8765) -> None:

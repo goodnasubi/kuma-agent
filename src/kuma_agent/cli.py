@@ -15,6 +15,8 @@ def main(argv: list[str] | None = None) -> int:
     chat_parser = sub.add_parser("chat", help="対話を開始する")
     chat_parser.add_argument("--tui", action="store_true",
                              help="curses のターミナル UI で対話する")
+    chat_parser.add_argument("--session", default="main",
+                             help="会話の部屋（セッション）の名前（既定: main）")
     web_parser = sub.add_parser("web", help="Web UI を起動する")
     web_parser.add_argument("--host", default="127.0.0.1",
                             help="バインドするホスト（既定: 127.0.0.1）")
@@ -27,13 +29,14 @@ def main(argv: list[str] | None = None) -> int:
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)
         return 2
-    session = Session(cfg, create_client(cfg.provider, api_key, cfg.model))
+    client = create_client(cfg.provider, api_key, cfg.model)
 
     if args.command == "web":
         from .web import serve
 
-        serve(session, host=args.host, port=args.port)
+        serve(Session(cfg, client), host=args.host, port=args.port)
         return 0
+    session = Session(cfg, client, session_id=args.session)
     if args.tui:
         from .tui import run_tui
 
