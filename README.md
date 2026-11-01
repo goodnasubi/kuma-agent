@@ -65,7 +65,11 @@ webp）と文書（PDF、.txt / .md / .csv / .json など）で、1 件の
 
 どちらの画面からも、画像や文書（PDF・テキスト）を添付して送れます。
 
-Web UI（`kuma-agent web`）。入力欄の「添付」ボタンからファイルを選べます:
+Web UI の操作動画（ドラッグ＆ドロップで写真を添付しています）:
+
+![Web UI の操作動画](assets/demo-web.gif)
+
+Web UI（`kuma-agent web`）。入力欄の「添付」ボタンか、画面へのドラッグ＆ドロップでファイルを選べます:
 
 ![Web UI の画面](assets/screenshot-web.png)
 
