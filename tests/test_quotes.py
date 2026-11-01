@@ -91,7 +91,7 @@ class _RecordingModel:
 
 def test_session_records_and_restores_quote(tmp_path: Path):
     model = _RecordingModel()
-    cfg = Config(data_dir=tmp_path)
+    cfg = Config(data_dir=tmp_path, mode="wall")  # 名前付き部屋の検証
     session = Session(cfg, model, session_id="room")
     session.say("その続き", quote="前の発話")
 

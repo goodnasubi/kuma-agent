@@ -112,12 +112,13 @@ def test_tenants_are_isolated(tmp_path: Path):
     assert not (dir_b / "MEMORY.md").exists()
     assert not (tmp_path / "MEMORY.md").exists()  # 既定テナント側にも漏れない
 
-    # 部屋の記録: 同じ部屋名でもテナントが違えば混ざらない
+    # 部屋の記録: テナントが違えば混ざらない（既定の寄り添いモードでは
+    # 部屋は main に固定される）
     a.say("Aの相談")
     b_sessions = Session(cfg_b, _EchoModel(), "room")
     assert all("Aの相談" not in m.content for m in b_sessions.history)
-    assert (dir_a / "conversations" / "room.jsonl").exists()
-    assert not (dir_b / "conversations" / "room.jsonl").exists()
+    assert (dir_a / "conversations" / "main.jsonl").exists()
+    assert not (dir_b / "conversations" / "main.jsonl").exists()
     assert not (tmp_path / "conversations").exists()
 
     # 台帳: A の用事は B の台帳・プロンプトに見えない
@@ -127,8 +128,8 @@ def test_tenants_are_isolated(tmp_path: Path):
     assert "Aの用事" not in b3.system_prompt
     a3 = Session(cfg_a, _EchoModel(), "room")
     assert "Aの用事" in a3.system_prompt
-    # 台帳は部屋ごと: 部屋 room の台帳は tasks/room.json に置かれる
-    assert (dir_a / "tasks" / "room.json").exists()
+    # 台帳はユーザーごとに 1 冊: A の台帳は tasks.json に置かれる
+    assert (dir_a / "tasks.json").exists()
     assert not (dir_b / "tasks.json").exists()
     assert not (dir_b / "tasks").exists()
 
@@ -140,6 +141,7 @@ def test_cli_tenant_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
     class _FakeSession:
         def __init__(self, cfg, model, session_id="main"):
+            self.session_id = session_id
             captured["tenant"] = cfg.tenant
             captured["tenant_data_dir"] = cfg.tenant_data_dir
 
@@ -166,6 +168,7 @@ def test_cli_tenant_flag_overrides_env(monkeypatch: pytest.MonkeyPatch,
 
     class _FakeSession:
         def __init__(self, cfg, model, session_id="main"):
+            self.session_id = session_id
             captured["tenant"] = cfg.tenant
 
         def say(self, text):

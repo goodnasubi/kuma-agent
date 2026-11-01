@@ -10,22 +10,17 @@
 - 圧縮: 履歴が長くなったら古い発話をモデル自身に要約させて置き換える
 - 長期記憶: セッションを越える事実は Memory（MEMORY.md）が持つ
 
-部屋の中で並行する用事は台帳（TaskBoard）が持ち、進行中の用事は
+会話の中で並行する用事は台帳（TaskBoard）が持ち、進行中の用事は
 対話の冒頭でシステムプロンプトに注入して思い出せるようにする。
-台帳は部屋ごとに持つ（階層は テナント＞ユーザー＞部屋＞台帳）:
-その部屋の台帳だけを読み書きし、注入もその部屋の用事だけにする。
-台帳ファイルは、既定の部屋（main）はユーザー置き場直下の
-tasks.json、それ以外の部屋は tasks/<部屋名>.json に置く
-（memory.tasks_file_for）。
+台帳は用事の持ち主であるユーザーごとに 1 冊だけを持ち（階層は
+テナント＞ユーザー＞台帳）、ファイルはユーザー置き場直下の
+tasks.json に置く。
 
-部屋と台帳のどちらを使うかはモード（Config.mode）で選べる:
-- both（併用、既定）: 部屋で大きく分け、各部屋の中の用事は
-  その部屋専用の台帳で分ける
-- wall（部屋モード）: 台帳は無効。道具に台帳系を登録せず、
-  進行中の用事の注入もしない
-- ledger（台帳モード）: 部屋は実質 1 つ（main）に固定し、用事は
-  台帳で分ける。セッション ID の指定は無視され、台帳は従来の
-  tasks.json を使う形になる
+会話の分け方はモード（Config.mode）で選べる:
+- ledger（寄り添いモード、既定）: 部屋は実質 1 つ（main）に固定し、
+  進行中の用事はすべて注入する。セッション ID の指定は無視される
+- wall（スレッドモード）: 会話を部屋（スレッド）ごとに分ける。
+  台帳は無効で、道具に台帳系を登録せず、進行中の用事の注入もしない
 """
 from __future__ import annotations
 
@@ -40,7 +35,6 @@ from .memory import (
     normalize_session_id,
     normalize_tenant_name,
     normalize_user_name,
-    tasks_file_for,
 )
 from .persona import load_persona
 from .tasks import TaskBoard
@@ -90,7 +84,7 @@ class Session:
         self.tenant = normalize_tenant_name(cfg.tenant)
         self.user = normalize_user_name(cfg.user)
         self.mode = normalize_mode(cfg.mode)
-        # 台帳モードでは部屋は実質 1 つに固定する（指定は無視する）
+        # 寄り添いモードでは部屋は実質 1 つに固定する（指定は無視する）
         if self.mode == "ledger":
             self.session_id = DEFAULT_SESSION_ID
         else:
@@ -98,11 +92,10 @@ class Session:
         # 人格・長期記憶・部屋・台帳はユーザーの実効データ置き場で分ける
         data_dir = cfg.user_data_dir
         self.memory = Memory(data_dir, self.session_id)
-        # 台帳は部屋ごとに持つ: 自分の部屋の台帳ファイルだけを使う
-        self.task_board = TaskBoard(
-            data_dir, tasks_file_for(data_dir, self.session_id))
-        # 部屋モードでは台帳を無効にする: 道具に台帳系を登録せず、
-        # 進行中の用事もプロンプトへ注入しない
+        # 台帳はユーザーごとに 1 冊（tasks.json）だけを使う
+        self.task_board = TaskBoard(data_dir)
+        # スレッドモードでは台帳を無効にする: 道具に台帳系を登録せず、
+        # 進行中の用事もプロンプトへ注入しない。
         board = None if self.mode == "wall" else self.task_board
         self.tools = ToolBox(Path.cwd(), task_board=board)
         self.history: list[Message] = self._restore_history()
@@ -118,7 +111,8 @@ class Session:
     def _open_tasks_text(self) -> str:
         """進行中の用事をシステムプロンプト用の箇条書きにする。
 
-        用事がない場合は空文字列（節自体を足さない）。
+        寄り添いモードでは進行中の用事をすべて出す。用事がない
+        場合は空文字列（節自体を足さない）。
         """
         lines = []
         for task in self.task_board.open_tasks():

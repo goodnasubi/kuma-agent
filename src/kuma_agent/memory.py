@@ -109,6 +109,23 @@ def list_session_ids(data_dir: Path) -> list[str]:
     return sorted(p.stem for p in conv.glob("*.jsonl"))
 
 
+def delete_session_record(user_data_dir: Path, session_id: str) -> bool:
+    """セッション（スレッド）の記録ファイルだけを削除する。
+
+    対象は conversations/<session_id>.jsonl のみで、台帳
+    （tasks.json）や長期記憶（MEMORY.md）には触れない。記録が
+    存在して消せたら True、無かった場合や消せなかった場合は
+    False を返す（例外にはしない）。
+    """
+    path = (user_data_dir / "conversations"
+            / f"{normalize_session_id(session_id)}.jsonl")
+    try:
+        path.unlink()
+    except OSError:  # 無い・消せない場合は「消えなかった」として扱う
+        return False
+    return True
+
+
 def iter_user_dirs(data_dir: Path,
                    tenant: str | None = None) -> Iterator[Path]:
     """テナント×ユーザーの実効データ置き場を列挙する。
@@ -165,25 +182,12 @@ def retention_days_for(data_dir: Path, tenant: str | None,
     return overrides.get(normalize_tenant_name(tenant), default_days)
 
 
-def tasks_file_for(data_dir: Path, session_id: str | None) -> Path:
-    """部屋の台帳ファイルの置き場を返す。
-
-    台帳は部屋ごとに持つ。既定の部屋（main）は後方互換のため
-    ユーザー置き場直下の tasks.json、それ以外の部屋は
-    置き場の tasks/<部屋名>.json に置く。台帳モードでは部屋が
-    main に固定されるため、結果として従来の tasks.json を使う。
-    """
-    sid = normalize_session_id(session_id)
-    if sid == DEFAULT_SESSION_ID:
-        return data_dir / "tasks.json"
-    return data_dir / "tasks" / f"{sid}.json"
-
-
 def iter_tasks_files(data_dir: Path) -> list[Path]:
-    """ユーザー置き場にある全台帳ファイルを列挙する。
+    """掃除対象の台帳ファイルを列挙する。
 
-    既定の部屋の tasks.json と、部屋ごとの tasks/*.json の両方。
-    無いものは含めない。
+    現在の台帳はユーザー置き場の tasks.json の 1 冊だけだが、移行前の
+    部屋ごと台帳（tasks/*.json）が残っている場合も、保持期限の掃除
+    では対象に含めるため、両方を返す。無いものは含めない。
     """
     files: list[Path] = []
     if (data_dir / "tasks.json").is_file():
@@ -216,8 +220,8 @@ def cleanup_expired(data_dir: Path, retention_days: int,
     消さない:
     - 部屋の記録ファイル（conversations/*.jsonl）のうち、最終更新が
       期限より古いもの（ファイルごと削除）
-    - 台帳（全台帳ファイル: tasks.json と tasks/*.json）のうち、
-      完了（done）してから更新が期限より古い用事（レコードだけ
+    - 台帳（現在の tasks.json と、残っていれば移行前の tasks/*.json）の
+      うち、完了（done）してから更新が期限より古い用事（レコードだけ
       除去し、ファイルは残す）
 
     tenant を指定した場合はそのテナントの置き場（配下の全ユーザー）
@@ -261,7 +265,9 @@ def cleanup_expired(data_dir: Path, retention_days: int,
                         continue  # 読めない・消せないファイルは飛ばす
             for board_file in iter_tasks_files(udir):
                 try:
-                    board = TaskBoard(udir, board_file)
+                    # 掃除では移行（本体への取り込みと旧ファイル削除）を
+                    # 起こさず、各ファイルをそのまま個別に処理する
+                    board = TaskBoard(udir, board_file, migrate_legacy=False)
                     result.tasks_removed += board.prune_done_before(
                         cutoff, dry_run=dry_run)
                 except Exception:

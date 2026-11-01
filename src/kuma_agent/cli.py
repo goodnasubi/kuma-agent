@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 
 from .config import Config, mode_label, normalize_mode
 from .llm import create_client
-from .memory import (cleanup_expired, normalize_session_id,
+from .memory import (cleanup_expired, delete_session_record,
+                     list_session_ids, normalize_session_id,
                      normalize_tenant_name, retention_days_for)
 from .session import Session
 
@@ -50,6 +52,38 @@ def _run_cleanup(cfg: Config, dry_run: bool = False,
     return 0
 
 
+def _run_threads(cfg: Config, delete: str | None = None) -> int:
+    """スレッド（セッション）の一覧表示と削除（運用者向けコマンドの本体）。
+
+    対象は cfg が指すテナント×ユーザーの置き場。--delete を指定した
+    場合は対象名を表示してから、そのスレッドの記録ファイルだけを
+    削除する（台帳や長期記憶には触れない）。指定しなければ一覧
+    （名前と最終更新）を表示する。
+    """
+    user_dir = cfg.user_data_dir
+    if delete is not None:
+        name = normalize_session_id(delete)
+        print(f"削除対象のスレッド: {name}")
+        if delete_session_record(user_dir, name):
+            print(f"削除しました: {name}")
+        else:
+            print(f"記録が見つかりませんでした: {name}")
+        return 0
+    names = list_session_ids(user_dir)
+    if not names:
+        print("スレッドはありません")
+        return 0
+    for name in names:
+        path = user_dir / "conversations" / f"{name}.jsonl"
+        try:
+            updated = datetime.fromtimestamp(path.stat().st_mtime)
+            stamp = updated.strftime("%Y-%m-%d %H:%M:%S")
+        except OSError:
+            stamp = "不明"
+        print(f"{name}\t最終更新: {stamp}")
+    return 0
+
+
 def _show_status(status: str) -> None:
     """作業中表示を同じ行に上書きする（プレーンな対話ループ用）。
 
@@ -74,9 +108,8 @@ def main(argv: list[str] | None = None) -> int:
     chat_parser.add_argument("--user", default=None,
                              help="ユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     chat_parser.add_argument("--mode", default=None,
-                             help="モード: both（部屋と用事で分ける）/ wall（部屋で分ける）"
-                                  "/ ledger（用事で分ける）"
-                                  "（既定: 環境変数 KUMA_MODE、無ければ both）")
+                             help="モード: ledger（寄り添いモード）/ wall（スレッドモード）"
+                                  "（既定: 環境変数 KUMA_MODE、無ければ ledger）")
     web_parser = sub.add_parser("web", help="Web UI を起動する")
     web_parser.add_argument("--host", default="127.0.0.1",
                             help="バインドするホスト（既定: 127.0.0.1）")
@@ -87,9 +120,8 @@ def main(argv: list[str] | None = None) -> int:
     web_parser.add_argument("--user", default=None,
                             help="起動時のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     web_parser.add_argument("--mode", default=None,
-                            help="モード: both（部屋と用事で分ける）/ wall（部屋で分ける）"
-                                 "/ ledger（用事で分ける）"
-                                 "（既定: 環境変数 KUMA_MODE、無ければ both）")
+                            help="モード: ledger（寄り添いモード）/ wall（スレッドモード）"
+                                 "（既定: 環境変数 KUMA_MODE、無ければ ledger）")
     cleanup_parser = sub.add_parser("cleanup", help="保持期限を過ぎた記録を掃除する")
     cleanup_parser.add_argument("--dry-run", action="store_true",
                                 help="削除せず、対象の件数だけを表示する")
@@ -98,6 +130,13 @@ def main(argv: list[str] | None = None) -> int:
     cleanup_parser.add_argument("--days", type=int, default=None,
                                 help="保持日数をその場限りで上書きする"
                                      "（retention.json と全体既定より優先、0 で無期限）")
+    threads_parser = sub.add_parser("threads", help="スレッド（セッション）の一覧と削除")
+    threads_parser.add_argument("--tenant", default=None,
+                                help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
+    threads_parser.add_argument("--user", default=None,
+                                help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
+    threads_parser.add_argument("--delete", default=None, metavar="名前",
+                                help="指定した名前のスレッドの記録を削除する")
     args = parser.parse_args(argv)
 
     cfg = Config()
@@ -110,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "cleanup":  # 掃除はモデルも API キーも要らない
         return _run_cleanup(cfg, dry_run=args.dry_run, tenant=args.tenant,
                             days=args.days)
+    if args.command == "threads":  # 一覧・削除もモデルも API キーも要らない
+        return _run_threads(cfg, delete=args.delete)
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)
@@ -124,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     session = Session(cfg, client, session_id=args.session)
     if (cfg.mode == "ledger"
             and normalize_session_id(args.session) != session.session_id):
-        # 用事で分けるモードでは部屋が固定されることを起動時に知らせる
+        # 寄り添いモードでは部屋が固定されることを起動時に知らせる
         print(f"「{mode_label(cfg.mode)}」モードのため"
               f"部屋は {session.session_id} に固定されます")
     if args.tui:

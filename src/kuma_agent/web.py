@@ -21,6 +21,7 @@ from .llm import MAX_ATTACHMENT_BYTES, Attachment, guess_media_type
 from .memory import (
     DEFAULT_SESSION_ID,
     cleanup_expired,
+    delete_session_record,
     list_session_ids,
     list_tenant_names,
     list_user_names,
@@ -140,10 +141,11 @@ _PAGE_TEMPLATE = """\
     <button id="createUser" type="button">作成</button>
   </div>
   <div class="sessions" id="sessionBox">
-    <label for="sessionSelect">部屋</label>
+    <label for="sessionSelect" id="sessionLabel">部屋</label>
     <select id="sessionSelect"></select>
     <input id="newSession" placeholder="新しい部屋" size="10">
     <button id="createSession" type="button">作成</button>
+    <button id="deleteSession" type="button">削除</button>
   </div>
 </header>
 <div id="log"></div>
@@ -175,9 +177,11 @@ const userSelect = document.getElementById('userSelect');
 const newUserInput = document.getElementById('newUser');
 const createUserBtn = document.getElementById('createUser');
 const sessionBox = document.getElementById('sessionBox');
+const sessionLabel = document.getElementById('sessionLabel');
 const sessionSelect = document.getElementById('sessionSelect');
 const newSessionInput = document.getElementById('newSession');
 const createSessionBtn = document.getElementById('createSession');
+const deleteSessionBtn = document.getElementById('deleteSession');
 const quoteBox = document.getElementById('quoteBox');
 const quoteText = document.getElementById('quoteText');
 const clearQuoteBtn = document.getElementById('clearQuote');
@@ -394,6 +398,31 @@ createSessionBtn.addEventListener('click', () => {
   applySession(name);
 });
 
+// 選択中のスレッド（セッション）の記録を削除する。確認を出してから
+// サーバーに消してもらい、一覧を取り直す。表示中だったスレッドを
+// 消した場合は main の表示に戻る（記録は次に開けば空で再開する）
+deleteSessionBtn.addEventListener('click', async () => {
+  const name = sessionSelect.value || currentSession;
+  if (!name) return;
+  if (!window.confirm('「' + name + '」の記録を削除します。よろしいですか？')) return;
+  try {
+    const res = await fetch('/api/sessions/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session: name, tenant: currentTenant,
+                            user: currentUser}),
+    });
+    if (!res.ok) throw new Error('delete failed');
+  } catch (e) {
+    window.alert('削除に失敗しました');
+    return;
+  }
+  const wasCurrent = name === currentSession;
+  if (wasCurrent) currentSession = 'main';
+  await loadSessions();
+  if (wasCurrent) applySession('main');
+});
+
 function setPending(files) {
   pendingFiles = Array.from(files);
   filesLabel.textContent = pendingFiles.length
@@ -491,9 +520,11 @@ form.addEventListener('submit', async (ev) => {
   }
 });
 
-// 起動時のメタ情報。モードの表示名をヘッダーに出し、用事で分ける
-// モード（ledger）では部屋は 1 つに固定されるため、部屋の選択・
-// 作成 UI 自体を出さない（履歴と送信は固定の部屋で動く）
+// 起動時のメタ情報。モードの表示名をヘッダーに出し、寄り添い
+// モード（ledger）では部屋は 1 つに固定されるため、スレッドの
+// 選択・作成・削除 UI 自体を出さない（履歴と送信は固定の部屋で
+// 動く）。スレッドモード（wall）では呼称を「部屋」から
+// 「スレッド」に切り替える
 const modeName = document.getElementById('modeName');
 async function loadMeta() {
   try {
@@ -504,6 +535,9 @@ async function loadMeta() {
     }
     if (data.mode === 'ledger') {
       sessionBox.hidden = true;
+    } else if (data.mode === 'wall') {
+      sessionLabel.textContent = 'スレッド';
+      newSessionInput.placeholder = '新しいスレッド';
     }
   } catch (e) { /* 取れなければ従来どおり全部出す */ }
 }
@@ -608,6 +642,22 @@ class SessionStore:
         session_id = normalize_session_id(name)
         with self._lock:
             return self._statuses.get(session_id, "")
+
+    def discard(self, name: str | None) -> None:
+        """開いている Session を破棄する（記録の削除後に使う）。
+
+        次に get されたときに記録から作り直される。開いていなければ
+        何もしない。記録ファイル自体は delete_session_record の仕事。
+        """
+        session_id = normalize_session_id(name)
+        with self._lock:
+            self._sessions.pop(session_id, None)
+            self._statuses.pop(session_id, None)
+
+    @property
+    def data_dir(self) -> Path:
+        """このストアが担当するユーザー置き場（記録の削除に使う）。"""
+        return self._data_dir
 
     def names(self) -> list[str]:
         """開いている部屋と、記録が残っている部屋の一覧。"""
@@ -777,7 +827,11 @@ def make_handler(tenants: TenantStore, page: str):
                 self._send_json(404, {"error": "not found"})
 
         def do_POST(self) -> None:
-            if urlsplit(self.path).path != "/api/chat":
+            path = urlsplit(self.path).path
+            if path == "/api/sessions/delete":
+                self._delete_session()
+                return
+            if path != "/api/chat":
                 self._send_json(404, {"error": "not found"})
                 return
             try:
@@ -797,6 +851,31 @@ def make_handler(tenants: TenantStore, page: str):
                 return
             session = tenants.store(
                 data.get("tenant"), data.get("user")).get(data.get("session"))
+            self._chat(session, message, attachments, quote)
+
+        def _delete_session(self) -> None:
+            """スレッド（セッション）の記録を削除する。
+
+            記録ファイルだけを消し、サーバーが抱えている Session も
+            破棄する（次に開けば空の記録で再開する）。"main" も削除
+            できる。台帳や長期記憶には触れない。
+            """
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                data = json.loads(self.rfile.read(length) or b"{}")
+                if not isinstance(data, dict):
+                    raise ValueError("リクエストが不正です")
+            except ValueError:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            store = tenants.store(data.get("tenant"), data.get("user"))
+            session_id = normalize_session_id(data.get("session"))
+            deleted = delete_session_record(store.data_dir, session_id)
+            store.discard(session_id)
+            self._send_json(200, {"deleted": deleted, "session": session_id})
+
+        def _chat(self, session: Session, message: str,
+                  attachments: list[Attachment], quote: str | None) -> None:
             try:
                 with lock:  # Session はスレッド安全ではないので直列化する
                     reply = session.say(message, attachments, quote=quote)

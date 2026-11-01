@@ -132,15 +132,16 @@ def test_users_in_same_tenant_are_isolated(tmp_path: Path):
     assert not (dir_b / "MEMORY.md").exists()
     assert not (tenant_dir / "MEMORY.md").exists()
 
-    # 部屋の記録: 同じ部屋名でもユーザーが違えば混ざらない
+    # 部屋の記録: ユーザーが違えば混ざらない（既定の寄り添いモードでは
+    # 部屋は main に固定される）
     a.say("アリスの相談")
     b_sessions = Session(cfg_b, _EchoModel(), "room")
     assert all("アリスの相談" not in m.content for m in b_sessions.history)
     d_sessions = Session(cfg_default, _EchoModel(), "room")
     assert all("アリスの相談" not in m.content for m in d_sessions.history)
-    assert (dir_a / "conversations" / "room.jsonl").exists()
-    assert not (dir_b / "conversations" / "room.jsonl").exists()
-    assert not (tenant_dir / "conversations" / "room.jsonl").exists()
+    assert (dir_a / "conversations" / "main.jsonl").exists()
+    assert not (dir_b / "conversations" / "main.jsonl").exists()
+    assert not (tenant_dir / "conversations" / "main.jsonl").exists()
 
     # 台帳: アリスの用事はボブの台帳・プロンプトに見えない
     a.task_board.add("アリスの用事", "アリスのメモ")
@@ -150,8 +151,8 @@ def test_users_in_same_tenant_are_isolated(tmp_path: Path):
     assert "アリスの用事" not in b3.system_prompt
     a3 = Session(cfg_a, _EchoModel(), "room")
     assert "アリスの用事" in a3.system_prompt
-    # 台帳は部屋ごと: 部屋 room の台帳は tasks/room.json に置かれる
-    assert (dir_a / "tasks" / "room.json").exists()
+    # 台帳はユーザーごとに 1 冊: アリスの台帳は tasks.json に置かれる
+    assert (dir_a / "tasks.json").exists()
     assert not (dir_b / "tasks.json").exists()
     assert not (dir_b / "tasks").exists()
 
@@ -168,9 +169,9 @@ def test_tenant_user_combinations_are_isolated(tmp_path: Path):
                         _EchoModel(), "room")
     assert all("仕事テナント" not in m.content for m in play_bob2.history)
     assert (tmp_path / "tenants" / "work" / "users" / "bob"
-            / "conversations" / "room.jsonl").exists()
+            / "conversations" / "main.jsonl").exists()
     assert not (tmp_path / "tenants" / "play" / "users" / "bob"
-                / "conversations" / "room.jsonl").exists()
+                / "conversations" / "main.jsonl").exists()
 
 
 # ---------------------------------------------------------------- CLI
@@ -181,6 +182,7 @@ def _run_cli_chat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 
     class _FakeSession:
         def __init__(self, cfg, model, session_id="main"):
+            self.session_id = session_id
             captured["tenant"] = cfg.tenant
             captured["user"] = cfg.user
             captured["user_data_dir"] = cfg.user_data_dir

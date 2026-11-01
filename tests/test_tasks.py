@@ -60,6 +60,58 @@ def test_board_starts_empty_on_broken_json(tmp_path: Path):
     assert TaskBoard(tmp_path).list() == []
 
 
+def test_board_ignores_leftover_room_key_in_records(tmp_path: Path):
+    # 旧データに room キーが残っていても、無視して読み込める（落とさない）
+    (tmp_path / "tasks.json").write_text(
+        json.dumps([{"id": "9", "title": "旧形式", "status": "open",
+                     "memo": "", "room": "work"}], ensure_ascii=False),
+        encoding="utf-8")
+    old = TaskBoard(tmp_path).get("9")
+    assert old is not None
+    assert old.title == "旧形式"
+    # 保存し直すと room キーは付かない
+    board = TaskBoard(tmp_path)
+    board.add("新しい用事")
+    records = json.loads((tmp_path / "tasks.json").read_text(encoding="utf-8"))
+    assert all("room" not in r for r in records)
+
+
+def test_board_imports_legacy_room_boards(tmp_path: Path):
+    board = TaskBoard(tmp_path)
+    board.add("本体の用事")  # ID は "1"
+    legacy = tmp_path / "tasks" / "work.json"
+    legacy.parent.mkdir()
+    legacy.write_text(json.dumps([
+        {"id": "1", "title": "衝突する用事", "status": "open", "memo": ""},
+        {"id": "5", "title": "仕事部屋の用事", "status": "open", "memo": "",
+         "room": "別の値"},
+    ], ensure_ascii=False), encoding="utf-8")
+
+    imported = TaskBoard(tmp_path)
+    by_title = {t.title: t for t in imported.list()}
+    assert by_title["本体の用事"].id == "1"
+    assert by_title["衝突する用事"].id == "2"  # 衝突したら振り直す
+    assert by_title["仕事部屋の用事"].id == "5"
+    assert not legacy.exists()  # 取り込み済みの旧ファイルは削除する
+    assert TaskBoard(tmp_path).get("2").title == "衝突する用事"
+
+
+def test_board_import_skips_broken_legacy_boards(tmp_path: Path):
+    legacy_dir = tmp_path / "tasks"
+    legacy_dir.mkdir()
+    broken = legacy_dir / "broken.json"
+    broken.write_text("{壊れた JSON", encoding="utf-8")
+    readable = legacy_dir / "play.json"
+    readable.write_text(json.dumps([
+        {"id": "1", "title": "遊び部屋の用事", "status": "open", "memo": ""},
+    ], ensure_ascii=False), encoding="utf-8")
+
+    board = TaskBoard(tmp_path)  # 壊れた旧ファイルがあっても落とさない
+    assert [t.title for t in board.list()] == ["遊び部屋の用事"]
+    assert broken.exists()  # 読めなかった旧ファイルは残す
+    assert not readable.exists()
+
+
 def test_board_skips_broken_records(tmp_path: Path):
     records = [
         {"id": "1", "title": "まともな用事", "status": "open", "memo": ""},
@@ -90,7 +142,7 @@ def test_task_tools_registered_only_with_board(tmp_path: Path):
 def test_task_tools_roundtrip(tmp_path: Path):
     board = TaskBoard(tmp_path)
     box = ToolBox(tmp_path, task_board=board)
-    assert "進行中の用事はありません" in box.call("list_tasks", {})
+    assert "用事はありません" in box.call("list_tasks", {})
 
     created = box.call("create_task", {"title": "旅行の計画", "memo": "宿を取る"})
     assert "登録しました" in created
@@ -107,6 +159,27 @@ def test_task_tools_roundtrip(tmp_path: Path):
     box.call("update_task", {"id": task.id, "status": "done"})
     assert board.open_tasks() == []
     assert "見つかりません" in box.call("update_task", {"id": "999", "memo": "x"})
+
+
+def test_task_tools_update_by_id(tmp_path: Path):
+    board = TaskBoard(tmp_path)
+    other = board.add("もう一つの用事")
+    box = ToolBox(tmp_path, task_board=board)
+
+    # create_task の引数に room はない（用事に部屋の印は付けない）
+    create_schema = next(s for s in box.schemas() if s["name"] == "create_task")
+    assert "room" not in create_schema["parameters"]["properties"]
+    box.call("create_task", {"title": "新しい用事"})
+    created = next(t for t in board.list() if t.title == "新しい用事")
+    assert created.title == "新しい用事"
+
+    # update_task は ID で更新できる
+    updated = box.call("update_task", {"id": other.id, "status": "done"})
+    assert "更新しました" in updated
+    assert TaskBoard(tmp_path).get(other.id).status == "done"
+    # list_tasks は完了済みも含め、状態付きで全用事を返す
+    listing = box.call("list_tasks", {})
+    assert "もう一つの用事" in listing and "（状態: done）" in listing
 
 
 # ---------------------------------------------------------------- Session

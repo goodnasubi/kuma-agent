@@ -45,7 +45,7 @@ def test_memory_writes_per_session_file(tmp_path: Path):
 # ---------------------------------------------------------------- 再開
 
 def test_session_resume_restores_history(tmp_path: Path):
-    cfg = Config(data_dir=tmp_path)
+    cfg = Config(data_dir=tmp_path, mode="wall")  # 名前付き部屋の検証
     first = Session(cfg, _EchoModel(), "room1")
     first.say("覚えていて")
     assert (tmp_path / "conversations" / "room1.jsonl").exists()
@@ -59,7 +59,7 @@ def test_session_resume_restores_history(tmp_path: Path):
 
 
 def test_sessions_do_not_mix(tmp_path: Path):
-    cfg = Config(data_dir=tmp_path)
+    cfg = Config(data_dir=tmp_path, mode="wall")  # 名前付き部屋の検証
     Session(cfg, _EchoModel(), "work").say("仕事の相談")
     Session(cfg, _EchoModel(), "private").say("内緒の相談")
 
@@ -153,7 +153,7 @@ class _TaggedModel:
 
 @pytest.fixture()
 def web_server(tmp_path: Path):
-    cfg = Config(data_dir=tmp_path)
+    cfg = Config(data_dir=tmp_path, mode="wall")  # 名前付き部屋の検証
 
     def factory(name: str) -> Session:
         return Session(cfg, _TaggedModel(name), name)
@@ -203,7 +203,7 @@ def test_web_sessions_are_separate(web_server: str):
 
 def test_resume_after_compaction_keeps_recent_turns(tmp_path: Path):
     """圧縮後に再開しても、要約＋残した直近の発話が復元される。"""
-    cfg = Config()
+    cfg = Config(mode="wall")  # 名前付き部屋の検証
     cfg.data_dir = tmp_path
     cfg.compact_after = 4
     cfg.compact_keep = 2

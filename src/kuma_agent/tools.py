@@ -101,7 +101,8 @@ class ToolBox:
             "用事ごとの状態を分けて保つこと。"
         )
         self.register(Tool(
-            "list_tasks", f"進行中の用事の一覧を返す。{guidance}",
+            "list_tasks",
+            f"台帳にある用事を、状態付きですべて返す。{guidance}",
             {"type": "object", "properties": {}},
             self._list_tasks,
         ))
@@ -126,18 +127,19 @@ class ToolBox:
 
     def _format_tasks(self, tasks: list[Task]) -> str:
         if not tasks:
-            return "（進行中の用事はありません）"
+            return "（用事はありません）"
         lines = []
         for t in tasks:
             line = f"#{t.id} {t.title}"
             if t.memo:
                 line += f": {t.memo}"
+            line += f"（状態: {t.status}）"
             lines.append(line)
         return "\n".join(lines)
 
     def _list_tasks(self) -> str:
         assert self.task_board is not None
-        return self._format_tasks(self.task_board.open_tasks())
+        return self._format_tasks(self.task_board.list())
 
     def _create_task(self, title: str, memo: str = "") -> str:
         assert self.task_board is not None

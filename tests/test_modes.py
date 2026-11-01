@@ -1,7 +1,8 @@
-"""モード切替（部屋で分ける / 用事で分ける / 部屋と用事で分ける）のテスト。
+"""モード切替（寄り添いモード / スレッドモード）のテスト。
 
-内部の識別子は both / wall / ledger のままで、表示名は
-config.MODE_LABELS に集約する。併用モードでは台帳は部屋ごとに持つ。
+内部の識別子は wall / ledger で、表示名は config.MODE_LABELS に
+集約する。既定は寄り添いモード（ledger）で、旧値 both は後方互換の
+ため ledger に読み替える。台帳はユーザーごとに 1 冊で持つ。
 """
 import json
 import threading
@@ -13,7 +14,7 @@ import pytest
 
 from kuma_agent.config import MODES, MODE_LABELS, Config, mode_label, normalize_mode
 from kuma_agent.llm import Message
-from kuma_agent.memory import cleanup_expired, tasks_file_for
+from kuma_agent.memory import cleanup_expired
 from kuma_agent.session import Session
 from kuma_agent.tasks import TaskBoard
 from kuma_agent.web import build_server, render_page
@@ -33,36 +34,41 @@ def _tool_names(session: Session) -> set[str]:
 # ---------------------------------------------------------------- 設定と表示名
 
 def test_normalize_mode():
-    assert normalize_mode("both") == "both"
-    assert normalize_mode(" WALL ") == "wall"
     assert normalize_mode("ledger") == "ledger"
-    assert normalize_mode("わからない") == "both"
-    assert normalize_mode("") == "both"
-    assert normalize_mode(None) == "both"
+    assert normalize_mode(" WALL ") == "wall"
+    # 旧値 both は後方互換のため ledger に読み替える
+    assert normalize_mode("both") == "ledger"
+    assert normalize_mode("BOTH") == "ledger"
+    assert normalize_mode("わからない") == "ledger"
+    assert normalize_mode("") == "ledger"
+    assert normalize_mode(None) == "ledger"
 
 
 def test_config_mode_default_env_and_invalid(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("KUMA_MODE", raising=False)
-    assert Config().mode == "both"
-    monkeypatch.setenv("KUMA_MODE", "ledger")
-    assert Config().mode == "ledger"
+    assert Config().mode == "ledger"  # 既定は寄り添いモード
+    monkeypatch.setenv("KUMA_MODE", "wall")
+    assert Config().mode == "wall"
+    monkeypatch.setenv("KUMA_MODE", "both")
+    assert Config().mode == "ledger"  # 旧値は ledger に読み替える
     monkeypatch.setenv("KUMA_MODE", "変な値")
-    assert Config().mode == "both"  # 不正な環境変数は既定に倒す
+    assert Config().mode == "ledger"  # 不正な環境変数は既定に倒す
     # 直接指定した場合も __post_init__ で正規化される
     assert Config(mode="wall").mode == "wall"
-    assert Config(mode="おかしい").mode == "both"
+    assert Config(mode="both").mode == "ledger"
+    assert Config(mode="おかしい").mode == "ledger"
 
 
 def test_mode_labels_cover_all_modes():
-    assert set(MODE_LABELS) == set(MODES)
-    assert MODE_LABELS["wall"] == "部屋で分ける"
-    assert MODE_LABELS["ledger"] == "用事で分ける"
-    assert MODE_LABELS["both"] == "部屋と用事で分ける"
-    assert mode_label("ledger") == "用事で分ける"
-    assert mode_label("不正な値") == "部屋と用事で分ける"
+    assert set(MODE_LABELS) == set(MODES) == {"wall", "ledger"}
+    assert MODE_LABELS["wall"] == "スレッドモード"
+    assert MODE_LABELS["ledger"] == "寄り添いモード"
+    assert mode_label("wall") == "スレッドモード"
+    assert mode_label("both") == "寄り添いモード"  # 旧値も読み替え先の表示名
+    assert mode_label("不正な値") == "寄り添いモード"
 
 
-# ---------------------------------------------------------------- 部屋で分ける（wall）
+# ---------------------------------------------------------------- スレッドモード（wall）
 
 def test_wall_mode_disables_task_tools_and_injection(tmp_path: Path):
     # 既定の部屋の台帳に進行中の用事があっても、道具にも注入にも出ない
@@ -75,7 +81,23 @@ def test_wall_mode_disables_task_tools_and_injection(tmp_path: Path):
     assert "read_file" in _tool_names(session)
 
 
-# ---------------------------------------------------------------- 用事で分ける（ledger）
+def test_wall_mode_keeps_named_rooms(tmp_path: Path):
+    cfg = Config(data_dir=tmp_path, mode="wall")
+    Session(cfg, _EchoModel(), "work").say("仕事の相談")
+    Session(cfg, _EchoModel(), "private").say("内緒の相談")
+    work = Session(cfg, _EchoModel(), "work")
+    contents = [m.content for m in work.history]
+    assert any("仕事の相談" in c for c in contents)
+    assert all("内緒" not in c for c in contents)
+
+
+# ---------------------------------------------------------------- 寄り添いモード（ledger）
+
+def test_ledger_mode_is_default(tmp_path: Path):
+    session = Session(Config(data_dir=tmp_path), _EchoModel(), "main")
+    assert session.mode == "ledger"
+    assert TASK_TOOLS <= _tool_names(session)
+
 
 def test_ledger_mode_fixes_session_to_main(tmp_path: Path):
     cfg = Config(data_dir=tmp_path, mode="ledger")
@@ -91,44 +113,18 @@ def test_ledger_mode_fixes_session_to_main(tmp_path: Path):
     assert not (tmp_path / "tasks").exists()
 
 
-# ---------------------------------------------------------------- 部屋と用事で分ける（both）
-
-def test_both_mode_is_default_and_keeps_both(tmp_path: Path):
-    session = Session(Config(data_dir=tmp_path), _EchoModel(), "main")
-    assert session.mode == "both"
-    assert TASK_TOOLS <= _tool_names(session)
-
-
-def test_tasks_file_for_paths(tmp_path: Path):
-    assert tasks_file_for(tmp_path, "main") == tmp_path / "tasks.json"
-    assert tasks_file_for(tmp_path, None) == tmp_path / "tasks.json"
-    assert tasks_file_for(tmp_path, "仕事") == tmp_path / "tasks" / "仕事.json"
-
-
-def test_both_mode_task_boards_are_per_room(tmp_path: Path):
-    cfg = Config(data_dir=tmp_path, mode="both")
-    main_room = Session(cfg, _EchoModel(), "main")
-    main_room.tools.call("create_task", {"title": "main の用事", "memo": "main用"})
-    work_room = Session(cfg, _EchoModel(), "work")
-    work_room.tools.call("create_task", {"title": "work の用事", "memo": "work用"})
-
-    # 台帳ファイルは部屋ごとに分かれる（main は従来パス）
-    assert (tmp_path / "tasks.json").exists()
-    assert (tmp_path / "tasks" / "work.json").exists()
-
-    # 道具経由では相手の部屋の用事が見えない
-    assert "main の用事" in main_room.tools.call("list_tasks", {})
-    assert "work の用事" not in main_room.tools.call("list_tasks", {})
-    assert "work の用事" in work_room.tools.call("list_tasks", {})
-    assert "main の用事" not in work_room.tools.call("list_tasks", {})
-
-    # 注入も自分の部屋の用事だけ（作り直した Session で確認する）
-    main_again = Session(cfg, _EchoModel(), "main")
-    assert "main の用事" in main_again.system_prompt
-    assert "work の用事" not in main_again.system_prompt
-    work_again = Session(cfg, _EchoModel(), "work")
-    assert "work の用事" in work_again.system_prompt
-    assert "main の用事" not in work_again.system_prompt
+def test_ledger_mode_injects_all_open_tasks(tmp_path: Path):
+    board = TaskBoard(tmp_path)
+    board.add("一つ目の用事", "メモ1")
+    board.add("二つ目の用事")
+    finished = board.add("終わった用事")
+    board.update(finished.id, status="done")
+    session = Session(Config(data_dir=tmp_path, mode="ledger"),
+                      _EchoModel(), "work")
+    assert session.session_id == "main"
+    assert "一つ目の用事" in session.system_prompt
+    assert "二つ目の用事" in session.system_prompt
+    assert "終わった用事" not in session.system_prompt  # done は注入しない
 
 
 # ---------------------------------------------------------------- cleanup の追随
@@ -186,19 +182,19 @@ def _get_json(url: str) -> dict:
 
 
 def test_api_meta_returns_mode_and_label(_server):
-    base = _server("both")
+    base = _server("ledger")
     meta = _get_json(base + "/api/meta")
-    assert meta["mode"] == "both"
-    assert meta["mode_label"] == "部屋と用事で分ける"
+    assert meta["mode"] == "ledger"
+    assert meta["mode_label"] == "寄り添いモード"
     assert meta["tenant"] == "default"
     assert meta["user"] == "default"
 
 
-def test_api_meta_ledger(_server):
-    base = _server("ledger")
+def test_api_meta_wall(_server):
+    base = _server("wall")
     meta = _get_json(base + "/api/meta")
-    assert meta["mode"] == "ledger"
-    assert meta["mode_label"] == "用事で分ける"
+    assert meta["mode"] == "wall"
+    assert meta["mode_label"] == "スレッドモード"
 
 
 def test_page_hides_room_ui_in_ledger_mode():

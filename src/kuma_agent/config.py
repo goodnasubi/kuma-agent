@@ -20,26 +20,31 @@ def _env_int(name: str, default: int) -> int:
 
 
 # 文脈の分け方のモード（詳細は docs/DESIGN.md の「モード」節）:
-# - both: 部屋（壁方式）と台帳を併用する（従来どおり）
-# - wall: 部屋モード。台帳は無効
-# - ledger: 台帳モード。部屋は実質 1 つ（main）に固定し、用事は台帳で分ける
-MODES = ("both", "wall", "ledger")
-DEFAULT_MODE = "both"
+# - ledger（寄り添いモード、既定）: 部屋は実質 1 つ（main）に固定し、
+#   抱えている用事は台帳で分けて覚える
+# - wall（スレッドモード）: 会話を部屋（スレッド）ごとに分ける。台帳は無効
+MODES = ("wall", "ledger")
+DEFAULT_MODE = "ledger"
 
 
 def normalize_mode(raw: str | None) -> str:
-    """モード名を正規化する。不正な値は既定（併用）に倒す。"""
+    """モード名を正規化する。
+
+    旧値 both は後方互換のため ledger に読み替え、それ以外の不正な
+    値も既定（ledger）に倒す。
+    """
     mode = (raw or "").strip().lower()
+    if mode == "both":
+        return "ledger"
     return mode if mode in MODES else DEFAULT_MODE
 
 
-# モードのユーザー向け表示名。内部の識別子（wall / ledger / both）は
-# 設定値としてだけ使い、画面や文面では振る舞いがそのまま分かる
-# こちらの名前で出す。対応付けはこの辞書に集約する
+# モードのユーザー向け表示名。内部の識別子（wall / ledger）は
+# 設定値としてだけ使い、画面や文面ではこちらの名前で出す。
+# 対応付けはこの辞書に集約する
 MODE_LABELS: dict[str, str] = {
-    "both": "部屋と用事で分ける",
-    "wall": "部屋で分ける",
-    "ledger": "用事で分ける",
+    "wall": "スレッドモード",
+    "ledger": "寄り添いモード",
 }
 
 
@@ -53,8 +58,8 @@ class Config:
     data_dir: Path = field(default_factory=lambda: Path(os.environ.get("KUMA_DATA_DIR", "data")))
     tenant: str = field(default_factory=lambda: os.environ.get("KUMA_TENANT", "default"))
     user: str = field(default_factory=lambda: os.environ.get("KUMA_USER", "default"))
-    # 文脈の分け方のモード（both / wall / ledger）。不正な値は
-    # __post_init__ で既定の both に倒す
+    # 文脈の分け方のモード（wall / ledger）。不正な値と旧値 both は
+    # __post_init__ で既定の ledger に倒す
     mode: str = field(default_factory=lambda: os.environ.get("KUMA_MODE", DEFAULT_MODE))
     provider: str = field(default_factory=lambda: os.environ.get("KUMA_LLM_PROVIDER", "muse"))
     model: str | None = field(default_factory=lambda: os.environ.get("KUMA_LLM_MODEL") or None)
