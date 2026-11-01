@@ -1,6 +1,6 @@
 """ユーザー層（テナントの下の区切り）のテスト。
 
-同じテナントでもユーザーごとに人格・長期記憶・部屋・台帳の置き場が
+同じテナントでもユーザーごとに人格・長期記憶・部屋・用事の記録の置き場が
 分かれ互いに見えないこと、既定ユーザーが従来の置き場（テナントの
 置き場そのもの）を使うこと、テナント×ユーザーの組み合わせで混ざら
 ないことを確認する。ユーザー管理をしない場合（既定ユーザーのまま）
@@ -143,7 +143,7 @@ def test_users_in_same_tenant_are_isolated(tmp_path: Path):
     assert not (dir_b / "conversations" / "main.jsonl").exists()
     assert not (tenant_dir / "conversations" / "main.jsonl").exists()
 
-    # 台帳: アリスの用事はボブの台帳・プロンプトに見えない
+    # 用事の一覧: アリスの用事はボブの用事の一覧・プロンプトに見えない
     a.task_board.add("アリスの用事", "アリスのメモ")
     assert TaskBoard(dir_b).open_tasks() == []
     assert TaskBoard(tenant_dir).open_tasks() == []
@@ -151,7 +151,7 @@ def test_users_in_same_tenant_are_isolated(tmp_path: Path):
     assert "アリスの用事" not in b3.system_prompt
     a3 = Session(cfg_a, _EchoModel(), "room")
     assert "アリスの用事" in a3.system_prompt
-    # 台帳はユーザーごとに 1 冊: アリスの台帳は tasks.json に置かれる
+    # 用事の一覧はユーザーごとに 1 つ: アリスの用事の一覧は tasks.json に置かれる
     assert (dir_a / "tasks.json").exists()
     assert not (dir_b / "tasks.json").exists()
     assert not (dir_b / "tasks").exists()

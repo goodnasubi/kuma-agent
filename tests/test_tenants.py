@@ -1,6 +1,6 @@
 """テナント方式（一番外側の区切り）のテスト。
 
-テナントごとに人格・長期記憶・部屋・台帳の置き場が分かれ、互いに
+テナントごとに人格・長期記憶・部屋・用事の記録の置き場が分かれ、互いに
 見えないこと、既定テナントが従来の data_dir をそのまま使うことを
 確認する。
 """
@@ -121,14 +121,14 @@ def test_tenants_are_isolated(tmp_path: Path):
     assert not (dir_b / "conversations" / "main.jsonl").exists()
     assert not (tmp_path / "conversations").exists()
 
-    # 台帳: A の用事は B の台帳・プロンプトに見えない
+    # 用事の一覧: A の用事は B の用事の一覧・プロンプトに見えない
     a.task_board.add("Aの用事", "Aのメモ")
     assert TaskBoard(dir_b).open_tasks() == []
     b3 = Session(cfg_b, _EchoModel(), "room")
     assert "Aの用事" not in b3.system_prompt
     a3 = Session(cfg_a, _EchoModel(), "room")
     assert "Aの用事" in a3.system_prompt
-    # 台帳はユーザーごとに 1 冊: A の台帳は tasks.json に置かれる
+    # 用事の一覧はユーザーごとに 1 つ: A の用事の一覧は tasks.json に置かれる
     assert (dir_a / "tasks.json").exists()
     assert not (dir_b / "tasks.json").exists()
     assert not (dir_b / "tasks").exists()

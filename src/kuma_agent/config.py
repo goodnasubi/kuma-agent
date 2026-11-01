@@ -21,8 +21,8 @@ def _env_int(name: str, default: int) -> int:
 
 # 文脈の分け方のモード（詳細は docs/DESIGN.md の「モード」節）:
 # - ledger（相棒モード、既定）: 部屋は実質 1 つ（main）に固定し、
-#   抱えている用事は台帳で分けて覚える
-# - wall（スレッドモード）: 会話を部屋（スレッド）ごとに分ける。台帳は無効
+#   抱えている用事は用事の一覧で分けて覚える
+# - wall（スレッドモード）: 会話を部屋（スレッド）ごとに分ける。用事の一覧は無効
 MODES = ("wall", "ledger")
 DEFAULT_MODE = "ledger"
 
@@ -104,7 +104,7 @@ class Config:
 
         既定テナント（"default"）は後方互換のため data_dir をそのまま
         返し、それ以外は data_dir / "tenants" / <テナント名> を返す。
-        人格・長期記憶・部屋・台帳はすべてこの置き場の下に分かれる。
+        人格・長期記憶・部屋・用事の記録はすべてこの置き場の下に分かれる。
         """
         return tenant_dir(self.data_dir, self.tenant)
 
@@ -115,7 +115,7 @@ class Config:
         既定ユーザー（"default"）は後方互換のためテナントの置き場を
         そのまま返し、それ以外は
         <テナント置き場> / "users" / <ユーザー名> を返す。
-        人格・長期記憶・部屋・台帳はすべてこの置き場の下に分かれる。
+        人格・長期記憶・部屋・用事の記録はすべてこの置き場の下に分かれる。
         """
         return user_dir(self.tenant_data_dir, self.user)
 

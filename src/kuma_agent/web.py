@@ -858,7 +858,7 @@ def make_handler(tenants: TenantStore, page: str):
 
             記録ファイルだけを消し、サーバーが抱えている Session も
             破棄する（次に開けば空の記録で再開する）。"main" も削除
-            できる。台帳や長期記憶には触れない。
+            できる。用事の一覧や長期記憶には触れない。
             """
             try:
                 length = int(self.headers.get("Content-Length") or 0)

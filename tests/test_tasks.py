@@ -1,4 +1,4 @@
-"""用事の台帳（TaskBoard・道具・Session への注入）のテスト。"""
+"""用事の一覧（TaskBoard・道具・Session への注入）のテスト。"""
 import json
 from pathlib import Path
 
@@ -9,7 +9,7 @@ from kuma_agent.tasks import TaskBoard
 from kuma_agent.tools import ToolBox
 
 
-# ---------------------------------------------------------------- 台帳
+# ---------------------------------------------------------------- 用事の一覧
 
 def test_board_add_and_list(tmp_path: Path):
     board = TaskBoard(tmp_path)
@@ -208,7 +208,7 @@ def test_session_prompt_has_no_tasks_section_when_empty(tmp_path: Path):
 
 
 def test_session_can_use_task_tools(tmp_path: Path):
-    """道具の循環経由で台帳に登録できる（Session が board を共有する）。"""
+    """道具の循環経由で用事の一覧に登録できる（Session が board を共有する）。"""
     session = Session(Config(data_dir=tmp_path), _EchoModel())
     result = session.tools.call("create_task", {"title": "道具経由の用事"})
     assert "登録しました" in result

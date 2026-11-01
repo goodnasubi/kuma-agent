@@ -2,7 +2,7 @@
 
 内部の識別子は wall / ledger で、表示名は config.MODE_LABELS に
 集約する。既定は相棒モード（ledger）で、旧値 both は後方互換の
-ため ledger に読み替える。台帳はユーザーごとに 1 冊で持つ。
+ため ledger に読み替える。用事の一覧はユーザーごとに 1 つで持つ。
 """
 import json
 import threading
@@ -71,13 +71,13 @@ def test_mode_labels_cover_all_modes():
 # ---------------------------------------------------------------- スレッドモード（wall）
 
 def test_wall_mode_disables_task_tools_and_injection(tmp_path: Path):
-    # 既定の部屋の台帳に進行中の用事があっても、道具にも注入にも出ない
+    # 既定の部屋の用事の一覧に進行中の用事があっても、道具にも注入にも出ない
     TaskBoard(tmp_path).add("既にある用事", "メモ")
     session = Session(Config(data_dir=tmp_path, mode="wall"), _EchoModel())
     assert _tool_names(session).isdisjoint(TASK_TOOLS)
     assert "# 進行中の用事" not in session.system_prompt
     assert "既にある用事" not in session.system_prompt
-    # 台帳以外の道具は従来どおり使える
+    # 用事系以外の道具は従来どおり使える
     assert "read_file" in _tool_names(session)
 
 
@@ -106,9 +106,9 @@ def test_ledger_mode_fixes_session_to_main(tmp_path: Path):
     session.say("こんにちは")
     assert (tmp_path / "conversations" / "main.jsonl").exists()
     assert not (tmp_path / "conversations" / "仕事.jsonl").exists()
-    # 台帳は有効で、台帳ファイルは従来の tasks.json になる
+    # 用事の一覧は有効で、用事ファイルは従来の tasks.json になる
     assert TASK_TOOLS <= _tool_names(session)
-    session.tools.call("create_task", {"title": "台帳の用事"})
+    session.tools.call("create_task", {"title": "テストの用事"})
     assert (tmp_path / "tasks.json").exists()
     assert not (tmp_path / "tasks").exists()
 

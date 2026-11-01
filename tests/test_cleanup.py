@@ -1,7 +1,7 @@
 """保持期限と自動クリーンアップのテスト。
 
 保持期限（既定 90 日）を過ぎた部屋の記録ファイルと、完了してから
-期限を過ぎた台帳の用事だけが掃除され、長期記憶・人格・進行中の
+期限を過ぎた用事だけが掃除され、長期記憶・人格・進行中の
 用事は残ること、保持期限 0（無期限）と dry-run では何も消えない
 こと、全テナント×ユーザー置き場が走査されることを確認する。
 """
@@ -93,7 +93,7 @@ def test_keeps_memory_persona_and_other_files(tmp_path: Path):
     assert memo.exists()
 
 
-# ---------------------------------------------------------------- 台帳
+# ---------------------------------------------------------------- 用事の一覧
 
 def test_prunes_only_old_done_tasks(tmp_path: Path):
     path = _write_tasks(tmp_path, [
@@ -103,7 +103,7 @@ def test_prunes_only_old_done_tasks(tmp_path: Path):
     ])
     result = cleanup_expired(tmp_path, RETENTION, now=NOW)
     assert result.tasks_removed == 1
-    assert path.exists()  # 台帳ファイル自体は消さない
+    assert path.exists()  # 用事ファイル自体は消さない
     remaining = {t.id for t in TaskBoard(tmp_path).list()}
     assert remaining == {"2", "3"}
 
@@ -137,7 +137,7 @@ def test_scans_all_tenants_and_users(tmp_path: Path):
     # 別テナント × 既定ユーザー
     acme = tmp_path / "tenants" / "acme"
     _write_session(acme, "b", _days_ago(100))
-    # 別テナント × 別ユーザー（部屋＋台帳）
+    # 別テナント × 別ユーザー（部屋＋用事）
     bob = acme / "users" / "bob"
     _write_session(bob, "c", _days_ago(100))
     _write_tasks(bob, [_task("1", "done", _days_ago(100))])
@@ -158,7 +158,7 @@ def test_missing_dirs_do_not_raise(tmp_path: Path):
 # ---------------------------------------------------------------- テナント単位
 
 def test_cleanup_scoped_to_one_tenant(tmp_path: Path):
-    # 対象テナント（部屋＋別ユーザーの台帳）と他テナントに期限切れを用意
+    # 対象テナント（部屋＋別ユーザーの用事）と他テナントに期限切れを用意
     acme = tmp_path / "tenants" / "acme"
     acme_old = _write_session(acme, "acme-old", _days_ago(100))
     acme_fresh = _write_session(acme, "acme-fresh", _days_ago(10))

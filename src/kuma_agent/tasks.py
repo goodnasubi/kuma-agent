@@ -1,13 +1,13 @@
-"""用事の台帳（タスクボード）。
+"""用事の一覧（タスクボード）。
 
 1 つの会話の中に複数の用事が並行しても取り違えないための仕組み。
 会話の中で話題が切り替わるたび、その用事の状態（題名・状態・最新の
-メモ）を台帳に持ち、対話の冒頭で進行中の用事を思い出せるようにする。
+メモ）を一覧に持ち、対話の冒頭で進行中の用事を思い出せるようにする。
 
-台帳は用事の持ち主であるユーザーごとに 1 冊だけを持ち、データ
+用事の一覧は用事の持ち主であるユーザーごとに 1 つだけを持ち、データ
 置き場の tasks.json に保存する。旧仕様で部屋ごとに分かれていた
 tasks/<部屋名>.json が残っている場合は、本体の読み込み時に
-そのまま tasks.json へ取り込む。壊れた JSON のときは空の台帳
+そのまま tasks.json へ取り込む。壊れた JSON のときは空の一覧
 として始める（例外で落とさない）。
 """
 from __future__ import annotations
@@ -36,7 +36,7 @@ def _now() -> str:
 
 @dataclass
 class Task:
-    """台帳の 1 件の用事。"""
+    """用事の一覧の 1 件の用事。"""
     id: str
     title: str
     status: str = STATUS_OPEN
@@ -83,18 +83,18 @@ class Task:
 
 
 class TaskBoard:
-    """用事の台帳。台帳ファイルへの保存・読み込みを持つ。"""
+    """用事の一覧。用事ファイル（tasks.json）への保存・読み込みを持つ。"""
 
     def __init__(self, data_dir: Path,
                  tasks_file: Path | None = None, *,
                  migrate_legacy: bool | None = None) -> None:
         self.data_dir = data_dir
-        # 通常の台帳はユーザー置き場直下の tasks.json の 1 冊だけ。
+        # 通常はユーザー置き場直下の tasks.json の 1 ファイルだけ。
         # tasks_file の明示は、保持期限の掃除が移行前の旧ファイルを
         # 個別に処理する場合などに限る。
         self.tasks_file = (tasks_file if tasks_file is not None
                            else data_dir / "tasks.json")
-        # 本体の読み込み時だけ、旧い部屋ごと台帳を取り込む。掃除側が
+        # 本体の読み込み時だけ、旧い部屋ごとの用事ファイルを取り込む。掃除側が
         # dry-run で本体を覗く場合などは、読み込みの副作用を止められる。
         self._migrate_legacy = (
             tasks_file is None if migrate_legacy is None else migrate_legacy)
@@ -106,7 +106,7 @@ class TaskBoard:
 
     @staticmethod
     def _read_tasks_file(path: Path) -> list[Task] | None:
-        """台帳ファイルを読み、用事の並びを返す。
+        """用事ファイルを読み、用事の並びを返す。
 
         ファイルが無い場合は空の並び、JSON として読めない・配列で
         ない場合は None を返す（移行元として読めたかどうかの区別に使う）。
@@ -125,11 +125,11 @@ class TaskBoard:
 
     def _load(self) -> list[Task]:
         tasks = self._read_tasks_file(self.tasks_file)
-        # 壊れた台帳は空として始める
+        # 壊れたファイルは空として始める
         return tasks if tasks is not None else []
 
     def _import_legacy_boards(self) -> None:
-        """旧仕様の部屋ごと台帳（tasks/*.json）を本体へ取り込む。
+        """旧仕様の部屋ごとの用事ファイル（tasks/*.json）を本体へ取り込む。
 
         ID が本体の用事と衝突したら使われていない番号へ振り直す。
         読めたファイルだけを取り込み対象とし、本体への保存が済んだ
@@ -224,7 +224,7 @@ class TaskBoard:
     def list(self, status: str | None = None) -> list[Task]:
         """用事の一覧。status を渡すとその状態だけを返す。
 
-        台帳はユーザーごとに共有される 1 冊なので、他のセッションが
+        用事の一覧はユーザーごとに共有される 1 つなので、他のセッションが
         追加した用事も見えるよう、返す前にファイルを読み直す。
         """
         self._tasks = self._load()
@@ -242,7 +242,7 @@ class TaskBoard:
 
         保持期限のクリーンアップ用。進行中の用事と、更新時刻が
         読めない用事は残す。取り除いた（dry_run では取り除くはずの）
-        件数を返す。dry_run でなければ台帳を保存し直す。
+        件数を返す。dry_run でなければ用事ファイルを保存し直す。
         """
         self._tasks = self._load()  # 他のセッションの変更を消さないよう読み直す
         kept: list[Task] = []

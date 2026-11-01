@@ -21,9 +21,9 @@ def test_activity_label_known_tools():
     assert activity_label("write_file") == "ファイルを書いています"
     assert activity_label("edit_file") == "ファイルを編集中"
     assert activity_label("run_shell") == "コマンドを実行中"
-    assert activity_label("list_tasks") == "台帳を確認中"
-    assert activity_label("create_task") == "台帳を更新中"
-    assert activity_label("update_task") == "台帳を更新中"
+    assert activity_label("list_tasks") == "用事を確認中"
+    assert activity_label("create_task") == "用事を記録中"
+    assert activity_label("update_task") == "用事を記録中"
     assert activity_label("write_memory") == "記憶に書き留め中"
 
 
@@ -33,7 +33,7 @@ def test_activity_label_includes_safe_hint():
     assert activity_label("write_file", {"path": "a/b.txt"}) == \
         "ファイルを書いています（a/b.txt）"
     assert activity_label("create_task", {"title": "買い物"}) == \
-        "台帳を更新中（買い物）"
+        "用事を記録中（買い物）"
 
 
 def test_activity_label_ignores_unsafe_or_missing_hint():

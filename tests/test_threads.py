@@ -1,6 +1,6 @@
 """スレッド（セッション）の管理: 作成・選択・削除のテスト。
 
-記録の削除は conversations/<名前>.jsonl だけを対象とし、台帳
+記録の削除は conversations/<名前>.jsonl だけを対象とし、用事の一覧
 （tasks.json）と長期記憶（MEMORY.md）には触れないこと、Web の
 削除 API と CLI（threads）の両方から扱えることを確認する。
 """
@@ -41,7 +41,7 @@ def test_delete_session_record_removes_only_that_file(tmp_path: Path):
     assert delete_session_record(tmp_path, "work") is True
     assert not target.exists()
     assert other.exists()  # 別のスレッドは残る
-    assert tasks.exists()  # 台帳には触れない
+    assert tasks.exists()  # 用事の一覧には触れない
     assert (tmp_path / "MEMORY.md").exists()  # 長期記憶にも触れない
 
 

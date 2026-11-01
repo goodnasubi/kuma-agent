@@ -112,7 +112,7 @@ def list_session_ids(data_dir: Path) -> list[str]:
 def delete_session_record(user_data_dir: Path, session_id: str) -> bool:
     """セッション（スレッド）の記録ファイルだけを削除する。
 
-    対象は conversations/<session_id>.jsonl のみで、台帳
+    対象は conversations/<session_id>.jsonl のみで、用事の一覧
     （tasks.json）や長期記憶（MEMORY.md）には触れない。記録が
     存在して消せたら True、無かった場合や消せなかった場合は
     False を返す（例外にはしない）。
@@ -183,11 +183,11 @@ def retention_days_for(data_dir: Path, tenant: str | None,
 
 
 def iter_tasks_files(data_dir: Path) -> list[Path]:
-    """掃除対象の台帳ファイルを列挙する。
+    """掃除対象の用事ファイルを列挙する。
 
-    現在の台帳はユーザー置き場の tasks.json の 1 冊だけだが、移行前の
-    部屋ごと台帳（tasks/*.json）が残っている場合も、保持期限の掃除
-    では対象に含めるため、両方を返す。無いものは含めない。
+    現在の用事の一覧はユーザー置き場の tasks.json に置くが、移行前の
+    部屋ごとの用事ファイル（tasks/*.json）が残っている場合も、保持期限の
+    掃除では対象に含めるため、両方を返す。無いものは含めない。
     """
     files: list[Path] = []
     if (data_dir / "tasks.json").is_file():
@@ -220,8 +220,8 @@ def cleanup_expired(data_dir: Path, retention_days: int,
     消さない:
     - 部屋の記録ファイル（conversations/*.jsonl）のうち、最終更新が
       期限より古いもの（ファイルごと削除）
-    - 台帳（現在の tasks.json と、残っていれば移行前の tasks/*.json）の
-      うち、完了（done）してから更新が期限より古い用事（レコードだけ
+    - 用事の一覧（現在の tasks.json と、残っていれば移行前の tasks/*.json）
+      のうち、完了（done）してから更新が期限より古い用事（レコードだけ
       除去し、ファイルは残す）
 
     tenant を指定した場合はそのテナントの置き場（配下の全ユーザー）
@@ -271,7 +271,7 @@ def cleanup_expired(data_dir: Path, retention_days: int,
                     result.tasks_removed += board.prune_done_before(
                         cutoff, dry_run=dry_run)
                 except Exception:
-                    continue  # 壊れた台帳などは飛ばす
+                    continue  # 壊れた用事ファイルなどは飛ばす
     return result
 
 

@@ -25,9 +25,9 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "edit": "ファイルを編集中",
     "run_shell": "コマンドを実行中",
     "now": "時刻を確認中",
-    "list_tasks": "台帳を確認中",
-    "create_task": "台帳を更新中",
-    "update_task": "台帳を更新中",
+    "list_tasks": "用事を確認中",
+    "create_task": "用事を記録中",
+    "update_task": "用事を記録中",
     "remember": "記憶に書き留め中",
     "write_memory": "記憶に書き留め中",
     "save_memory": "記憶に書き留め中",
@@ -37,7 +37,7 @@ _ACTIVITY_LABELS: dict[str, str] = {
 def activity_label(name: str, args: dict | None = None) -> str:
     """道具の呼び出しを「今なにをしているか」の表示文言にする。
 
-    対応表にある道具は専用の文言を返し、ファイル名や台帳の題名など
+    対応表にある道具は専用の文言を返し、ファイル名や用事の題名など
     安全な手がかりが引数にあれば括弧で添える。対応表にない道具は
     名前を含む汎用表示にする。
     """
@@ -97,17 +97,17 @@ class ToolBox:
 
     def _register_task_tools(self) -> None:
         guidance = (
-            "会話の中で話題が切り替わったら、その用事を台帳に登録・更新して、"
+            "会話の中で話題が切り替わったら、その用事を用事の一覧に登録・更新して、"
             "用事ごとの状態を分けて保つこと。"
         )
         self.register(Tool(
             "list_tasks",
-            f"台帳にある用事を、状態付きですべて返す。{guidance}",
+            f"記録した用事を、状態付きですべて返す。{guidance}",
             {"type": "object", "properties": {}},
             self._list_tasks,
         ))
         self.register(Tool(
-            "create_task", f"用事を台帳に登録する。{guidance}",
+            "create_task", f"用事を用事の一覧に登録する。{guidance}",
             {"type": "object", "properties": {
                 "title": {"type": "string"},
                 "memo": {"type": "string"}},
@@ -116,7 +116,7 @@ class ToolBox:
         ))
         self.register(Tool(
             "update_task",
-            f"台帳の用事を更新する（メモの付け替え、終わったら status を done にする）。{guidance}",
+            f"記録した用事を更新する（メモの付け替え、終わったら status を done にする）。{guidance}",
             {"type": "object", "properties": {
                 "id": {"type": "string"},
                 "memo": {"type": "string"},
