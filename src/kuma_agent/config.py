@@ -52,6 +52,10 @@ class Config:
         default_factory=lambda: _env_int("KUMA_COMPACT_AFTER_MESSAGES", 40))
     compact_keep: int = field(
         default_factory=lambda: _env_int("KUMA_COMPACT_KEEP_MESSAGES", 10))
+    # 記録の保持期限（日数）。部屋の記録と完了した用事は、最終更新から
+    # この日数を過ぎたら自動で掃除される（cleanup_expired）。0 で無期限
+    retention_days: int = field(
+        default_factory=lambda: _env_int("KUMA_RETENTION_DAYS", 90))
 
     @property
     def tenant_data_dir(self) -> Path:

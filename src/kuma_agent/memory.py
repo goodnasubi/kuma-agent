@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
+
+from .tasks import TaskBoard
 
 DEFAULT_SESSION_ID = "main"
 _MAX_SESSION_ID_LEN = 64
@@ -103,6 +107,73 @@ def list_session_ids(data_dir: Path) -> list[str]:
     if not conv.is_dir():
         return []
     return sorted(p.stem for p in conv.glob("*.jsonl"))
+
+
+def iter_user_dirs(data_dir: Path) -> Iterator[Path]:
+    """全テナント×ユーザーの実効データ置き場を列挙する。
+
+    既定テナント×既定ユーザーの置き場（data_dir そのもの）から、
+    保存済みのテナント・ユーザーの置き場までをすべて返す。
+    """
+    for tenant in list_tenant_names(data_dir):
+        tdir = tenant_dir(data_dir, tenant)
+        for user in list_user_names(tdir):
+            yield user_dir(tdir, user)
+
+
+@dataclass
+class CleanupResult:
+    """クリーンアップで削除した件数の内訳。"""
+    sessions_removed: int = 0
+    tasks_removed: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.sessions_removed + self.tasks_removed
+
+
+def cleanup_expired(data_dir: Path, retention_days: int,
+                    now: datetime | None = None,
+                    dry_run: bool = False) -> CleanupResult:
+    """保持期限を過ぎた記録を全テナント×ユーザー置き場から掃除する。
+
+    対象は次の 2 つだけで、長期記憶（MEMORY.md）と人格ファイルは
+    消さない:
+    - 部屋の記録ファイル（conversations/*.jsonl）のうち、最終更新が
+      期限より古いもの（ファイルごと削除）
+    - 台帳（tasks.json）のうち、完了（done）してから更新が期限より
+      古い用事（レコードだけ除去し、ファイルは残す）
+
+    retention_days が 0 以下なら無期限として何もしない。置き場が
+    無かったり読めなかったりしても例外で落とさず、その分を飛ばす。
+    dry_run では削除せず、対象の件数だけを数えて返す。
+    """
+    result = CleanupResult()
+    if retention_days <= 0:
+        return result
+    now = now or datetime.now()
+    cutoff = now - timedelta(days=retention_days)
+    cutoff_ts = cutoff.timestamp()
+    for udir in iter_user_dirs(data_dir):
+        conv = udir / "conversations"
+        if conv.is_dir():
+            for path in sorted(conv.glob("*.jsonl")):
+                try:
+                    if path.stat().st_mtime >= cutoff_ts:
+                        continue
+                    if not dry_run:
+                        path.unlink()
+                    result.sessions_removed += 1
+                except OSError:
+                    continue  # 読めない・消せないファイルは飛ばす
+        if (udir / "tasks.json").is_file():
+            try:
+                board = TaskBoard(udir)
+                result.tasks_removed += board.prune_done_before(
+                    cutoff, dry_run=dry_run)
+            except Exception:
+                continue  # 壊れた台帳などは飛ばす
+    return result
 
 
 class Memory:

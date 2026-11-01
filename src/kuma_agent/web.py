@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 from .llm import MAX_ATTACHMENT_BYTES, Attachment, guess_media_type
 from .memory import (
     DEFAULT_SESSION_ID,
+    cleanup_expired,
     list_session_ids,
     list_tenant_names,
     list_user_names,
@@ -799,7 +800,18 @@ def build_server(session: Session, host: str = "127.0.0.1",
 
 
 def serve(session: Session, host: str = "127.0.0.1", port: int = 8765) -> None:
-    """Web UI を起動し、Ctrl-C まで待ち続ける。"""
+    """Web UI を起動し、Ctrl-C まで待ち続ける。
+
+    起動時に保持期限（Config.retention_days）を過ぎた記録の掃除を
+    1 回だけ行う。サービスとして動かす場合、利用者はデータ置き場の
+    ファイルを自分で消せないため、この自動掃除が前提になる。
+    """
+    cfg = session.cfg
+    result = cleanup_expired(cfg.data_dir, cfg.retention_days)
+    if result.total:
+        print(f"保持期限を過ぎた記録を掃除しました: "
+              f"部屋の記録 {result.sessions_removed} 件、"
+              f"完了した用事 {result.tasks_removed} 件")
     server = build_server(session, host, port)
     print(f"クマの Web UI: http://{host}:{server.server_address[1]} （終了は Ctrl-C）")
     try:

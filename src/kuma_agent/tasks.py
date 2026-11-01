@@ -14,6 +14,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+
+def _parse_time(raw: str) -> datetime | None:
+    """ISO 形式の時刻文字列を読む。読めなければ None（対象から外す）。"""
+    try:
+        return datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+
 STATUS_OPEN = "open"
 STATUS_DONE = "done"
 _STATUSES = (STATUS_OPEN, STATUS_DONE)
@@ -145,3 +153,26 @@ class TaskBoard:
     def open_tasks(self) -> list[Task]:
         """進行中（open）の用事の一覧。"""
         return self.list(STATUS_OPEN)
+
+    def prune_done_before(self, cutoff: datetime, *,
+                          dry_run: bool = False) -> int:
+        """完了済みで更新時刻が cutoff より古い用事を取り除く。
+
+        保持期限のクリーンアップ用。進行中の用事と、更新時刻が
+        読めない用事は残す。取り除いた（dry_run では取り除くはずの）
+        件数を返す。dry_run でなければ台帳を保存し直す。
+        """
+        self._tasks = self._load()  # 他のセッションの変更を消さないよう読み直す
+        kept: list[Task] = []
+        removed = 0
+        for task in self._tasks:
+            updated = _parse_time(task.updated_at)
+            if (task.status == STATUS_DONE and updated is not None
+                    and updated < cutoff):
+                removed += 1
+            else:
+                kept.append(task)
+        if removed and not dry_run:
+            self._tasks = kept
+            self._save()
+        return removed

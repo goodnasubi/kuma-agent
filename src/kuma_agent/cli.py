@@ -6,7 +6,24 @@ import sys
 
 from .config import Config
 from .llm import create_client
+from .memory import cleanup_expired
 from .session import Session
+
+
+def _run_cleanup(cfg: Config, dry_run: bool = False) -> int:
+    """保持期限を過ぎた記録の掃除（運用者向けコマンドの本体）。"""
+    if cfg.retention_days <= 0:
+        print("保持期限は無期限（KUMA_RETENTION_DAYS=0）のため、掃除しません")
+        return 0
+    result = cleanup_expired(cfg.data_dir, cfg.retention_days, dry_run=dry_run)
+    if dry_run:
+        print(f"削除対象: 部屋の記録 {result.sessions_removed} 件、"
+              f"完了した用事 {result.tasks_removed} 件"
+              "（--dry-run のため削除していません）")
+    else:
+        print(f"削除しました: 部屋の記録 {result.sessions_removed} 件、"
+              f"完了した用事 {result.tasks_removed} 件")
+    return 0
 
 
 def _show_status(status: str) -> None:
@@ -41,13 +58,18 @@ def main(argv: list[str] | None = None) -> int:
                             help="起動時のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
     web_parser.add_argument("--user", default=None,
                             help="起動時のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
+    cleanup_parser = sub.add_parser("cleanup", help="保持期限を過ぎた記録を掃除する")
+    cleanup_parser.add_argument("--dry-run", action="store_true",
+                                help="削除せず、対象の件数だけを表示する")
     args = parser.parse_args(argv)
 
     cfg = Config()
-    if args.tenant is not None:  # CLI 引数は環境変数より優先する
+    if getattr(args, "tenant", None) is not None:  # CLI 引数は環境変数より優先する
         cfg.tenant = args.tenant
-    if args.user is not None:
+    if getattr(args, "user", None) is not None:
         cfg.user = args.user
+    if args.command == "cleanup":  # 掃除はモデルも API キーも要らない
+        return _run_cleanup(cfg, dry_run=args.dry_run)
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)
