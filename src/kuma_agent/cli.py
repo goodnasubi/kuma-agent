@@ -6,16 +6,40 @@ import sys
 
 from .config import Config
 from .llm import create_client
-from .memory import cleanup_expired
+from .memory import (cleanup_expired, normalize_tenant_name,
+                     retention_days_for)
 from .session import Session
 
 
-def _run_cleanup(cfg: Config, dry_run: bool = False) -> int:
-    """保持期限を過ぎた記録の掃除（運用者向けコマンドの本体）。"""
-    if cfg.retention_days <= 0:
-        print("保持期限は無期限（KUMA_RETENTION_DAYS=0）のため、掃除しません")
-        return 0
-    result = cleanup_expired(cfg.data_dir, cfg.retention_days, dry_run=dry_run)
+def _run_cleanup(cfg: Config, dry_run: bool = False,
+                 tenant: str | None = None,
+                 days: int | None = None) -> int:
+    """保持期限を過ぎた記録の掃除（運用者向けコマンドの本体）。
+
+    tenant を指定した場合はそのテナントの置き場だけを掃除する。
+    days を指定した場合はその場限りの上書きとして、対象範囲すべて
+    にその日数を適用する（retention.json と全体既定より優先）。
+    """
+    if tenant is not None:
+        print(f"対象テナント: {normalize_tenant_name(tenant)}")
+    if days is not None:
+        print(f"保持期限: {days} 日（--days の指定）")
+        if days <= 0:
+            print("保持期限は無期限のため、掃除しません")
+            return 0
+    elif tenant is not None:
+        resolved = retention_days_for(cfg.data_dir, tenant,
+                                      cfg.retention_days)
+        print(f"保持期限: {resolved} 日")
+        if resolved <= 0:
+            print("保持期限は無期限のため、掃除しません")
+            return 0
+    else:
+        print(f"保持期限: 全体の既定 {cfg.retention_days} 日"
+              "（テナントごとの指定は retention.json）")
+    result = cleanup_expired(cfg.data_dir, cfg.retention_days,
+                             dry_run=dry_run, tenant=tenant,
+                             override_days=days)
     if dry_run:
         print(f"削除対象: 部屋の記録 {result.sessions_removed} 件、"
               f"完了した用事 {result.tasks_removed} 件"
@@ -61,6 +85,11 @@ def main(argv: list[str] | None = None) -> int:
     cleanup_parser = sub.add_parser("cleanup", help="保持期限を過ぎた記録を掃除する")
     cleanup_parser.add_argument("--dry-run", action="store_true",
                                 help="削除せず、対象の件数だけを表示する")
+    cleanup_parser.add_argument("--tenant", default=None,
+                                help="掃除するテナント名（既定: 全テナント）")
+    cleanup_parser.add_argument("--days", type=int, default=None,
+                                help="保持日数をその場限りで上書きする"
+                                     "（retention.json と全体既定より優先、0 で無期限）")
     args = parser.parse_args(argv)
 
     cfg = Config()
@@ -69,7 +98,8 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "user", None) is not None:
         cfg.user = args.user
     if args.command == "cleanup":  # 掃除はモデルも API キーも要らない
-        return _run_cleanup(cfg, dry_run=args.dry_run)
+        return _run_cleanup(cfg, dry_run=args.dry_run, tenant=args.tenant,
+                            days=args.days)
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)

@@ -802,9 +802,11 @@ def build_server(session: Session, host: str = "127.0.0.1",
 def serve(session: Session, host: str = "127.0.0.1", port: int = 8765) -> None:
     """Web UI を起動し、Ctrl-C まで待ち続ける。
 
-    起動時に保持期限（Config.retention_days）を過ぎた記録の掃除を
-    1 回だけ行う。サービスとして動かす場合、利用者はデータ置き場の
-    ファイルを自分で消せないため、この自動掃除が前提になる。
+    起動時に保持期限を過ぎた記録の掃除を 1 回だけ行う。保持期間は
+    Config.retention_days（全体の既定）が基本で、データ置き場の
+    retention.json に指定があるテナントはその期間が優先される。
+    サービスとして動かす場合、利用者はデータ置き場のファイルを
+    自分で消せないため、この自動掃除が前提になる。
     """
     cfg = session.cfg
     result = cleanup_expired(cfg.data_dir, cfg.retention_days)

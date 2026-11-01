@@ -109,16 +109,60 @@ def list_session_ids(data_dir: Path) -> list[str]:
     return sorted(p.stem for p in conv.glob("*.jsonl"))
 
 
-def iter_user_dirs(data_dir: Path) -> Iterator[Path]:
-    """全テナント×ユーザーの実効データ置き場を列挙する。
+def iter_user_dirs(data_dir: Path,
+                   tenant: str | None = None) -> Iterator[Path]:
+    """テナント×ユーザーの実効データ置き場を列挙する。
 
     既定テナント×既定ユーザーの置き場（data_dir そのもの）から、
-    保存済みのテナント・ユーザーの置き場までをすべて返す。
+    保存済みのテナント・ユーザーの置き場までを返す。tenant を指定
+    した場合はそのテナントの置き場（配下の全ユーザー）だけを返す。
     """
-    for tenant in list_tenant_names(data_dir):
-        tdir = tenant_dir(data_dir, tenant)
+    tenants = ([normalize_tenant_name(tenant)] if tenant is not None
+               else list_tenant_names(data_dir))
+    for name in tenants:
+        tdir = tenant_dir(data_dir, name)
         for user in list_user_names(tdir):
             yield user_dir(tdir, user)
+
+
+RETENTION_FILENAME = "retention.json"
+
+
+def load_retention_overrides(data_dir: Path) -> dict[str, int]:
+    """テナントごとの保持期間の上書き（retention.json）を読み込む。
+
+    データ置き場ルートの retention.json に
+    {"tenants": {"<テナント名>": <日数>}} と書くと、そのテナント
+    だけ保持期間を変えられる（0 でそのテナントだけ無期限）。
+    テナント名は通常の正規化を通して照合する。値が負数や数値で
+    ない項目は無視し、ファイルが無い・壊れている場合も例外に
+    せず、空（＝上書きなし）として返す。
+    """
+    try:
+        raw = json.loads(
+            (data_dir / RETENTION_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict) or not isinstance(raw.get("tenants"), dict):
+        return {}
+    overrides: dict[str, int] = {}
+    for name, days in raw["tenants"].items():
+        # bool は int の仲間だが日数としては意味を持たないので除く
+        if isinstance(days, bool) or not isinstance(days, int) or days < 0:
+            continue
+        overrides[normalize_tenant_name(name)] = days
+    return overrides
+
+
+def retention_days_for(data_dir: Path, tenant: str | None,
+                       default_days: int) -> int:
+    """テナントの実効保持期間を解決する。
+
+    retention.json に指定があればそれを使い、無ければ全体の
+    既定（default_days）を返す。
+    """
+    overrides = load_retention_overrides(data_dir)
+    return overrides.get(normalize_tenant_name(tenant), default_days)
 
 
 @dataclass
@@ -134,8 +178,10 @@ class CleanupResult:
 
 def cleanup_expired(data_dir: Path, retention_days: int,
                     now: datetime | None = None,
-                    dry_run: bool = False) -> CleanupResult:
-    """保持期限を過ぎた記録を全テナント×ユーザー置き場から掃除する。
+                    dry_run: bool = False,
+                    tenant: str | None = None,
+                    override_days: int | None = None) -> CleanupResult:
+    """保持期限を過ぎた記録をテナント×ユーザー置き場から掃除する。
 
     対象は次の 2 つだけで、長期記憶（MEMORY.md）と人格ファイルは
     消さない:
@@ -144,35 +190,52 @@ def cleanup_expired(data_dir: Path, retention_days: int,
     - 台帳（tasks.json）のうち、完了（done）してから更新が期限より
       古い用事（レコードだけ除去し、ファイルは残す）
 
-    retention_days が 0 以下なら無期限として何もしない。置き場が
-    無かったり読めなかったりしても例外で落とさず、その分を飛ばす。
-    dry_run では削除せず、対象の件数だけを数えて返す。
+    tenant を指定した場合はそのテナントの置き場（配下の全ユーザー）
+    だけを走査し、他のテナントには一切触れない。存在しないテナント
+    名では対象 0 件になる。未指定なら全テナントが対象。
+
+    保持期間はテナントごとに解決する: データ置き場ルートの
+    retention.json に指定があるテナントはその期間を使い、無い
+    テナントは retention_days（全体の既定）を使う。override_days を
+    指定した場合は、その場限りの上書きとして全テナントにその日数を
+    適用し、retention.json より優先する。解決した期間が 0 以下なら、
+    そのテナントは無期限として何もしない。
+
+    置き場が無かったり読めなかったりしても例外で落とさず、その分を
+    飛ばす。dry_run では削除せず、対象の件数だけを数えて返す。
     """
     result = CleanupResult()
-    if retention_days <= 0:
-        return result
     now = now or datetime.now()
-    cutoff = now - timedelta(days=retention_days)
-    cutoff_ts = cutoff.timestamp()
-    for udir in iter_user_dirs(data_dir):
-        conv = udir / "conversations"
-        if conv.is_dir():
-            for path in sorted(conv.glob("*.jsonl")):
+    overrides = ({} if override_days is not None
+                 else load_retention_overrides(data_dir))
+    tenants = ([normalize_tenant_name(tenant)] if tenant is not None
+               else list_tenant_names(data_dir))
+    for name in tenants:
+        days = (override_days if override_days is not None
+                else overrides.get(name, retention_days))
+        if days <= 0:
+            continue  # このテナントは無期限
+        cutoff = now - timedelta(days=days)
+        cutoff_ts = cutoff.timestamp()
+        for udir in iter_user_dirs(data_dir, name):
+            conv = udir / "conversations"
+            if conv.is_dir():
+                for path in sorted(conv.glob("*.jsonl")):
+                    try:
+                        if path.stat().st_mtime >= cutoff_ts:
+                            continue
+                        if not dry_run:
+                            path.unlink()
+                        result.sessions_removed += 1
+                    except OSError:
+                        continue  # 読めない・消せないファイルは飛ばす
+            if (udir / "tasks.json").is_file():
                 try:
-                    if path.stat().st_mtime >= cutoff_ts:
-                        continue
-                    if not dry_run:
-                        path.unlink()
-                    result.sessions_removed += 1
-                except OSError:
-                    continue  # 読めない・消せないファイルは飛ばす
-        if (udir / "tasks.json").is_file():
-            try:
-                board = TaskBoard(udir)
-                result.tasks_removed += board.prune_done_before(
-                    cutoff, dry_run=dry_run)
-            except Exception:
-                continue  # 壊れた台帳などは飛ばす
+                    board = TaskBoard(udir)
+                    result.tasks_removed += board.prune_done_before(
+                        cutoff, dry_run=dry_run)
+                except Exception:
+                    continue  # 壊れた台帳などは飛ばす
     return result
 
 
