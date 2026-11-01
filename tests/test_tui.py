@@ -32,8 +32,8 @@ def test_format_log_shows_speakers_and_skips_tools():
         Message("assistant", "やあ、元気？"),
     ]
     lines = format_log(messages, width=40)
-    assert lines[0].startswith("あなた: こんにちは")
-    assert any(line.startswith("クマ: やあ、元気？") for line in lines)
+    assert lines[0].startswith("[1] あなた: こんにちは")
+    assert any(line.startswith("[2] クマ: やあ、元気？") for line in lines)
     assert all("2026-11-02" not in line for line in lines)
 
 

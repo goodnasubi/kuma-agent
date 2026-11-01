@@ -12,13 +12,20 @@ import unicodedata
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
-from .llm import MAX_ATTACHMENT_BYTES, Attachment, Message, guess_media_type
+from .llm import (
+    MAX_ATTACHMENT_BYTES,
+    Attachment,
+    Message,
+    guess_media_type,
+    quoted_content,
+)
 from .session import Session
 
 USER_LABEL = "あなた"
 ASSISTANT_LABEL = "クマ"
 QUIT_COMMAND = "/quit"
 ATTACH_COMMAND = "/attach"
+QUOTE_COMMAND = "/quote"
 
 
 # ---------------------------------------------------------------- 純粋関数
@@ -52,25 +59,65 @@ def wrap_display(text: str, width: int) -> list[str]:
     return lines
 
 
+def visible_messages(messages: Iterable[Message]) -> list[Message]:
+    """画面に出す発話だけを順番に取り出す。
+
+    道具のやり取りと、本文も添付も無い発話は除く。通し番号は
+    この並びに対して付ける。
+    """
+    visible: list[Message] = []
+    for msg in messages:
+        if msg.role not in ("user", "assistant"):
+            continue
+        if msg.content or msg.attachments or msg.quote:
+            visible.append(msg)
+    return visible
+
+
+def numbered_messages(
+        messages: Iterable[Message]) -> list[tuple[int, Message]]:
+    """表示対象の発話に 1 始まりの通し番号を付ける。"""
+    return list(enumerate(visible_messages(messages), start=1))
+
+
+def quote_text_for_number(messages: Iterable[Message],
+                          number: int) -> str | None:
+    """通し番号に対応する発話の引用文を取り出す。
+
+    本文が無い発話では添付のプレースホルダを引用文にする。
+    対応する番号が無ければ None。
+    """
+    for num, msg in numbered_messages(messages):
+        if num != number:
+            continue
+        if msg.content:
+            return msg.content
+        if msg.attachments:
+            return " ".join(att.placeholder() for att in msg.attachments)
+        return msg.quote
+    return None
+
+
 def format_log(messages: Iterable[Message], width: int = 80) -> list[str]:
     """会話履歴を表示用の行リストに整形する。
 
     道具のやり取り（role == "tool" や道具呼び出しだけの応答）は
-    画面には出さず、利用者とクマの発話だけを見せる。添付は
-    プレースホルダ文で併記する。
+    画面には出さず、利用者とクマの発話だけを見せる。各発話には
+    `/quote` で指定するための通し番号を付け、引用がある発話は
+    引用ブロックを本文の前に表示する。添付はプレースホルダ文で
+    併記する。
     """
     lines: list[str] = []
-    for msg in messages:
-        if msg.role not in ("user", "assistant"):
-            continue
-        text = msg.content
+    for number, msg in numbered_messages(messages):
+        text = quoted_content(msg)
         if msg.attachments:
             marks = " ".join(att.placeholder() for att in msg.attachments)
             text = f"{text} {marks}" if text else marks
         if not text:
             continue
-        label = USER_LABEL if msg.role == "user" else ASSISTANT_LABEL
-        body = wrap_display(text, max(10, width - display_width(label) - 2))
+        speaker = USER_LABEL if msg.role == "user" else ASSISTANT_LABEL
+        label = f"[{number}] {speaker}"
+        body = wrap_display(text, max(1, width - display_width(label) - 2))
         lines.append(f"{label}: {body[0]}" if body else f"{label}:")
         indent = " " * (display_width(label) + 2)
         lines.extend(indent + line for line in body[1:])
@@ -96,6 +143,25 @@ def parse_attach_command(text: str) -> str | None:
     if stripped.startswith(ATTACH_COMMAND + " "):
         return stripped[len(ATTACH_COMMAND):].strip()
     return None
+
+
+def parse_quote_command(text: str) -> int | None:
+    """`/quote <番号>` なら番号を、そうでなければ None を返す。
+
+    番号が無い・数値でない・1 未満の場合は 0 を返す（呼び出し側で
+    使い方を案内する）。
+    """
+    stripped = text.strip()
+    if stripped == QUOTE_COMMAND:
+        return 0
+    if not stripped.startswith(QUOTE_COMMAND + " "):
+        return None
+    raw = stripped[len(QUOTE_COMMAND):].strip()
+    try:
+        number = int(raw)
+    except ValueError:
+        return 0
+    return number if number >= 1 else 0
 
 
 def load_attachment(path_text: str, base_dir: Path | None = None) -> Attachment:
@@ -151,6 +217,7 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
     buffer = ""  # 入力中の文字列
     offset = 0  # ログのスクロール量（0 で最下部に追従）
     pending: list[Attachment] = []  # 次の発話に添える添付
+    pending_quote: str | None = None  # 次の発話で引用する過去の発話
 
     def notice(text: str) -> None:
         session.history.append(Message("assistant", text))
@@ -159,6 +226,7 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
         height, width = stdscr.getmaxyx()  # type: ignore[attr-defined]
         stdscr.erase()  # type: ignore[attr-defined]
         header = (f" クマ ─ provider: {provider} ─ Enter: 送信 / "
+                  f"{QUOTE_COMMAND} <番号>: 引用 / "
                   f"{ATTACH_COMMAND} <パス>: 添付 / {QUIT_COMMAND}: 終了")
         _safe_addstr(stdscr, 0, 0, header[: max(0, width - 1)])
         try:
@@ -220,12 +288,26 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
                 pending.append(att)
                 notice(f"（添付しました: {att.name}。次の発話に添付されます）")
                 continue
+            quote_number = parse_quote_command(text)
+            if quote_number is not None:
+                if quote_number == 0:
+                    notice(f"（使い方: {QUOTE_COMMAND} <発話の番号>）")
+                    continue
+                quote_text = quote_text_for_number(session.history, quote_number)
+                if quote_text is None:
+                    notice(f"（[{quote_number}] の発話が見つかりません）")
+                    continue
+                pending_quote = quote_text
+                notice(f"（引用を設定しました: [{quote_number}] {quote_text}"
+                       "。次の発話に引用されます）")
+                continue
             try:
-                session.say(text, list(pending))
+                session.say(text, list(pending), quote=pending_quote)
             except Exception as exc:
                 session.history.append(Message("assistant", f"（エラー: {exc}）"))
             finally:
                 pending.clear()
+                pending_quote = None
             continue
         if isinstance(key, str) and key in ("\x7f", "\b"):  # Backspace / Delete
             buffer = buffer[:-1]

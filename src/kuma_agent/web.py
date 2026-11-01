@@ -10,13 +10,20 @@ import base64
 import binascii
 import json
 import threading
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlsplit
 
 from .llm import MAX_ATTACHMENT_BYTES, Attachment, guess_media_type
-from .memory import list_session_ids, normalize_session_id
+from .memory import (
+    DEFAULT_SESSION_ID,
+    list_session_ids,
+    list_tenant_names,
+    normalize_session_id,
+    normalize_tenant_name,
+)
 from .session import Session
 
 # ブランド色（README のイメージカラー）
@@ -70,8 +77,22 @@ _PAGE_TEMPLATE = """\
   .msg.user { align-self: flex-end; background: __HONEY__; color: #fff; }
   .msg.assistant { align-self: flex-start; background: #fff;
                     border: 1px solid __HONEY__; }
+  .msg .quoted { display: block; font-size: 12px; opacity: .85;
+                 border-left: 3px solid currentColor; padding-left: 6px;
+                 margin-bottom: 4px; }
+  .msg .bodyText { display: block; }
+  .quote-btn { display: block; margin-top: 6px; padding: 2px 8px;
+               font-size: 12px; background: transparent; color: inherit;
+               border: 1px solid currentColor; border-radius: 999px; }
   form { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; background: #fff;
          border-top: 1px solid __HONEY__; }
+  #quoteBox { flex-basis: 100%; display: flex; gap: 8px; align-items: center;
+              font-size: 13px; background: __CREAM__; padding: 6px 8px;
+              border-left: 4px solid __HONEY__; }
+  #quoteBox[hidden] { display: none; }
+  #quoteText { flex: 1; overflow: hidden; text-overflow: ellipsis;
+               white-space: nowrap; }
+  #clearQuote { padding: 4px 10px; font-size: 12px; }
   #files { flex-basis: 100%; font-size: 13px; min-height: 1em; }
   #files:empty { display: none; }
   #input { flex: 1; padding: 10px; font-size: 16px; border: 1px solid __COCOA__;
@@ -94,6 +115,12 @@ _PAGE_TEMPLATE = """\
     <div class="provider">provider: __PROVIDER__</div>
   </div>
   <div class="sessions">
+    <label for="tenantSelect">テナント</label>
+    <select id="tenantSelect"></select>
+    <input id="newTenant" placeholder="新しいテナント" size="10">
+    <button id="createTenant" type="button">作成</button>
+  </div>
+  <div class="sessions">
     <label for="sessionSelect">部屋</label>
     <select id="sessionSelect"></select>
     <input id="newSession" placeholder="新しい部屋" size="10">
@@ -103,6 +130,10 @@ _PAGE_TEMPLATE = """\
 <div id="log"></div>
 <div id="dropHint">ファイルを離すと添付します</div>
 <form id="form">
+  <div id="quoteBox" hidden>
+    <span id="quoteText"></span>
+    <button id="clearQuote" type="button">解除</button>
+  </div>
   <div id="files"></div>
   <button id="attach" type="button">添付</button>
   <input id="file" type="file" multiple hidden>
@@ -117,16 +148,55 @@ const send = document.getElementById('send');
 const attachBtn = document.getElementById('attach');
 const fileInput = document.getElementById('file');
 const filesLabel = document.getElementById('files');
+const tenantSelect = document.getElementById('tenantSelect');
+const newTenantInput = document.getElementById('newTenant');
+const createTenantBtn = document.getElementById('createTenant');
 const sessionSelect = document.getElementById('sessionSelect');
 const newSessionInput = document.getElementById('newSession');
 const createSessionBtn = document.getElementById('createSession');
+const quoteBox = document.getElementById('quoteBox');
+const quoteText = document.getElementById('quoteText');
+const clearQuoteBtn = document.getElementById('clearQuote');
 let pendingFiles = [];
+let pendingQuote = null;
+let currentTenant = 'default';
 let currentSession = 'main';
 
-function addMsg(role, text) {
+function setQuote(text) {
+  if (!text) return;
+  pendingQuote = text;
+  quoteText.textContent = '引用: ' + text;
+  quoteBox.hidden = false;
+  input.focus();
+}
+
+function clearQuote() {
+  pendingQuote = null;
+  quoteText.textContent = '';
+  quoteBox.hidden = true;
+}
+
+clearQuoteBtn.addEventListener('click', clearQuote);
+
+function addMsg(role, text, quote = null, quoteSource = null) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
-  div.textContent = text;
+  if (quote) {
+    const quoted = document.createElement('span');
+    quoted.className = 'quoted';
+    quoted.textContent = '「' + quote + '」への返信';
+    div.appendChild(quoted);
+  }
+  const body = document.createElement('span');
+  body.className = 'bodyText';
+  body.textContent = text;
+  div.appendChild(body);
+  const quoteBtn = document.createElement('button');
+  quoteBtn.type = 'button';
+  quoteBtn.className = 'quote-btn';
+  quoteBtn.textContent = '引用';
+  quoteBtn.addEventListener('click', () => setQuote(quoteSource || text));
+  div.appendChild(quoteBtn);
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
 }
@@ -139,11 +209,14 @@ function describe(text, names) {
 
 async function loadHistory() {
   try {
-    const res = await fetch('/api/history?session=' + encodeURIComponent(currentSession));
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&session=' + encodeURIComponent(currentSession);
+    const res = await fetch('/api/history' + query);
     const data = await res.json();
     for (const m of data.messages) {
       if ((m.role === 'user' || m.role === 'assistant') && (m.content || m.attachments)) {
-        addMsg(m.role, describe(m.content, m.attachments));
+        const shown = describe(m.content, m.attachments);
+        addMsg(m.role, shown, m.quote || null, m.content || shown);
       }
     }
   } catch (e) { /* 履歴が取れなくても会話は続けられる */ }
@@ -154,13 +227,14 @@ async function loadHistory() {
 function applySession(name) {
   currentSession = name;
   sessionSelect.value = name;
+  clearQuote();
   log.innerHTML = '';
   loadHistory();
 }
 
 async function loadSessions() {
   try {
-    const res = await fetch('/api/sessions');
+    const res = await fetch('/api/sessions?tenant=' + encodeURIComponent(currentTenant));
     const data = await res.json();
     sessionSelect.innerHTML = '';
     for (const name of data.sessions) {
@@ -175,6 +249,54 @@ async function loadSessions() {
     sessionSelect.value = currentSession;
   } catch (e) { /* 一覧が取れなくても既定の部屋で続けられる */ }
 }
+
+// テナントの切り替え。テナントが変われば、そのテナントの部屋一覧と
+// 履歴に切り替える（部屋名は引き継ぎ、無ければ先頭の部屋にする）
+async function applyTenant(name) {
+  currentTenant = name;
+  tenantSelect.value = name;
+  await loadSessions();
+  applySession(currentSession);
+}
+
+async function loadTenants() {
+  try {
+    const res = await fetch('/api/tenants');
+    const data = await res.json();
+    tenantSelect.innerHTML = '';
+    for (const name of data.tenants) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      tenantSelect.appendChild(opt);
+    }
+    if (data.current && data.tenants.includes(data.current)) {
+      currentTenant = data.current;
+    }
+    if (!data.tenants.includes(currentTenant)) {
+      currentTenant = data.tenants[0] || 'default';
+    }
+    tenantSelect.value = currentTenant;
+  } catch (e) { /* 一覧が取れなくても既定のテナントで続けられる */ }
+}
+
+tenantSelect.addEventListener('change', () => {
+  if (tenantSelect.value && tenantSelect.value !== currentTenant) {
+    applyTenant(tenantSelect.value);
+  }
+});
+createTenantBtn.addEventListener('click', () => {
+  const name = newTenantInput.value.trim();
+  if (!name) return;
+  newTenantInput.value = '';
+  if (![...tenantSelect.options].some((o) => o.value === name)) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    tenantSelect.appendChild(opt);
+  }
+  applyTenant(name);
+});
 
 sessionSelect.addEventListener('change', () => {
   if (sessionSelect.value && sessionSelect.value !== currentSession) {
@@ -237,8 +359,10 @@ form.addEventListener('submit', async (ev) => {
   const text = input.value.trim();
   if (!text) return;
   const files = pendingFiles;
-  addMsg('user', describe(text, files.map((f) => f.name)));
+  const quote = pendingQuote;
+  addMsg('user', describe(text, files.map((f) => f.name)), quote, text);
   input.value = '';
+  clearQuote();
   pendingFiles = [];
   fileInput.value = '';
   filesLabel.textContent = '';
@@ -248,7 +372,8 @@ form.addEventListener('submit', async (ev) => {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text, attachments, session: currentSession}),
+      body: JSON.stringify({message: text, attachments, quote,
+                            session: currentSession, tenant: currentTenant}),
     });
     const data = await res.json();
     addMsg('assistant', data.reply || ('エラー: ' + (data.error || res.status)));
@@ -260,8 +385,11 @@ form.addEventListener('submit', async (ev) => {
   }
 });
 
-loadSessions();
-loadHistory();
+(async () => {
+  await loadTenants();
+  await loadSessions();
+  loadHistory();
+})();
 input.focus();
 </script>
 </body>
@@ -320,7 +448,8 @@ class SessionStore:
         self._sessions: dict[str, Session] = {initial.session_id: initial}
         self._factory = factory or (
             lambda name: Session(initial.cfg, initial.model, name))
-        self._data_dir = initial.cfg.data_dir
+        self.tenant = initial.tenant
+        self._data_dir = initial.cfg.tenant_data_dir
         self._lock = threading.Lock()
 
     def get(self, name: str | None) -> Session:
@@ -339,8 +468,51 @@ class SessionStore:
         return sorted(set(loaded) | set(list_session_ids(self._data_dir)))
 
 
-def make_handler(store: SessionStore, page: str):
-    """SessionStore を受け取るリクエストハンドラクラスを作る。"""
+class TenantStore:
+    """テナント → SessionStore の対応を管理する（Web UI のテナント切替用）。
+
+    サーバーはテナントごとに SessionStore を持ち、初回アクセス時に
+    そのテナントの Session を作る。新しいテナントの Session は、
+    起動時の設定（プロバイダやモデルなど）を引き継ぎ、テナントだけを
+    差し替えた Config で作るため、データの置き場はテナントごとに
+    分かれる。session_factory は起動時テナントの部屋の作り方だけを
+    差し替える（テスト用）。
+    """
+
+    def __init__(self, initial: Session,
+                 session_factory: Callable[[str], Session] | None = None,
+                 ) -> None:
+        self._cfg = initial.cfg
+        self._model = initial.model
+        self.default_tenant = initial.tenant
+        self._stores: dict[str, SessionStore] = {
+            self.default_tenant: SessionStore(initial, session_factory),
+        }
+        self._lock = threading.Lock()
+
+    def _make_session(self, tenant: str, session_id: str) -> Session:
+        cfg = replace(self._cfg, tenant=normalize_tenant_name(tenant))
+        return Session(cfg, self._model, session_id)
+
+    def store(self, tenant: str | None) -> SessionStore:
+        name = normalize_tenant_name(tenant)
+        with self._lock:
+            store = self._stores.get(name)
+            if store is None:
+                initial = self._make_session(name, DEFAULT_SESSION_ID)
+                store = SessionStore(initial)
+                self._stores[name] = store
+            return store
+
+    def names(self) -> list[str]:
+        """開いているテナントと、保存済みテナントの一覧。"""
+        with self._lock:
+            loaded = list(self._stores)
+        return sorted(set(loaded) | set(list_tenant_names(self._cfg.data_dir)))
+
+
+def make_handler(tenants: TenantStore, page: str):
+    """TenantStore を受け取るリクエストハンドラクラスを作る。"""
     lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
@@ -363,15 +535,22 @@ def make_handler(store: SessionStore, page: str):
             query = parse_qs(split.query)
             if split.path == "/":
                 self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            elif split.path == "/api/tenants":
+                self._send_json(200, {"tenants": tenants.names(),
+                                      "current": tenants.default_tenant})
             elif split.path == "/api/sessions":
+                store = tenants.store(_first(query.get("tenant")))
                 self._send_json(200, {"sessions": store.names()})
             elif split.path == "/api/history":
+                store = tenants.store(_first(query.get("tenant")))
                 session = store.get(_first(query.get("session")))
                 messages = []
                 for m in session.history:
                     entry: dict = {"role": m.role, "content": m.content}
                     if m.attachments:  # 添付がある発話だけ名前一覧を足す
                         entry["attachments"] = [a.name for a in m.attachments]
+                    if m.quote:  # 引用がある発話だけ引用元の本文を足す
+                        entry["quote"] = m.quote
                     messages.append(entry)
                 self._send_json(200, {"messages": messages})
             else:
@@ -387,14 +566,19 @@ def make_handler(store: SessionStore, page: str):
                 message = data["message"]
                 if not isinstance(message, str) or not message.strip():
                     raise ValueError("message が空です")
+                quote = data.get("quote")
+                if quote is not None and not isinstance(quote, str):
+                    raise ValueError("quote は文字列で指定してください")
+                if quote is not None and not quote.strip():
+                    quote = None
                 attachments = parse_attachments(data.get("attachments"))
             except (ValueError, KeyError, TypeError):
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
-            session = store.get(data.get("session"))
+            session = tenants.store(data.get("tenant")).get(data.get("session"))
             try:
                 with lock:  # Session はスレッド安全ではないので直列化する
-                    reply = session.say(message, attachments)
+                    reply = session.say(message, attachments, quote=quote)
             except Exception as exc:  # モデル側の失敗を画面に返す
                 self._send_json(500, {"error": f"応答の生成に失敗しました: {exc}"})
                 return
@@ -415,11 +599,12 @@ def build_server(session: Session, host: str = "127.0.0.1",
 
     session_factory を渡すと、ページから新しい部屋を開いたときに
     その factory で Session を作る。省略時は session と同じ設定・
-    モデルを共有する。
+    モデルを共有する。テナントは TenantStore がテナントごとに
+    SessionStore を持ち、ページからの切り替えに応じる。
     """
     page = render_page(session.cfg.provider)
-    store = SessionStore(session, session_factory)
-    return ThreadingHTTPServer((host, port), make_handler(store, page))
+    tenants = TenantStore(session, session_factory)
+    return ThreadingHTTPServer((host, port), make_handler(tenants, page))
 
 
 def serve(session: Session, host: str = "127.0.0.1", port: int = 8765) -> None:

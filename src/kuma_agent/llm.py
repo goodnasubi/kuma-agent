@@ -20,6 +20,7 @@ import httpx
 MAX_TOKENS = 8192
 
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # 添付 1 件の上限（目安 10MB）
+MAX_QUOTE_CHARS = 200  # モデルへ渡す引用文の最大文字数
 
 IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 PDF_MEDIA_TYPE = "application/pdf"
@@ -89,6 +90,32 @@ class Message:
     tool_call_id: str | None = None  # role == "tool" のとき対応する呼び出しの id
     tool_name: str | None = None  # role == "tool" のとき道具名（Gemini は名前で対応付ける）
     attachments: list[Attachment] = field(default_factory=list)  # 利用者の添付ファイル
+    quote: str | None = None  # この発話が返信する過去の発話の本文
+
+
+def truncate_quote(quote: str, limit: int = MAX_QUOTE_CHARS) -> str:
+    """引用文をモデルへ渡しやすい長さに整える。
+
+    改行は空白に畳み、limit を超えたら末尾を省略する。履歴や記録に
+    残す引用そのものは切り詰めず、モデル入力を作るときだけ使う。
+    """
+    text = " ".join(quote.split())
+    if len(text) <= limit:
+        return text
+    return text[:max(0, limit - 1)] + "…"
+
+
+def quote_block(quote: str) -> str:
+    """引用元の発話を示す短い見出し。"""
+    return f"（「{truncate_quote(quote)}」への返信）"
+
+
+def quoted_content(msg: Message) -> str:
+    """発話本文の前に引用ブロックを付けた、モデル入力用の本文。"""
+    if not msg.quote:
+        return msg.content
+    block = quote_block(msg.quote)
+    return f"{block}\n{msg.content}" if msg.content else block
 
 
 class ChatModel(Protocol):
@@ -122,10 +149,11 @@ class MetaModelClient:
         プレースホルダ文に落とし、テキスト文書は本文を埋め込む。
         """
         if not msg.attachments:
-            return msg.content
+            return quoted_content(msg)
         parts: list[dict] = []
-        if msg.content:
-            parts.append({"type": "text", "text": msg.content})
+        text = quoted_content(msg)
+        if text:
+            parts.append({"type": "text", "text": text})
         for att in msg.attachments:
             if att.is_image:
                 parts.append({"type": "image_url", "image_url": {
@@ -141,7 +169,7 @@ class MetaModelClient:
         if msg.role == "assistant" and msg.tool_calls:
             return {
                 "role": "assistant",
-                "content": msg.content or None,
+                "content": quoted_content(msg) or None,
                 "tool_calls": [
                     {"id": c["id"], "type": "function",
                      "function": {"name": c["name"],
@@ -203,10 +231,11 @@ class AnthropicClient:
         プレースホルダ文に落とす。
         """
         if not msg.attachments:
-            return msg.content
+            return quoted_content(msg)
         blocks: list[dict] = []
-        if msg.content:
-            blocks.append({"type": "text", "text": msg.content})
+        text = quoted_content(msg)
+        if text:
+            blocks.append({"type": "text", "text": text})
         for att in msg.attachments:
             if att.is_image:
                 blocks.append({"type": "image", "source": {
@@ -240,8 +269,9 @@ class AnthropicClient:
             flush_tools()
             if msg.role == "assistant" and msg.tool_calls:
                 blocks: list[dict] = []
-                if msg.content:
-                    blocks.append({"type": "text", "text": msg.content})
+                text = quoted_content(msg)
+                if text:
+                    blocks.append({"type": "text", "text": text})
                 blocks += [
                     {"type": "tool_use", "id": c["id"], "name": c["name"],
                      "input": c.get("args", {})}
@@ -312,15 +342,17 @@ class GeminiClient:
             flush()
             if msg.role == "assistant":
                 parts: list[dict] = []
-                if msg.content:
-                    parts.append({"text": msg.content})
+                text = quoted_content(msg)
+                if text:
+                    parts.append({"text": text})
                 parts += [{"functionCall": {"name": c["name"], "args": c.get("args", {})}}
                           for c in msg.tool_calls]
                 out.append({"role": "model", "parts": parts})
             else:
                 parts = []
-                if msg.content:
-                    parts.append({"text": msg.content})
+                text = quoted_content(msg)
+                if text:
+                    parts.append({"text": text})
                 for att in msg.attachments:
                     # 画像・PDF は inlineData で渡せる。テキスト文書は
                     # 本文を埋め込み、それ以外はプレースホルダ文に落とす

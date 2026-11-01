@@ -1,18 +1,24 @@
 """1 つの部屋（セッション）の対話。履歴管理と道具呼び出しの循環。
 
-セッション管理は 3 層に分かれる（詳細は docs/DESIGN.md）:
+文脈の区切りは外側から階層になっている（詳細は docs/DESIGN.md）:
+- テナント: 一番外側の区切り。人格・長期記憶・部屋・台帳の置き場が
+  テナントごとに分かれる（実効データ置き場は Config.tenant_data_dir）
 - 部屋: 名前付きセッションごとに記録が分かれ、再開時に復元される
 - 圧縮: 履歴が長くなったら古い発話をモデル自身に要約させて置き換える
 - 長期記憶: セッションを越える事実は Memory（MEMORY.md）が持つ
+
+部屋の中で並行する用事は台帳（TaskBoard）が持ち、進行中の用事は
+対話の冒頭でシステムプロンプトに注入して思い出せるようにする。
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 from .config import Config
-from .llm import Attachment, ChatModel, Message
-from .memory import Memory, normalize_session_id
+from .llm import Attachment, ChatModel, Message, quoted_content
+from .memory import Memory, normalize_session_id, normalize_tenant_name
 from .persona import load_persona
+from .tasks import TaskBoard
 from .tools import ToolBox
 
 # 圧縮後の履歴の先頭に置く要約発話の見出し
@@ -27,9 +33,13 @@ _SUMMARY_SYSTEM = (
 )
 
 
-def _message_text(msg: Message) -> str:
-    """発話を記録・要約向けの文字列にする（添付はプレースホルダで表す）。"""
-    text = msg.content
+def _message_text(msg: Message, include_quote: bool = False) -> str:
+    """発話を記録・要約向けの文字列にする（添付はプレースホルダで表す）。
+
+    記録では引用を別フィールドに持つため、通常は本文だけを使う。
+    要約向けでは引用ブロックも含め、どの発話への返信か分かるようにする。
+    """
+    text = quoted_content(msg) if include_quote else msg.content
     if msg.attachments:
         text = (text + " " if text else "") + " ".join(
             att.placeholder() for att in msg.attachments)
@@ -41,14 +51,34 @@ class Session:
                  session_id: str = "main") -> None:
         self.cfg = cfg
         self.model = model
+        self.tenant = normalize_tenant_name(cfg.tenant)
         self.session_id = normalize_session_id(session_id)
-        self.memory = Memory(cfg.data_dir, self.session_id)
-        self.tools = ToolBox(Path.cwd())
+        # 人格・長期記憶・部屋・台帳はテナントの実効データ置き場で分ける
+        data_dir = cfg.tenant_data_dir
+        self.memory = Memory(data_dir, self.session_id)
+        self.task_board = TaskBoard(data_dir)
+        self.tools = ToolBox(Path.cwd(), task_board=self.task_board)
         self.history: list[Message] = self._restore_history()
         memory_text = self.memory.load_long_term()
-        self.system_prompt = load_persona(cfg.data_dir)
+        self.system_prompt = load_persona(data_dir)
         if memory_text:
             self.system_prompt += f"\n\n# 長期記憶\n{memory_text}"
+        tasks_text = self._open_tasks_text()
+        if tasks_text:
+            self.system_prompt += f"\n\n# 進行中の用事\n{tasks_text}"
+
+    def _open_tasks_text(self) -> str:
+        """進行中の用事をシステムプロンプト用の箇条書きにする。
+
+        用事がない場合は空文字列（節自体を足さない）。
+        """
+        lines = []
+        for task in self.task_board.open_tasks():
+            line = f"- {task.title}"
+            if task.memo:
+                line += f": {task.memo}"
+            lines.append(line)
+        return "\n".join(lines)
 
     def _restore_history(self) -> list[Message]:
         """このセッションの過去の発話を記録から履歴へ復元する。
@@ -65,18 +95,27 @@ class Session:
             if role == "summary":
                 history = [Message("user", f"{SUMMARY_PREFIX}\n{content}")]
             elif role in ("user", "assistant"):
-                history.append(Message(role, content))
+                quote = record.get("quote")
+                history.append(Message(
+                    role, content,
+                    quote=quote if isinstance(quote, str) and quote else None,
+                ))
         return history
 
-    def say(self, user_text: str, attachments: list[Attachment] | None = None) -> str:
+    def say(self, user_text: str, attachments: list[Attachment] | None = None,
+            quote: str | None = None) -> str:
         """利用者の発話を受け、道具の循環を経て最終応答を返す。
 
         添付は履歴の発話に持たせてモデルへ渡す。長期記憶の記録には
         バイト列を残さず「[添付: 名前（種別）]」の要約だけを残す。
+        quote は引用返信の引用元の本文で、発話と一緒に記録する。
         """
         atts = list(attachments or [])
-        self.history.append(Message("user", user_text, attachments=atts))
-        self.memory.append_turn("user", _message_text(self.history[-1]))
+        quote_text = quote if quote and quote.strip() else None
+        self.history.append(Message(
+            "user", user_text, attachments=atts, quote=quote_text))
+        self.memory.append_turn(
+            "user", _message_text(self.history[-1]), quote=quote_text)
         for _ in range(self.cfg.max_tool_rounds):
             reply = self.model.chat(self.system_prompt, self.history, self.tools.schemas())
             self.history.append(reply)
@@ -122,17 +161,17 @@ class Session:
         # 発話を要約の後ろへ記録し直す（記録は追記のみのため）。
         for msg in kept:
             if msg.role in ("user", "assistant"):
-                self.memory.append_turn(msg.role, msg.content)
+                self.memory.append_turn(msg.role, msg.content, quote=msg.quote)
 
     def _summarize(self, messages: list[Message]) -> str:
         """発話の並びをモデル自身に要約させる（道具なし、要約専用）。"""
         lines = []
         for msg in messages:
             if msg.role == "user":
-                lines.append(f"利用者: {_message_text(msg)}")
+                lines.append(f"利用者: {_message_text(msg, include_quote=True)}")
             elif msg.role == "assistant":
-                if msg.content:
-                    lines.append(f"クマ: {msg.content}")
+                if msg.content or msg.quote:
+                    lines.append(f"クマ: {_message_text(msg, include_quote=True)}")
             elif msg.role == "tool":
                 lines.append(f"（道具の結果: {msg.content}）")
         prompt = Message("user", "\n".join(lines))

@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .memory import tenant_dir
+
 
 def _env_int(name: str, default: int) -> int:
     """環境変数を整数として読む。不正な値なら既定値にする。"""
@@ -20,6 +22,7 @@ def _env_int(name: str, default: int) -> int:
 @dataclass
 class Config:
     data_dir: Path = field(default_factory=lambda: Path(os.environ.get("KUMA_DATA_DIR", "data")))
+    tenant: str = field(default_factory=lambda: os.environ.get("KUMA_TENANT", "default"))
     provider: str = field(default_factory=lambda: os.environ.get("KUMA_LLM_PROVIDER", "muse"))
     model: str | None = field(default_factory=lambda: os.environ.get("KUMA_LLM_MODEL") or None)
     model_api_key: str = ""
@@ -50,9 +53,19 @@ class Config:
         default_factory=lambda: _env_int("KUMA_COMPACT_KEEP_MESSAGES", 10))
 
     @property
+    def tenant_data_dir(self) -> Path:
+        """このテナントの実効データ置き場。
+
+        既定テナント（"default"）は後方互換のため data_dir をそのまま
+        返し、それ以外は data_dir / "tenants" / <テナント名> を返す。
+        人格・長期記憶・部屋・台帳はすべてこの置き場の下に分かれる。
+        """
+        return tenant_dir(self.data_dir, self.tenant)
+
+    @property
     def memory_file(self) -> Path:
-        return self.data_dir / "MEMORY.md"
+        return self.tenant_data_dir / "MEMORY.md"
 
     @property
     def conversations_dir(self) -> Path:
-        return self.data_dir / "conversations"
+        return self.tenant_data_dir / "conversations"

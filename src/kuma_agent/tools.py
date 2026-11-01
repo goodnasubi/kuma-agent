@@ -9,7 +9,10 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from .tasks import Task, TaskBoard
 
 
 @dataclass
@@ -21,10 +24,13 @@ class Tool:
 
 
 class ToolBox:
-    def __init__(self, work_dir: Path) -> None:
+    def __init__(self, work_dir: Path, task_board: TaskBoard | None = None) -> None:
         self.work_dir = work_dir.resolve()
+        self.task_board = task_board
         self._tools: dict[str, Tool] = {}
         self._register_defaults()
+        if task_board is not None:
+            self._register_task_tools()
 
     def _register_defaults(self) -> None:
         self.register(Tool(
@@ -48,6 +54,63 @@ class ToolBox:
             {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
             self._run_shell,
         ))
+
+    def _register_task_tools(self) -> None:
+        guidance = (
+            "会話の中で話題が切り替わったら、その用事を台帳に登録・更新して、"
+            "用事ごとの状態を分けて保つこと。"
+        )
+        self.register(Tool(
+            "list_tasks", f"進行中の用事の一覧を返す。{guidance}",
+            {"type": "object", "properties": {}},
+            self._list_tasks,
+        ))
+        self.register(Tool(
+            "create_task", f"用事を台帳に登録する。{guidance}",
+            {"type": "object", "properties": {
+                "title": {"type": "string"},
+                "memo": {"type": "string"}},
+             "required": ["title"]},
+            self._create_task,
+        ))
+        self.register(Tool(
+            "update_task",
+            f"台帳の用事を更新する（メモの付け替え、終わったら status を done にする）。{guidance}",
+            {"type": "object", "properties": {
+                "id": {"type": "string"},
+                "memo": {"type": "string"},
+                "status": {"type": "string", "enum": ["open", "done"]}},
+             "required": ["id"]},
+            self._update_task,
+        ))
+
+    def _format_tasks(self, tasks: list[Task]) -> str:
+        if not tasks:
+            return "（進行中の用事はありません）"
+        lines = []
+        for t in tasks:
+            line = f"#{t.id} {t.title}"
+            if t.memo:
+                line += f": {t.memo}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _list_tasks(self) -> str:
+        assert self.task_board is not None
+        return self._format_tasks(self.task_board.open_tasks())
+
+    def _create_task(self, title: str, memo: str = "") -> str:
+        assert self.task_board is not None
+        task = self.task_board.add(title, memo)
+        return f"登録しました: #{task.id} {task.title}"
+
+    def _update_task(self, id: str, memo: str | None = None,
+                     status: str | None = None) -> str:
+        assert self.task_board is not None
+        task = self.task_board.update(id, memo=memo, status=status)
+        if task is None:
+            return f"error: 用事 #{id} が見つかりません"
+        return f"更新しました: #{task.id} {task.title}（{task.status}）"
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool

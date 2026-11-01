@@ -6,13 +6,17 @@ CLI をヘッドレス実行して、最終出力を受け取る。kuma-agent �
 （tools 引数）は使わない（CLI 側の道具が働く）。
 
 認証は各 CLI 自身のログインを使うため、API キーは不要。
+
+なお、添付の保存先（作業ディレクトリ配下の .kuma-attachments/）は
+作業対象のファイルの一部として扱い、テナントの区切りの対象外とする
+（相手のエージェントが作業ディレクトリで読める必要があるため）。
 """
 from __future__ import annotations
 
 import subprocess
 from pathlib import Path
 
-from .llm import Attachment, Message
+from .llm import Attachment, Message, quoted_content
 
 ATTACHMENTS_DIR = ".kuma-attachments"
 
@@ -22,7 +26,7 @@ def _render_prompt(system_prompt: str, messages: list[Message],
     lines = [system_prompt, ""]
     for msg in messages:
         if msg.role == "user":
-            lines.append(f"利用者: {msg.content}")
+            lines.append(f"利用者: {quoted_content(msg)}")
             for att in msg.attachments:
                 # 添付はファイルとして保存し、相手のエージェントに
                 # 自分で読んでもらう。保存できなかったものは存在だけ伝える
@@ -31,8 +35,8 @@ def _render_prompt(system_prompt: str, messages: list[Message],
                     lines.append(f"[添付ファイル: {path}]")
                 else:
                     lines.append(att.placeholder())
-        elif msg.role == "assistant" and msg.content:
-            lines.append(f"クマ: {msg.content}")
+        elif msg.role == "assistant" and (msg.content or msg.quote):
+            lines.append(f"クマ: {quoted_content(msg)}")
         elif msg.role == "tool":
             lines.append(f"（道具の結果: {msg.content}）")
     lines.append("")

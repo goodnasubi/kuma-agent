@@ -8,6 +8,20 @@ from pathlib import Path
 DEFAULT_SESSION_ID = "main"
 _MAX_SESSION_ID_LEN = 64
 
+DEFAULT_TENANT = "default"
+TENANTS_DIRNAME = "tenants"
+
+
+def _normalize_name(raw: str | None, fallback: str) -> str:
+    """名前をファイル名に安全な形へ正規化する（共通処理）。"""
+    if not raw:
+        return fallback
+    chars = []
+    for ch in str(raw).strip():
+        chars.append(ch if (ch.isalnum() or ch in "-_") else "-")
+    name = "".join(chars).strip("-.")[:_MAX_SESSION_ID_LEN].strip("-.")
+    return name or fallback
+
 
 def normalize_session_id(raw: str | None) -> str:
     """セッション ID をファイル名に安全な形へ正規化する。
@@ -16,13 +30,37 @@ def normalize_session_id(raw: str | None) -> str:
     空白などファイル名に使えない文字は "-" に置き換える。空になった
     場合は既定の "main" にする。
     """
-    if not raw:
-        return DEFAULT_SESSION_ID
-    chars = []
-    for ch in str(raw).strip():
-        chars.append(ch if (ch.isalnum() or ch in "-_") else "-")
-    name = "".join(chars).strip("-.")[:_MAX_SESSION_ID_LEN].strip("-.")
-    return name or DEFAULT_SESSION_ID
+    return _normalize_name(raw, DEFAULT_SESSION_ID)
+
+
+def normalize_tenant_name(raw: str | None) -> str:
+    """テナント名をファイル名に安全な形へ正規化する。
+
+    セッション ID と同じ正規化を通し、空になった場合は既定の
+    "default" にする。
+    """
+    return _normalize_name(raw, DEFAULT_TENANT)
+
+
+def tenant_dir(data_dir: Path, tenant: str | None) -> Path:
+    """テナントの実効データ置き場を返す。
+
+    既定テナント（"default"）は後方互換のため data_dir をそのまま
+    使い、それ以外は data_dir / "tenants" / <テナント名> を使う。
+    """
+    name = normalize_tenant_name(tenant)
+    if name == DEFAULT_TENANT:
+        return data_dir
+    return data_dir / TENANTS_DIRNAME / name
+
+
+def list_tenant_names(data_dir: Path) -> list[str]:
+    """テナント名の一覧（既定テナント＋保存済みテナントのディレクトリ名）。"""
+    names = [DEFAULT_TENANT]
+    root = data_dir / TENANTS_DIRNAME
+    if root.is_dir():
+        names += sorted(p.name for p in root.iterdir() if p.is_dir())
+    return names
 
 
 def list_session_ids(data_dir: Path) -> list[str]:
@@ -61,11 +99,18 @@ class Memory:
         text = self.load_long_term()
         return [line for line in text.splitlines() if keyword in line]
 
-    def append_turn(self, role: str, content: str) -> None:
-        """会話履歴に 1 発話を追記する（セッションごとの JSONL）。"""
+    def append_turn(self, role: str, content: str,
+                    quote: str | None = None) -> None:
+        """会話履歴に 1 発話を追記する（セッションごとの JSONL）。
+
+        quote は引用返信の引用元の本文。無い発話ではキー自体を
+        付けない（旧来の記録形式と互換に保つ）。
+        """
         self.conversations_dir.mkdir(parents=True, exist_ok=True)
         record = {"ts": datetime.now().isoformat(timespec="seconds"),
                   "session": self.session_id, "role": role, "content": content}
+        if quote:
+            record["quote"] = quote
         with self.conversation_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
