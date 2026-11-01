@@ -15,6 +15,46 @@ if TYPE_CHECKING:
     from .tasks import Task, TaskBoard
 
 
+# 道具名 → 「今なにをしているか」の表示名（UI の作業中表示用）。
+# 状態表示は頭文字ではなく実際の作業に応じた文言にするため、道具ごとに
+# 利用者向けの言い回しを用意する。
+_ACTIVITY_LABELS: dict[str, str] = {
+    "read_file": "ファイルを読んでいます",
+    "write_file": "ファイルを書いています",
+    "edit_file": "ファイルを編集中",
+    "edit": "ファイルを編集中",
+    "run_shell": "コマンドを実行中",
+    "now": "時刻を確認中",
+    "list_tasks": "台帳を確認中",
+    "create_task": "台帳を更新中",
+    "update_task": "台帳を更新中",
+    "remember": "記憶に書き留め中",
+    "write_memory": "記憶に書き留め中",
+    "save_memory": "記憶に書き留め中",
+}
+
+
+def activity_label(name: str, args: dict | None = None) -> str:
+    """道具の呼び出しを「今なにをしているか」の表示文言にする。
+
+    対応表にある道具は専用の文言を返し、ファイル名や台帳の題名など
+    安全な手がかりが引数にあれば括弧で添える。対応表にない道具は
+    名前を含む汎用表示にする。
+    """
+    label = _ACTIVITY_LABELS.get(name)
+    if label is None:
+        return f"道具を実行中（{name}）"
+    hint: object = None
+    if args:
+        if name in ("read_file", "write_file", "edit_file", "edit"):
+            hint = args.get("path")
+        elif name == "create_task":
+            hint = args.get("title")
+    if isinstance(hint, str) and hint.strip():
+        return f"{label}（{hint.strip()}）"
+    return label
+
+
 @dataclass
 class Tool:
     name: str

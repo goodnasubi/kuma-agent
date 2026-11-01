@@ -95,6 +95,13 @@ _PAGE_TEMPLATE = """\
   #quoteText { flex: 1; overflow: hidden; text-overflow: ellipsis;
                white-space: nowrap; }
   #clearQuote { padding: 4px 10px; font-size: 12px; }
+  #statusBox { flex-basis: 100%; display: flex; gap: 2px; align-items: center;
+               font-size: 13px; color: __COCOA__; min-height: 1em; }
+  #statusBox[hidden] { display: none; }
+  #statusBox .dot { animation: statusBlink 1.2s infinite; }
+  #statusBox .dot:nth-child(2) { animation-delay: .2s; }
+  #statusBox .dot:nth-child(3) { animation-delay: .4s; }
+  @keyframes statusBlink { 0%, 60%, 100% { opacity: .15; } 30% { opacity: 1; } }
   #files { flex-basis: 100%; font-size: 13px; min-height: 1em; }
   #files:empty { display: none; }
   #input { flex: 1; padding: 10px; font-size: 16px; border: 1px solid __COCOA__;
@@ -138,6 +145,7 @@ _PAGE_TEMPLATE = """\
 <div id="log"></div>
 <div id="dropHint">ファイルを離すと添付します</div>
 <form id="form">
+  <div id="statusBox" hidden><span class="dot">・</span><span class="dot">・</span><span class="dot">・</span><span id="statusText"></span></div>
   <div id="quoteBox" hidden>
     <span id="quoteText"></span>
     <button id="clearQuote" type="button">解除</button>
@@ -168,6 +176,8 @@ const createSessionBtn = document.getElementById('createSession');
 const quoteBox = document.getElementById('quoteBox');
 const quoteText = document.getElementById('quoteText');
 const clearQuoteBtn = document.getElementById('clearQuote');
+const statusBox = document.getElementById('statusBox');
+const statusText = document.getElementById('statusText');
 let pendingFiles = [];
 let pendingQuote = null;
 let currentTenant = 'default';
@@ -417,6 +427,29 @@ function readAttachment(file) {
   });
 }
 
+// 作業中表示: 送信中は /api/status をポーリングして「今なにを
+// しているか」を入力欄の上に出し、応答が返ったら消す
+function showStatus(text) {
+  if (text) {
+    statusText.textContent = text;
+    statusBox.hidden = false;
+  } else {
+    statusText.textContent = '';
+    statusBox.hidden = true;
+  }
+}
+
+async function pollStatus() {
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser)
+      + '&session=' + encodeURIComponent(currentSession);
+    const res = await fetch('/api/status' + query);
+    const data = await res.json();
+    showStatus(data.status || '');
+  } catch (e) { /* 状態が取れなくても会話は続けられる */ }
+}
+
 form.addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const text = input.value.trim();
@@ -430,6 +463,8 @@ form.addEventListener('submit', async (ev) => {
   fileInput.value = '';
   filesLabel.textContent = '';
   send.disabled = true;
+  showStatus('考え中');
+  const poller = setInterval(pollStatus, 400);
   try {
     const attachments = await Promise.all(files.map(readAttachment));
     const res = await fetch('/api/chat', {
@@ -444,6 +479,8 @@ form.addEventListener('submit', async (ev) => {
   } catch (e) {
     addMsg('assistant', '通信に失敗しました');
   } finally {
+    clearInterval(poller);
+    showStatus('');
     send.disabled = false;
     input.focus();
   }
@@ -511,13 +548,28 @@ class SessionStore:
 
     def __init__(self, initial: Session,
                  factory: Callable[[str], Session] | None = None) -> None:
-        self._sessions: dict[str, Session] = {initial.session_id: initial}
+        self._sessions: dict[str, Session] = {}
         self._factory = factory or (
             lambda name: Session(initial.cfg, initial.model, name))
         self.tenant = initial.tenant
         self.user = initial.user
         self._data_dir = initial.cfg.user_data_dir
         self._lock = threading.Lock()
+        # 部屋ごとの作業中表示（空文字列は「作業していない」）。
+        # Session の状態コールバックをここへ差し込み、/api/status が読む
+        self._statuses: dict[str, str] = {}
+        self._track(initial)
+
+    def _track(self, session: Session) -> None:
+        """Session の状態コールバックをストアの保持先に差し込む。"""
+        self._sessions[session.session_id] = session
+        self._statuses.setdefault(session.session_id, "")
+
+        def on_status(status: str, _id: str = session.session_id) -> None:
+            with self._lock:
+                self._statuses[_id] = status
+
+        session.on_status = on_status
 
     def get(self, name: str | None) -> Session:
         session_id = normalize_session_id(name)
@@ -525,8 +577,14 @@ class SessionStore:
             session = self._sessions.get(session_id)
             if session is None:
                 session = self._factory(session_id)
-                self._sessions[session_id] = session
+                self._track(session)
             return session
+
+    def status(self, name: str | None) -> str:
+        """部屋の現在の作業中表示（無ければ空文字列）。Session は作らない。"""
+        session_id = normalize_session_id(name)
+        with self._lock:
+            return self._statuses.get(session_id, "")
 
     def names(self) -> list[str]:
         """開いている部屋と、記録が残っている部屋の一覧。"""
@@ -667,6 +725,11 @@ def make_handler(tenants: TenantStore, page: str):
                 store = tenants.store(_first(query.get("tenant")),
                                       _first(query.get("user")))
                 self._send_json(200, {"sessions": store.names()})
+            elif split.path == "/api/status":
+                store = tenants.store(_first(query.get("tenant")),
+                                      _first(query.get("user")))
+                self._send_json(200, {"status": store.status(
+                    _first(query.get("session")))})
             elif split.path == "/api/history":
                 store = tenants.store(_first(query.get("tenant")),
                                       _first(query.get("user")))

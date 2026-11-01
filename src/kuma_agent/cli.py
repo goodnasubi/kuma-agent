@@ -9,6 +9,17 @@ from .llm import create_client
 from .session import Session
 
 
+def _show_status(status: str) -> None:
+    """作業中表示を同じ行に上書きする（プレーンな対話ループ用）。
+
+    作業中は「⋯ 文言」を出し、空文字列が来たら行を消して戻す。
+    """
+    if status:
+        print(f"\r⋯ {status}", end="", flush=True)
+    else:
+        print("\r" + " " * 40 + "\r", end="", flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kuma-agent")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -53,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         from .tui import run_tui
 
         return run_tui(session, cfg.provider)
+    session.on_status = _show_status
     print("クマです。話しかけてください（終了は Ctrl-D）")
     try:
         while True:

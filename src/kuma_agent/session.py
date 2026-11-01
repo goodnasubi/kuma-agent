@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from .config import Config
 from .llm import Attachment, ChatModel, Message, quoted_content
@@ -27,10 +28,16 @@ from .memory import (
 )
 from .persona import load_persona
 from .tasks import TaskBoard
-from .tools import ToolBox
+from .tools import ToolBox, activity_label
 
 # 圧縮後の履歴の先頭に置く要約発話の見出し
 SUMMARY_PREFIX = "（これまでの会話の要約）"
+
+# 作業中表示の文言（UI がそのまま出す）。道具の作業名は
+# tools.activity_label が道具ごとに出す。作業が終わったら空文字列を
+# 通知して「表示なし」に戻す。
+THINKING = "考え中"
+SUMMARIZING = "会話を要約中"
 
 # 要約役に渡す専用プロンプト（人格プロンプトとは分ける）
 _SUMMARY_SYSTEM = (
@@ -56,9 +63,14 @@ def _message_text(msg: Message, include_quote: bool = False) -> str:
 
 class Session:
     def __init__(self, cfg: Config, model: ChatModel,
-                 session_id: str = "main") -> None:
+                 session_id: str = "main",
+                 on_status: Callable[[str], None] | None = None) -> None:
         self.cfg = cfg
         self.model = model
+        # 作業中表示のコールバック。対話ループの各段階で「今なにを
+        # しているか」を文字列で通知し、終わったら空文字列を通知する。
+        # UI はこれを受けて表示を切り替える。属性として差し替えも可。
+        self.on_status = on_status
         self.tenant = normalize_tenant_name(cfg.tenant)
         self.user = normalize_user_name(cfg.user)
         self.session_id = normalize_session_id(session_id)
@@ -125,17 +137,38 @@ class Session:
             "user", user_text, attachments=atts, quote=quote_text))
         self.memory.append_turn(
             "user", _message_text(self.history[-1]), quote=quote_text)
-        for _ in range(self.cfg.max_tool_rounds):
-            reply = self.model.chat(self.system_prompt, self.history, self.tools.schemas())
-            self.history.append(reply)
-            if not reply.tool_calls:
-                self.memory.append_turn("assistant", reply.content)
-                self._maybe_compact()
-                return reply.content
-            for call in reply.tool_calls:
-                result = self.tools.call(call["name"], call.get("args", {}))
-                self.history.append(Message("tool", result, tool_call_id=call.get("id"), tool_name=call["name"]))
-        return "（道具の呼び出しが上限に達しました）"
+        try:
+            for _ in range(self.cfg.max_tool_rounds):
+                # モデルへの問い合わせ（CLI 系バックエンドもこの経路）
+                self._notify(THINKING)
+                reply = self.model.chat(self.system_prompt, self.history, self.tools.schemas())
+                self.history.append(reply)
+                if not reply.tool_calls:
+                    self.memory.append_turn("assistant", reply.content)
+                    self._maybe_compact()
+                    return reply.content
+                for call in reply.tool_calls:
+                    args = call.get("args", {})
+                    self._notify(activity_label(call["name"], args))
+                    result = self.tools.call(call["name"], args)
+                    self.history.append(Message("tool", result, tool_call_id=call.get("id"), tool_name=call["name"]))
+            return "（道具の呼び出しが上限に達しました）"
+        finally:
+            self._notify("")  # 応答が終わったら作業中表示を消す
+
+    def _notify(self, status: str) -> None:
+        """作業中表示のコールバックへ現在の作業を通知する。
+
+        表示側の失敗で対話自体を落とさないよう、コールバックの例外は
+        ここで握りつぶす。
+        """
+        callback = self.on_status
+        if callback is None:
+            return
+        try:
+            callback(status)
+        except Exception:
+            pass
 
     # ---------------------------------------------------------- 圧縮
 
@@ -157,6 +190,7 @@ class Session:
         if len(turn_idx) - keep <= 0:
             return  # 残すべき発話だけで閾値以下にならない場合は何もしない
         cutoff = turn_idx[len(turn_idx) - keep] if keep else len(self.history)
+        self._notify(SUMMARIZING)
         try:
             summary = self._summarize(self.history[:cutoff])
         except Exception:

@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import threading
 import unicodedata
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -19,7 +20,7 @@ from .llm import (
     guess_media_type,
     quoted_content,
 )
-from .session import Session
+from .session import THINKING, Session
 
 USER_LABEL = "あなた"
 ASSISTANT_LABEL = "クマ"
@@ -164,6 +165,21 @@ def parse_quote_command(text: str) -> int | None:
     return number if number >= 1 else 0
 
 
+def status_dots(frame: int) -> str:
+    """作業中表示の点。フレームが進むたびに 0〜3 個を繰り返す。"""
+    return "." * (frame % 4)
+
+
+def status_line(text: str, frame: int) -> str:
+    """作業中表示の 1 行（今の作業の文言＋うごめく点）。
+
+    文言が空なら表示自体を出さない（空文字列を返す）。
+    """
+    if not text:
+        return ""
+    return f"{text}{status_dots(frame)}"
+
+
 def load_attachment(path_text: str, base_dir: Path | None = None) -> Attachment:
     """パスのファイルを読み込んで Attachment にする。
 
@@ -213,16 +229,47 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
     except Exception:
         pass
     stdscr.keypad(True)  # type: ignore[attr-defined]
+    try:
+        # 応答待ちの間も作業中表示を更新できるよう、キー読み取りに
+        # タイムアウトを付けてポーリングにする
+        stdscr.timeout(100)  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
     buffer = ""  # 入力中の文字列
     offset = 0  # ログのスクロール量（0 で最下部に追従）
     pending: list[Attachment] = []  # 次の発話に添える添付
     pending_quote: str | None = None  # 次の発話で引用する過去の発話
+    # 作業中表示の共有状態。Session からの通知で text が入れ替わり、
+    # say を回すワーカースレッドの完了で done が立つ
+    status: dict[str, object] = {"text": THINKING, "busy": False, "done": False}
+    session.on_status = lambda text: status.__setitem__("text", text)
+    frame = 0  # 作業中表示の点のアニメーション用カウンタ
 
     def notice(text: str) -> None:
         session.history.append(Message("assistant", text))
 
+    def start_say(text: str, atts: list[Attachment],
+                  quote: str | None) -> None:
+        """応答待ちの間も画面を更新できるよう、say を別スレッドで回す。"""
+
+        def work() -> None:
+            try:
+                session.say(text, atts, quote=quote)
+            except Exception as exc:
+                session.history.append(Message("assistant", f"（エラー: {exc}）"))
+            finally:
+                pending.clear()
+                status["done"] = True
+
+        status["busy"] = True
+        status["done"] = False
+        status["text"] = THINKING
+        threading.Thread(target=work, daemon=True).start()
+
     def redraw() -> None:
+        nonlocal frame
+        frame += 1
         height, width = stdscr.getmaxyx()  # type: ignore[attr-defined]
         stdscr.erase()  # type: ignore[attr-defined]
         header = (f" クマ ─ provider: {provider} ─ Enter: 送信 / "
@@ -234,7 +281,9 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
         except Exception:
             _safe_addstr(stdscr, 1, 0, "-" * max(0, width - 1))
 
-        log_height = max(0, height - 4)
+        busy = bool(status["busy"])
+        # 作業中表示の行（入力欄の上）を出す間はログを 1 行短くする
+        log_height = max(0, height - 4 - (1 if busy else 0))
         lines = format_log(session.history, width - 2)
         view = lines[max(0, len(lines) - log_height - offset):]
         if offset:
@@ -243,6 +292,12 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
             view = view[-log_height:] if log_height else []
         for i, line in enumerate(view):
             _safe_addstr(stdscr, 2 + i, 0, line)
+
+        if busy:
+            shown_status = status_line(str(status["text"]), frame)
+            if shown_status:
+                _safe_addstr(stdscr, height - 2, 0,
+                             f"{ASSISTANT_LABEL}: {shown_status}")
 
         prompt = "> "
         shown = prompt + buffer
@@ -257,12 +312,27 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
         stdscr.refresh()  # type: ignore[attr-defined]
 
     while True:
+        if status["busy"] and status["done"]:
+            status["busy"] = False
+            status["text"] = ""
         redraw()
         try:
             key = stdscr.get_wch()  # type: ignore[attr-defined]
         except KeyboardInterrupt:
             return
         except Exception:
+            key = None  # タイムアウト: キーなしとして再描画へ戻る
+        if key is None:
+            continue
+
+        if status["busy"]:
+            # 応答待ちの間はスクロールと終了だけを受け付ける
+            if key == "\x03":  # Ctrl-C
+                return
+            if key == curses.KEY_PPAGE:
+                offset += 5
+            elif key == curses.KEY_NPAGE:
+                offset = max(0, offset - 5)
             continue
 
         if key == "\x03":  # Ctrl-C
@@ -301,13 +371,9 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
                 notice(f"（引用を設定しました: [{quote_number}] {quote_text}"
                        "。次の発話に引用されます）")
                 continue
-            try:
-                session.say(text, list(pending), quote=pending_quote)
-            except Exception as exc:
-                session.history.append(Message("assistant", f"（エラー: {exc}）"))
-            finally:
-                pending.clear()
-                pending_quote = None
+            quote = pending_quote
+            pending_quote = None
+            start_say(text, list(pending), quote)
             continue
         if isinstance(key, str) and key in ("\x7f", "\b"):  # Backspace / Delete
             buffer = buffer[:-1]
