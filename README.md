@@ -1,7 +1,7 @@
 # kuma-agent
 
 <p align="center">
-  <img src="assets/avatar.svg" alt="kuma-agent のアバター：クマ" width="180">
+  <img src="assets/avatar.png" alt="kuma-agent のアバター：クマ" width="220">
 </p>
 
 
@@ -33,9 +33,10 @@ kuma-agent chat          # 対話を開始する
 
 ## アバターとイメージカラー
 
-アバターは、丸いクマの顔。大きく構えず、近くにいて、頼れる相棒の
-イメージで、フラットでシンプルな形にしている。小さいサイズでも
-判別できることを優先した。
+アバターは、ココアブラウンのパーカーを着た若いクマ。大きく構えず、
+近くにいて、頼れる相棒のイメージ。公式アバターは `assets/avatar.png`。
+小さいサイズやファビコン用に、図形だけの簡略マーク
+`assets/avatar.svg` も用意している。
 
 | 役割 | 色 | コード | 由来 |
 |---|---|---|---|
