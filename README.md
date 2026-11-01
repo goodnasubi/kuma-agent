@@ -37,6 +37,16 @@ Web UI は `--host` / `--port` で待ち受け先を変えられますが、認�
 持たない単一ユーザー前提の画面なので、既定の 127.0.0.1 から
 外に出す場合は注意してください。
 
+## 画面イメージ
+
+Web UI（`kuma-agent web`）:
+
+![Web UI の画面](assets/screenshot-web.png)
+
+TUI（`kuma-agent chat --tui`）:
+
+![TUI の画面](assets/screenshot-tui.png)
+
 ## アバターとイメージカラー
 
 アバターは、ココアブラウンのパーカーを着た若いクマ。大きく構えず、
