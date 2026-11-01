@@ -9,8 +9,27 @@ from pathlib import Path
 @dataclass
 class Config:
     data_dir: Path = field(default_factory=lambda: Path(os.environ.get("KUMA_DATA_DIR", "data")))
-    model: str = "muse-wonder-1.0"
-    model_api_key: str = field(default_factory=lambda: os.environ.get("META_MODEL_API_KEY") or os.environ.get("MODEL_API_KEY", ""))
+    provider: str = field(default_factory=lambda: os.environ.get("KUMA_LLM_PROVIDER", "muse"))
+    model: str | None = field(default_factory=lambda: os.environ.get("KUMA_LLM_MODEL") or None)
+    model_api_key: str = ""
+
+    @property
+    def is_cli_provider(self) -> bool:
+        return self.provider.endswith("-cli") or self.provider == "claude-code"
+
+    def resolve_api_key(self) -> str:
+        """プロバイダに応じた環境変数から API キーを引く。"""
+        if self.model_api_key:
+            return self.model_api_key
+        env_names = {
+            "muse": ("META_MODEL_API_KEY", "MODEL_API_KEY"),
+            "claude": ("ANTHROPIC_API_KEY",),
+            "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+        }.get(self.provider, ())
+        for name in env_names:
+            if os.environ.get(name):
+                return os.environ[name]
+        return ""
     max_tool_rounds: int = 16
 
     @property

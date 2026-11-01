@@ -2,13 +2,13 @@ import json
 
 import httpx
 
-from kuma_agent.llm import Message, ModelClient
+from kuma_agent.llm import Message, MetaModelClient
 from kuma_agent.session import Session
 from kuma_agent.config import Config
 
 
-def _client(handler) -> ModelClient:
-    return ModelClient("test-key", transport=httpx.MockTransport(handler))
+def _client(handler) -> MetaModelClient:
+    return MetaModelClient("test-key", transport=httpx.MockTransport(handler))
 
 
 def test_chat_plain_reply_and_request_shape():

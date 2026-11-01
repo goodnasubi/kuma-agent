@@ -15,8 +15,9 @@ Muse を頭脳にした、対話型の相棒エージェント。人格と記憶
 
 ## 状態
 
-対話ループまで実装済み。実際に話すには Meta Model API のキー
-（`META_MODEL_API_KEY` または `MODEL_API_KEY`）が必要です。
+対話ループまで実装済み。頭脳は 5 種から選べます（`KUMA_LLM_PROVIDER`）:
+Meta Model API（Muse）/ Claude API / Gemini API と、Claude Code CLI /
+Gemini CLI（こちらは API キー不要、各 CLI のログインを使います）。
 
 ## 使い方（予定）
 

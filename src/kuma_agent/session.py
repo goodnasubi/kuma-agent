@@ -4,14 +4,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import Config
-from .llm import Message, ModelClient
+from .llm import ChatModel, Message
 from .memory import Memory
 from .persona import load_persona
 from .tools import ToolBox
 
 
 class Session:
-    def __init__(self, cfg: Config, model: ModelClient) -> None:
+    def __init__(self, cfg: Config, model: ChatModel) -> None:
         self.cfg = cfg
         self.model = model
         self.memory = Memory(cfg.data_dir)
@@ -34,5 +34,5 @@ class Session:
                 return reply.content
             for call in reply.tool_calls:
                 result = self.tools.call(call["name"], call.get("args", {}))
-                self.history.append(Message("tool", result, tool_call_id=call.get("id")))
+                self.history.append(Message("tool", result, tool_call_id=call.get("id"), tool_name=call["name"]))
         return "（道具の呼び出しが上限に達しました）"

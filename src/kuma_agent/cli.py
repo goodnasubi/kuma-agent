@@ -5,7 +5,7 @@ import argparse
 import sys
 
 from .config import Config
-from .llm import ModelClient
+from .llm import create_client
 from .session import Session
 
 
@@ -16,10 +16,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = Config()
-    if not cfg.model_api_key:
-        print("META_MODEL_API_KEY が未設定です", file=sys.stderr)
+    api_key = cfg.resolve_api_key()
+    if not cfg.is_cli_provider and not api_key:
+        print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)
         return 2
-    session = Session(cfg, ModelClient(cfg.model_api_key, cfg.model))
+    session = Session(cfg, create_client(cfg.provider, api_key, cfg.model))
     print("クマです。話しかけてください（終了は Ctrl-D）")
     try:
         while True:

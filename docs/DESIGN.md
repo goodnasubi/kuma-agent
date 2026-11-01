@@ -15,7 +15,8 @@ Muse（Meta の個人エージェント）のような「対話型の相棒エ�
 src/kuma_agent/
   cli.py       エントリポイント（chat）
   config.py    設定（モデル、データ置き場、API キー）
-  llm.py       Meta Model API（Muse）のクライアントと対話ループ
+  llm.py       LLM バックエンド（API 系 3 種）と共通の Message 表現
+  agent_cli.py エージェント実行環境（CLI 系 2 種）をバックエンドにする実装
   persona.py   人格ファイル（SOUL.md / IDENTITY.md / USER.md）の読み込み
   memory.py    長期記憶（MEMORY.md）と会話履歴の読み書き・検索
   tools.py     道具の登録と実行（ファイル、シェル、時刻など）
@@ -62,7 +63,22 @@ data/（実行時に作る、リポジトリには入れない）
 - API キーは環境変数からのみ読む（`META_MODEL_API_KEY`）
 - 道具の実行範囲は作業ディレクトリと許可リストに制限する
 
-## Meta Model API の使い方（決定済み）
+## LLM バックエンド（決定済み）
+
+頭脳は差し替え可能にし、5 種を用意する。選択は環境変数
+`KUMA_LLM_PROVIDER`（既定 muse）、モデルは `KUMA_LLM_MODEL`。
+
+API 系（kuma-agent が道具ループを回す）:
+- `muse`: Meta Model API（Muse Wonder）。キー: META_MODEL_API_KEY
+- `claude`: Anthropic Messages API。キー: ANTHROPIC_API_KEY
+- `gemini`: Google Gemini API。キー: GEMINI_API_KEY
+
+CLI 系（相手側が道具ループを持つ。文脈をプロンプトで渡し、作業
+ディレクトリでヘッドレス実行する。認証は各 CLI のログインを使う）:
+- `claude-code`: Claude Code CLI（`claude -p`）
+- `gemini-cli`: Gemini CLI（`gemini -p`）
+
+## Meta Model API の使い方
 
 - OpenAI 互換の Chat Completions 形式（`https://api.meta.ai/v1`、
   モデル `muse-wonder-1.0`、Bearer 認証）
