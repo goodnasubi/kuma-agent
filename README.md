@@ -28,8 +28,14 @@ Gemini CLI（こちらは API キー不要、各 CLI のログインを使いま
 
 ```bash
 pip install -e .
-kuma-agent chat          # 対話を開始する
+kuma-agent chat          # 対話を開始する（プレーンな対話ループ）
+kuma-agent chat --tui    # ターミナル UI（curses）で対話する
+kuma-agent web           # Web UI を http://127.0.0.1:8765 で起動する
 ```
+
+Web UI は `--host` / `--port` で待ち受け先を変えられますが、認証を
+持たない単一ユーザー前提の画面なので、既定の 127.0.0.1 から
+外に出す場合は注意してください。
 
 ## アバターとイメージカラー
 
