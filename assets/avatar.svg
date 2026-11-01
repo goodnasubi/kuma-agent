@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="kuma-agent のアバター：クマ">
+  <circle cx="100" cy="100" r="98" fill="#4B3226"/>
+  <circle cx="50" cy="64" r="17" fill="#E79A3C"/>
+  <circle cx="150" cy="64" r="17" fill="#E79A3C"/>
+  <ellipse cx="100" cy="114" rx="68" ry="62" fill="#E79A3C"/>
+  <ellipse cx="100" cy="140" rx="41" ry="31" fill="#FFF3E0"/>
+  <circle cx="79" cy="106" r="6.5" fill="#4B3226"/>
+  <circle cx="121" cy="106" r="6.5" fill="#4B3226"/>
+  <ellipse cx="100" cy="128" rx="10.5" ry="7.5" fill="#4B3226"/>
+  <path d="M89 143 Q100 151 111 143" stroke="#4B3226" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+</svg>
