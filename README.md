@@ -77,6 +77,10 @@ TUI（`kuma-agent chat --tui`）。`/attach <パス>` で添付します:
 
 ![TUI の画面](assets/screenshot-tui.png)
 
+TUI の操作動画（`/attach` で写真を添付しています）:
+
+![TUI の操作動画](assets/demo-tui.gif)
+
 ## アバターとイメージカラー
 
 アバターは、ココアブラウンのパーカーを着た若いクマ。大きく構えず、
