@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlsplit
 
+from .config import mode_label, normalize_mode
 from .llm import MAX_ATTACHMENT_BYTES, Attachment, guess_media_type
 from .memory import (
     DEFAULT_SESSION_ID,
@@ -73,6 +74,7 @@ _PAGE_TEMPLATE = """\
            border-radius: 6px; border: 1px solid __COCOA__; }
   .sessions button { padding: 6px 12px; font-size: 13px; background: #fff;
            color: __COCOA__; border: 1px solid __COCOA__; }
+  .sessions[hidden] { display: none; }
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex;
          flex-direction: column; gap: 10px; }
   .msg { max-width: 80%; padding: 10px 14px; border-radius: 14px;
@@ -123,6 +125,7 @@ _PAGE_TEMPLATE = """\
   <div>
     <h1>クマ</h1>
     <div class="provider">provider: __PROVIDER__</div>
+    <div class="provider" id="modeName"></div>
   </div>
   <div class="sessions">
     <label for="tenantSelect">テナント</label>
@@ -136,7 +139,7 @@ _PAGE_TEMPLATE = """\
     <input id="newUser" placeholder="新しいユーザー" size="10">
     <button id="createUser" type="button">作成</button>
   </div>
-  <div class="sessions">
+  <div class="sessions" id="sessionBox">
     <label for="sessionSelect">部屋</label>
     <select id="sessionSelect"></select>
     <input id="newSession" placeholder="新しい部屋" size="10">
@@ -171,6 +174,7 @@ const createTenantBtn = document.getElementById('createTenant');
 const userSelect = document.getElementById('userSelect');
 const newUserInput = document.getElementById('newUser');
 const createUserBtn = document.getElementById('createUser');
+const sessionBox = document.getElementById('sessionBox');
 const sessionSelect = document.getElementById('sessionSelect');
 const newSessionInput = document.getElementById('newSession');
 const createSessionBtn = document.getElementById('createSession');
@@ -487,7 +491,25 @@ form.addEventListener('submit', async (ev) => {
   }
 });
 
+// 起動時のメタ情報。モードの表示名をヘッダーに出し、用事で分ける
+// モード（ledger）では部屋は 1 つに固定されるため、部屋の選択・
+// 作成 UI 自体を出さない（履歴と送信は固定の部屋で動く）
+const modeName = document.getElementById('modeName');
+async function loadMeta() {
+  try {
+    const res = await fetch('/api/meta');
+    const data = await res.json();
+    if (data.mode_label) {
+      modeName.textContent = '分け方: ' + data.mode_label;
+    }
+    if (data.mode === 'ledger') {
+      sessionBox.hidden = true;
+    }
+  } catch (e) { /* 取れなければ従来どおり全部出す */ }
+}
+
 (async () => {
+  await loadMeta();
   await loadTenants();
   await loadUsers();
   await loadSessions();
@@ -652,6 +674,8 @@ class TenantStore:
         self._model = initial.model
         self.default_tenant = initial.tenant
         self.default_user = initial.user
+        # モードはサーバー起動時の設定で決まる（ページが /api/meta で知る）
+        self.mode = normalize_mode(initial.cfg.mode)
         seeded = UserStore(
             self.default_tenant, initial.cfg.tenant_data_dir,
             self.default_user, self._session_maker(self.default_tenant),
@@ -715,6 +739,11 @@ def make_handler(tenants: TenantStore, page: str):
             query = parse_qs(split.query)
             if split.path == "/":
                 self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            elif split.path == "/api/meta":
+                self._send_json(200, {"mode": tenants.mode,
+                                      "mode_label": mode_label(tenants.mode),
+                                      "tenant": tenants.default_tenant,
+                                      "user": tenants.default_user})
             elif split.path == "/api/tenants":
                 self._send_json(200, {"tenants": tenants.names(),
                                       "current": tenants.default_tenant})

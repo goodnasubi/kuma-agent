@@ -4,7 +4,9 @@
 会話の中で話題が切り替わるたび、その用事の状態（題名・状態・最新の
 メモ）を台帳に持ち、対話の冒頭で進行中の用事を思い出せるようにする。
 
-台帳はデータ置き場の tasks.json に保存する。壊れた JSON のときは
+台帳は部屋ごとに 1 ファイルで保存する。既定の部屋（main）は
+データ置き場の tasks.json、それ以外の部屋は tasks/<部屋名>.json
+（置き場の解決は memory.tasks_file_for）。壊れた JSON のときは
 空の台帳として始める（例外で落とさない）。
 """
 from __future__ import annotations
@@ -76,11 +78,15 @@ class Task:
 
 
 class TaskBoard:
-    """用事の台帳。tasks.json への保存・読み込みを持つ。"""
+    """用事の台帳。台帳ファイルへの保存・読み込みを持つ。"""
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path,
+                 tasks_file: Path | None = None) -> None:
         self.data_dir = data_dir
-        self.tasks_file = data_dir / "tasks.json"
+        # 既定はユーザー置き場直下の tasks.json（既定の部屋の台帳）。
+        # 部屋ごとの台帳では呼び出し側がファイルを指定する
+        self.tasks_file = (tasks_file if tasks_file is not None
+                           else data_dir / "tasks.json")
         self._tasks: list[Task] = self._load()
 
     # ------------------------------------------------------------ 永続化

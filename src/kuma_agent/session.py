@@ -12,19 +12,35 @@
 
 部屋の中で並行する用事は台帳（TaskBoard）が持ち、進行中の用事は
 対話の冒頭でシステムプロンプトに注入して思い出せるようにする。
+台帳は部屋ごとに持つ（階層は テナント＞ユーザー＞部屋＞台帳）:
+その部屋の台帳だけを読み書きし、注入もその部屋の用事だけにする。
+台帳ファイルは、既定の部屋（main）はユーザー置き場直下の
+tasks.json、それ以外の部屋は tasks/<部屋名>.json に置く
+（memory.tasks_file_for）。
+
+部屋と台帳のどちらを使うかはモード（Config.mode）で選べる:
+- both（併用、既定）: 部屋で大きく分け、各部屋の中の用事は
+  その部屋専用の台帳で分ける
+- wall（部屋モード）: 台帳は無効。道具に台帳系を登録せず、
+  進行中の用事の注入もしない
+- ledger（台帳モード）: 部屋は実質 1 つ（main）に固定し、用事は
+  台帳で分ける。セッション ID の指定は無視され、台帳は従来の
+  tasks.json を使う形になる
 """
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable
 
-from .config import Config
+from .config import Config, normalize_mode
 from .llm import Attachment, ChatModel, Message, quoted_content
 from .memory import (
+    DEFAULT_SESSION_ID,
     Memory,
     normalize_session_id,
     normalize_tenant_name,
     normalize_user_name,
+    tasks_file_for,
 )
 from .persona import load_persona
 from .tasks import TaskBoard
@@ -73,20 +89,31 @@ class Session:
         self.on_status = on_status
         self.tenant = normalize_tenant_name(cfg.tenant)
         self.user = normalize_user_name(cfg.user)
-        self.session_id = normalize_session_id(session_id)
+        self.mode = normalize_mode(cfg.mode)
+        # 台帳モードでは部屋は実質 1 つに固定する（指定は無視する）
+        if self.mode == "ledger":
+            self.session_id = DEFAULT_SESSION_ID
+        else:
+            self.session_id = normalize_session_id(session_id)
         # 人格・長期記憶・部屋・台帳はユーザーの実効データ置き場で分ける
         data_dir = cfg.user_data_dir
         self.memory = Memory(data_dir, self.session_id)
-        self.task_board = TaskBoard(data_dir)
-        self.tools = ToolBox(Path.cwd(), task_board=self.task_board)
+        # 台帳は部屋ごとに持つ: 自分の部屋の台帳ファイルだけを使う
+        self.task_board = TaskBoard(
+            data_dir, tasks_file_for(data_dir, self.session_id))
+        # 部屋モードでは台帳を無効にする: 道具に台帳系を登録せず、
+        # 進行中の用事もプロンプトへ注入しない
+        board = None if self.mode == "wall" else self.task_board
+        self.tools = ToolBox(Path.cwd(), task_board=board)
         self.history: list[Message] = self._restore_history()
         memory_text = self.memory.load_long_term()
         self.system_prompt = load_persona(data_dir)
         if memory_text:
             self.system_prompt += f"\n\n# 長期記憶\n{memory_text}"
-        tasks_text = self._open_tasks_text()
-        if tasks_text:
-            self.system_prompt += f"\n\n# 進行中の用事\n{tasks_text}"
+        if self.mode != "wall":
+            tasks_text = self._open_tasks_text()
+            if tasks_text:
+                self.system_prompt += f"\n\n# 進行中の用事\n{tasks_text}"
 
     def _open_tasks_text(self) -> str:
         """進行中の用事をシステムプロンプト用の箇条書きにする。

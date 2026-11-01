@@ -165,6 +165,35 @@ def retention_days_for(data_dir: Path, tenant: str | None,
     return overrides.get(normalize_tenant_name(tenant), default_days)
 
 
+def tasks_file_for(data_dir: Path, session_id: str | None) -> Path:
+    """部屋の台帳ファイルの置き場を返す。
+
+    台帳は部屋ごとに持つ。既定の部屋（main）は後方互換のため
+    ユーザー置き場直下の tasks.json、それ以外の部屋は
+    置き場の tasks/<部屋名>.json に置く。台帳モードでは部屋が
+    main に固定されるため、結果として従来の tasks.json を使う。
+    """
+    sid = normalize_session_id(session_id)
+    if sid == DEFAULT_SESSION_ID:
+        return data_dir / "tasks.json"
+    return data_dir / "tasks" / f"{sid}.json"
+
+
+def iter_tasks_files(data_dir: Path) -> list[Path]:
+    """ユーザー置き場にある全台帳ファイルを列挙する。
+
+    既定の部屋の tasks.json と、部屋ごとの tasks/*.json の両方。
+    無いものは含めない。
+    """
+    files: list[Path] = []
+    if (data_dir / "tasks.json").is_file():
+        files.append(data_dir / "tasks.json")
+    tasks_dir = data_dir / "tasks"
+    if tasks_dir.is_dir():
+        files.extend(sorted(tasks_dir.glob("*.json")))
+    return files
+
+
 @dataclass
 class CleanupResult:
     """クリーンアップで削除した件数の内訳。"""
@@ -187,8 +216,9 @@ def cleanup_expired(data_dir: Path, retention_days: int,
     消さない:
     - 部屋の記録ファイル（conversations/*.jsonl）のうち、最終更新が
       期限より古いもの（ファイルごと削除）
-    - 台帳（tasks.json）のうち、完了（done）してから更新が期限より
-      古い用事（レコードだけ除去し、ファイルは残す）
+    - 台帳（全台帳ファイル: tasks.json と tasks/*.json）のうち、
+      完了（done）してから更新が期限より古い用事（レコードだけ
+      除去し、ファイルは残す）
 
     tenant を指定した場合はそのテナントの置き場（配下の全ユーザー）
     だけを走査し、他のテナントには一切触れない。存在しないテナント
@@ -229,9 +259,9 @@ def cleanup_expired(data_dir: Path, retention_days: int,
                         result.sessions_removed += 1
                     except OSError:
                         continue  # 読めない・消せないファイルは飛ばす
-            if (udir / "tasks.json").is_file():
+            for board_file in iter_tasks_files(udir):
                 try:
-                    board = TaskBoard(udir)
+                    board = TaskBoard(udir, board_file)
                     result.tasks_removed += board.prune_done_before(
                         cutoff, dry_run=dry_run)
                 except Exception:

@@ -4,10 +4,10 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .config import Config
+from .config import Config, mode_label, normalize_mode
 from .llm import create_client
-from .memory import (cleanup_expired, normalize_tenant_name,
-                     retention_days_for)
+from .memory import (cleanup_expired, normalize_session_id,
+                     normalize_tenant_name, retention_days_for)
 from .session import Session
 
 
@@ -73,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
                              help="テナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
     chat_parser.add_argument("--user", default=None,
                              help="ユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
+    chat_parser.add_argument("--mode", default=None,
+                             help="モード: both（部屋と用事で分ける）/ wall（部屋で分ける）"
+                                  "/ ledger（用事で分ける）"
+                                  "（既定: 環境変数 KUMA_MODE、無ければ both）")
     web_parser = sub.add_parser("web", help="Web UI を起動する")
     web_parser.add_argument("--host", default="127.0.0.1",
                             help="バインドするホスト（既定: 127.0.0.1）")
@@ -82,6 +86,10 @@ def main(argv: list[str] | None = None) -> int:
                             help="起動時のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
     web_parser.add_argument("--user", default=None,
                             help="起動時のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
+    web_parser.add_argument("--mode", default=None,
+                            help="モード: both（部屋と用事で分ける）/ wall（部屋で分ける）"
+                                 "/ ledger（用事で分ける）"
+                                 "（既定: 環境変数 KUMA_MODE、無ければ both）")
     cleanup_parser = sub.add_parser("cleanup", help="保持期限を過ぎた記録を掃除する")
     cleanup_parser.add_argument("--dry-run", action="store_true",
                                 help="削除せず、対象の件数だけを表示する")
@@ -97,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg.tenant = args.tenant
     if getattr(args, "user", None) is not None:
         cfg.user = args.user
+    if getattr(args, "mode", None) is not None:
+        cfg.mode = normalize_mode(args.mode)  # 代入では __post_init__ が効かないため
     if args.command == "cleanup":  # 掃除はモデルも API キーも要らない
         return _run_cleanup(cfg, dry_run=args.dry_run, tenant=args.tenant,
                             days=args.days)
@@ -112,6 +122,11 @@ def main(argv: list[str] | None = None) -> int:
         serve(Session(cfg, client), host=args.host, port=args.port)
         return 0
     session = Session(cfg, client, session_id=args.session)
+    if (cfg.mode == "ledger"
+            and normalize_session_id(args.session) != session.session_id):
+        # 用事で分けるモードでは部屋が固定されることを起動時に知らせる
+        print(f"「{mode_label(cfg.mode)}」モードのため"
+              f"部屋は {session.session_id} に固定されます")
     if args.tui:
         from .tui import run_tui
 

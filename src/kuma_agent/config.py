@@ -19,14 +19,50 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+# 文脈の分け方のモード（詳細は docs/DESIGN.md の「モード」節）:
+# - both: 部屋（壁方式）と台帳を併用する（従来どおり）
+# - wall: 部屋モード。台帳は無効
+# - ledger: 台帳モード。部屋は実質 1 つ（main）に固定し、用事は台帳で分ける
+MODES = ("both", "wall", "ledger")
+DEFAULT_MODE = "both"
+
+
+def normalize_mode(raw: str | None) -> str:
+    """モード名を正規化する。不正な値は既定（併用）に倒す。"""
+    mode = (raw or "").strip().lower()
+    return mode if mode in MODES else DEFAULT_MODE
+
+
+# モードのユーザー向け表示名。内部の識別子（wall / ledger / both）は
+# 設定値としてだけ使い、画面や文面では振る舞いがそのまま分かる
+# こちらの名前で出す。対応付けはこの辞書に集約する
+MODE_LABELS: dict[str, str] = {
+    "both": "部屋と用事で分ける",
+    "wall": "部屋で分ける",
+    "ledger": "用事で分ける",
+}
+
+
+def mode_label(mode: str | None) -> str:
+    """モードの表示名を返す。不正な値は既定モードの表示名に倒す。"""
+    return MODE_LABELS[normalize_mode(mode)]
+
+
 @dataclass
 class Config:
     data_dir: Path = field(default_factory=lambda: Path(os.environ.get("KUMA_DATA_DIR", "data")))
     tenant: str = field(default_factory=lambda: os.environ.get("KUMA_TENANT", "default"))
     user: str = field(default_factory=lambda: os.environ.get("KUMA_USER", "default"))
+    # 文脈の分け方のモード（both / wall / ledger）。不正な値は
+    # __post_init__ で既定の both に倒す
+    mode: str = field(default_factory=lambda: os.environ.get("KUMA_MODE", DEFAULT_MODE))
     provider: str = field(default_factory=lambda: os.environ.get("KUMA_LLM_PROVIDER", "muse"))
     model: str | None = field(default_factory=lambda: os.environ.get("KUMA_LLM_MODEL") or None)
     model_api_key: str = ""
+
+    def __post_init__(self) -> None:
+        # どの経路で作られてもモードは正規化済みの値にそろえる
+        self.mode = normalize_mode(self.mode)
 
     @property
     def is_cli_provider(self) -> bool:

@@ -127,8 +127,10 @@ def test_tenants_are_isolated(tmp_path: Path):
     assert "Aの用事" not in b3.system_prompt
     a3 = Session(cfg_a, _EchoModel(), "room")
     assert "Aの用事" in a3.system_prompt
-    assert (dir_a / "tasks.json").exists()
+    # 台帳は部屋ごと: 部屋 room の台帳は tasks/room.json に置かれる
+    assert (dir_a / "tasks" / "room.json").exists()
     assert not (dir_b / "tasks.json").exists()
+    assert not (dir_b / "tasks").exists()
 
 
 # ---------------------------------------------------------------- CLI
