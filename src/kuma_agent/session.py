@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import Config
-from .llm import ChatModel, Message
+from .llm import Attachment, ChatModel, Message
 from .memory import Memory
 from .persona import load_persona
 from .tools import ToolBox
@@ -22,10 +22,19 @@ class Session:
         if memory_text:
             self.system_prompt += f"\n\n# 長期記憶\n{memory_text}"
 
-    def say(self, user_text: str) -> str:
-        """利用者の発話を受け、道具の循環を経て最終応答を返す。"""
-        self.history.append(Message("user", user_text))
-        self.memory.append_turn("user", user_text)
+    def say(self, user_text: str, attachments: list[Attachment] | None = None) -> str:
+        """利用者の発話を受け、道具の循環を経て最終応答を返す。
+
+        添付は履歴の発話に持たせてモデルへ渡す。長期記憶の記録には
+        バイト列を残さず「[添付: 名前（種別）]」の要約だけを残す。
+        """
+        atts = list(attachments or [])
+        self.history.append(Message("user", user_text, attachments=atts))
+        record = user_text
+        if atts:
+            record = (record + " " if record else "") + " ".join(
+                att.placeholder() for att in atts)
+        self.memory.append_turn("user", record)
         for _ in range(self.cfg.max_tool_rounds):
             reply = self.model.chat(self.system_prompt, self.history, self.tools.schemas())
             self.history.append(reply)

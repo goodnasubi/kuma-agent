@@ -12,14 +12,25 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .llm import Message
+from .llm import Attachment, Message
+
+ATTACHMENTS_DIR = ".kuma-attachments"
 
 
-def _render_prompt(system_prompt: str, messages: list[Message]) -> str:
+def _render_prompt(system_prompt: str, messages: list[Message],
+                   attachment_paths: dict[int, Path] | None = None) -> str:
     lines = [system_prompt, ""]
     for msg in messages:
         if msg.role == "user":
             lines.append(f"利用者: {msg.content}")
+            for att in msg.attachments:
+                # 添付はファイルとして保存し、相手のエージェントに
+                # 自分で読んでもらう。保存できなかったものは存在だけ伝える
+                path = (attachment_paths or {}).get(id(att))
+                if path is not None:
+                    lines.append(f"[添付ファイル: {path}]")
+                else:
+                    lines.append(att.placeholder())
         elif msg.role == "assistant" and msg.content:
             lines.append(f"クマ: {msg.content}")
         elif msg.role == "tool":
@@ -46,8 +57,31 @@ class CliAgentClient:
     def build_args(self, prompt: str) -> list[str]:
         raise NotImplementedError
 
+    def _save_attachments(self, messages: list[Message]) -> dict[int, Path]:
+        """履歴中の添付を作業ディレクトリ配下に保存し、対応表を返す。
+
+        同名で同サイズのファイルが既にあれば再保存しない。同名で
+        中身が違う場合は連番を付けて衝突を避ける。
+        """
+        saved: dict[int, Path] = {}
+        pending = [att for msg in messages for att in msg.attachments]
+        if not pending:
+            return saved
+        dest_dir = self.work_dir / ATTACHMENTS_DIR
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for att in pending:
+            path = dest_dir / Path(att.name).name
+            suffix = 1
+            while path.exists() and path.stat().st_size != len(att.data):
+                suffix += 1
+                path = dest_dir / f"{path.stem}-{suffix}{path.suffix}"
+            if not path.exists():
+                path.write_bytes(att.data)
+            saved[id(att)] = path
+        return saved
+
     def chat(self, system_prompt: str, messages: list[Message], tools: list[dict]) -> Message:
-        prompt = _render_prompt(system_prompt, messages)
+        prompt = _render_prompt(system_prompt, messages, self._save_attachments(messages))
         try:
             proc = subprocess.run(
                 self.build_args(prompt),

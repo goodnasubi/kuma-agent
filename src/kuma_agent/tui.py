@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import unicodedata
 from collections.abc import Iterable, Sequence
+from pathlib import Path
 
-from .llm import Message
+from .llm import MAX_ATTACHMENT_BYTES, Attachment, Message, guess_media_type
 from .session import Session
 
 USER_LABEL = "あなた"
 ASSISTANT_LABEL = "クマ"
 QUIT_COMMAND = "/quit"
+ATTACH_COMMAND = "/attach"
 
 
 # ---------------------------------------------------------------- 純粋関数
@@ -54,14 +56,21 @@ def format_log(messages: Iterable[Message], width: int = 80) -> list[str]:
     """会話履歴を表示用の行リストに整形する。
 
     道具のやり取り（role == "tool" や道具呼び出しだけの応答）は
-    画面には出さず、利用者とクマの発話だけを見せる。
+    画面には出さず、利用者とクマの発話だけを見せる。添付は
+    プレースホルダ文で併記する。
     """
     lines: list[str] = []
     for msg in messages:
-        if msg.role not in ("user", "assistant") or not msg.content:
+        if msg.role not in ("user", "assistant"):
+            continue
+        text = msg.content
+        if msg.attachments:
+            marks = " ".join(att.placeholder() for att in msg.attachments)
+            text = f"{text} {marks}" if text else marks
+        if not text:
             continue
         label = USER_LABEL if msg.role == "user" else ASSISTANT_LABEL
-        body = wrap_display(msg.content, max(10, width - display_width(label) - 2))
+        body = wrap_display(text, max(10, width - display_width(label) - 2))
         lines.append(f"{label}: {body[0]}" if body else f"{label}:")
         indent = " " * (display_width(label) + 2)
         lines.extend(indent + line for line in body[1:])
@@ -74,6 +83,35 @@ def format_log(messages: Iterable[Message], width: int = 80) -> list[str]:
 def is_quit(text: str) -> bool:
     """終了コマンドかどうか。"""
     return text.strip() == QUIT_COMMAND
+
+
+def parse_attach_command(text: str) -> str | None:
+    """`/attach <パス>` ならパスを、そうでなければ None を返す。
+
+    パスが無い `/attach` 単体は空文字列を返す（呼び出し側で案内する）。
+    """
+    stripped = text.strip()
+    if stripped == ATTACH_COMMAND:
+        return ""
+    if stripped.startswith(ATTACH_COMMAND + " "):
+        return stripped[len(ATTACH_COMMAND):].strip()
+    return None
+
+
+def load_attachment(path_text: str, base_dir: Path | None = None) -> Attachment:
+    """パスのファイルを読み込んで Attachment にする。
+
+    相対パスは base_dir（無ければカレントディレクトリ）基準で解釈する。
+    読めない場合や上限（MAX_ATTACHMENT_BYTES）超過は例外にする。
+    """
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
+        path = (base_dir or Path.cwd()) / path
+    data = path.read_bytes()
+    if len(data) > MAX_ATTACHMENT_BYTES:
+        raise ValueError(
+            f"添付が大きすぎます（上限 {MAX_ATTACHMENT_BYTES} バイト）: {path.name}")
+    return Attachment(name=path.name, media_type=guess_media_type(path.name), data=data)
 
 
 # ---------------------------------------------------------------- curses 本体
@@ -112,11 +150,16 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
 
     buffer = ""  # 入力中の文字列
     offset = 0  # ログのスクロール量（0 で最下部に追従）
+    pending: list[Attachment] = []  # 次の発話に添える添付
+
+    def notice(text: str) -> None:
+        session.history.append(Message("assistant", text))
 
     def redraw() -> None:
         height, width = stdscr.getmaxyx()  # type: ignore[attr-defined]
         stdscr.erase()  # type: ignore[attr-defined]
-        header = f" クマ ─ provider: {provider} ─ Enter: 送信 / {QUIT_COMMAND}: 終了"
+        header = (f" クマ ─ provider: {provider} ─ Enter: 送信 / "
+                  f"{ATTACH_COMMAND} <パス>: 添付 / {QUIT_COMMAND}: 終了")
         _safe_addstr(stdscr, 0, 0, header[: max(0, width - 1)])
         try:
             stdscr.hline(1, 0, curses.ACS_HLINE, max(0, width - 1))  # type: ignore[attr-defined]
@@ -164,10 +207,25 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
             if is_quit(text):
                 return
             offset = 0
+            attach_path = parse_attach_command(text)
+            if attach_path is not None:
+                if not attach_path:
+                    notice(f"（使い方: {ATTACH_COMMAND} <ファイルのパス>）")
+                    continue
+                try:
+                    att = load_attachment(attach_path, Path.cwd())
+                except (OSError, ValueError) as exc:
+                    notice(f"（添付できませんでした: {exc}）")
+                    continue
+                pending.append(att)
+                notice(f"（添付しました: {att.name}。次の発話に添付されます）")
+                continue
             try:
-                session.say(text)
+                session.say(text, list(pending))
             except Exception as exc:
                 session.history.append(Message("assistant", f"（エラー: {exc}）"))
+            finally:
+                pending.clear()
             continue
         if isinstance(key, str) and key in ("\x7f", "\b"):  # Backspace / Delete
             buffer = buffer[:-1]

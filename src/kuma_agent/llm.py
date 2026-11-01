@@ -8,13 +8,77 @@
 """
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 
 import httpx
 
 MAX_TOKENS = 8192
+
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # 添付 1 件の上限（目安 10MB）
+
+IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+PDF_MEDIA_TYPE = "application/pdf"
+_TEXT_MEDIA_TYPES = frozenset({"application/json"})
+_EXTENSION_MEDIA_TYPES = {".md": "text/markdown"}
+
+
+def guess_media_type(name: str) -> str:
+    """ファイル名の拡張子からメディア種別を推定する。"""
+    media_type, _ = mimetypes.guess_type(name)
+    if media_type:
+        return media_type
+    return _EXTENSION_MEDIA_TYPES.get(Path(name).suffix.lower(), "application/octet-stream")
+
+
+@dataclass
+class Attachment:
+    """発話に添えるファイル（画像・文書）。バイト列そのものを持つ。"""
+
+    name: str
+    media_type: str
+    data: bytes
+
+    @property
+    def is_image(self) -> bool:
+        return self.media_type in IMAGE_MEDIA_TYPES
+
+    @property
+    def is_pdf(self) -> bool:
+        return self.media_type == PDF_MEDIA_TYPE
+
+    @property
+    def is_text(self) -> bool:
+        """テキストとして本文をそのまま渡せる文書かどうか。"""
+        return self.media_type.startswith("text/") or self.media_type in _TEXT_MEDIA_TYPES
+
+    def text_content(self) -> str:
+        return self.data.decode("utf-8", errors="replace")
+
+    def to_base64(self) -> str:
+        return base64.b64encode(self.data).decode("ascii")
+
+    def placeholder(self) -> str:
+        """添付をそのまま渡せない場合にモデルへ存在を知らせる文。"""
+        return f"[添付: {self.name}（{self.media_type}）]"
+
+    def embedded_text(self) -> str:
+        """テキスト文書を本文として埋め込むときの表現。"""
+        return f"[添付文書: {self.name}]\n{self.text_content()}"
+
+
+def fallback_text(attachment: Attachment) -> str:
+    """プロバイダに直接渡せない添付の共通の落とし先。
+
+    テキスト文書は本文を埋め込み、それ以外はプレースホルダ文にする。
+    """
+    if attachment.is_text:
+        return attachment.embedded_text()
+    return attachment.placeholder()
 
 
 @dataclass
@@ -24,6 +88,7 @@ class Message:
     tool_calls: list[dict] = field(default_factory=list)  # {"id", "name", "args"}
     tool_call_id: str | None = None  # role == "tool" のとき対応する呼び出しの id
     tool_name: str | None = None  # role == "tool" のとき道具名（Gemini は名前で対応付ける）
+    attachments: list[Attachment] = field(default_factory=list)  # 利用者の添付ファイル
 
 
 class ChatModel(Protocol):
@@ -50,6 +115,26 @@ class MetaModelClient:
                              {"Authorization": f"Bearer {api_key}"}, transport)
 
     @staticmethod
+    def _content(msg: Message) -> str | list[dict]:
+        """添付があれば content をパート配列にする。
+
+        画像は image_url の data URI で渡せる。PDF は渡せないので
+        プレースホルダ文に落とし、テキスト文書は本文を埋め込む。
+        """
+        if not msg.attachments:
+            return msg.content
+        parts: list[dict] = []
+        if msg.content:
+            parts.append({"type": "text", "text": msg.content})
+        for att in msg.attachments:
+            if att.is_image:
+                parts.append({"type": "image_url", "image_url": {
+                    "url": f"data:{att.media_type};base64,{att.to_base64()}"}})
+            else:
+                parts.append({"type": "text", "text": fallback_text(att)})
+        return parts
+
+    @staticmethod
     def _to_api(msg: Message) -> dict:
         if msg.role == "tool":
             return {"role": "tool", "tool_call_id": msg.tool_call_id, "content": msg.content}
@@ -64,7 +149,7 @@ class MetaModelClient:
                     for c in msg.tool_calls
                 ],
             }
-        return {"role": msg.role, "content": msg.content}
+        return {"role": msg.role, "content": MetaModelClient._content(msg)}
 
     def chat(self, system_prompt: str, messages: list[Message], tools: list[dict]) -> Message:
         payload: dict = {
@@ -110,6 +195,32 @@ class AnthropicClient:
                              transport)
 
     @staticmethod
+    def _content(msg: Message) -> str | list[dict]:
+        """添付があれば content をブロック配列にする。
+
+        画像は image ブロック、PDF は document ブロック（いずれも
+        base64）で渡せる。テキスト文書は本文を埋め込み、それ以外は
+        プレースホルダ文に落とす。
+        """
+        if not msg.attachments:
+            return msg.content
+        blocks: list[dict] = []
+        if msg.content:
+            blocks.append({"type": "text", "text": msg.content})
+        for att in msg.attachments:
+            if att.is_image:
+                blocks.append({"type": "image", "source": {
+                    "type": "base64", "media_type": att.media_type,
+                    "data": att.to_base64()}})
+            elif att.is_pdf:
+                blocks.append({"type": "document", "source": {
+                    "type": "base64", "media_type": PDF_MEDIA_TYPE,
+                    "data": att.to_base64()}})
+            else:
+                blocks.append({"type": "text", "text": fallback_text(att)})
+        return blocks
+
+    @staticmethod
     def _to_api(messages: list[Message]) -> list[dict]:
         out: list[dict] = []
         pending_tools: list[dict] = []  # 連続する道具結果は 1 つの user 発話にまとめる
@@ -138,7 +249,7 @@ class AnthropicClient:
                 ]
                 out.append({"role": "assistant", "content": blocks})
             else:
-                out.append({"role": msg.role, "content": msg.content})
+                out.append({"role": msg.role, "content": AnthropicClient._content(msg)})
         flush_tools()
         return out
 
@@ -207,7 +318,18 @@ class GeminiClient:
                           for c in msg.tool_calls]
                 out.append({"role": "model", "parts": parts})
             else:
-                out.append({"role": "user", "parts": [{"text": msg.content}]})
+                parts = []
+                if msg.content:
+                    parts.append({"text": msg.content})
+                for att in msg.attachments:
+                    # 画像・PDF は inlineData で渡せる。テキスト文書は
+                    # 本文を埋め込み、それ以外はプレースホルダ文に落とす
+                    if att.is_image or att.is_pdf:
+                        parts.append({"inlineData": {
+                            "mimeType": att.media_type, "data": att.to_base64()}})
+                    else:
+                        parts.append({"text": fallback_text(att)})
+                out.append({"role": "user", "parts": parts})
         flush()
         return out
 
