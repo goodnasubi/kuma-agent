@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import mimetypes
 import threading
 import uuid
 from dataclasses import replace
@@ -16,7 +17,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from .config import Config, mode_label, normalize_mode
 from .llm import MAX_ATTACHMENT_BYTES, Attachment, guess_media_type
@@ -45,6 +46,7 @@ from .notify_prefs import (
     remove_muted_topic,
     set_quiet_hours,
 )
+from .outputs import OutputBoard, format_created_at, format_size
 from .proactive import run_sweep
 from .session import Session
 from .telegram import start_polling_thread as start_telegram_polling
@@ -118,6 +120,17 @@ _PAGE_TEMPLATE = """\
                border: 1px solid __COCOA__; }
   #tenantPanel h3 { font-size: 14px; margin: 16px 0 4px;
                border-top: 1px solid __HONEY__; padding-top: 12px; }
+  #outputsPanel { background: #fff; border-bottom: 1px solid __HONEY__;
+                 padding: 12px 16px; }
+  #outputsPanel[hidden] { display: none; }
+  #outputsPanel h2 { font-size: 15px; margin: 0 0 8px; }
+  .outputRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+               padding: 8px 0; border-top: 1px dashed __HONEY__; font-size: 14px; }
+  .outputRow .otitle { font-weight: bold; min-width: 8em; }
+  .outputRow .oname, .outputRow .ometa { opacity: .85; }
+  .outputRow a { padding: 4px 12px; font-size: 13px; background: #fff;
+               color: __COCOA__; border: 1px solid __COCOA__;
+               border-radius: 8px; text-decoration: none; }
   .notifyRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
                padding: 6px 0; font-size: 14px; }
   .notifyRow .tname { min-width: 8em; }
@@ -210,8 +223,13 @@ _PAGE_TEMPLATE = """\
   </div>
   <div class="sessions">
     <button id="tenantAdminBtn" type="button">テナント管理</button>
+    <button id="outputsBtn" type="button">成果物</button>
   </div>
 </header>
+<section id="outputsPanel" hidden>
+  <h2>成果物</h2>
+  <div id="outputRows"></div>
+</section>
 <section id="tenantPanel" hidden>
   <h2>テナント管理</h2>
   <div id="tenantRows"></div>
@@ -277,6 +295,9 @@ const createSessionBtn = document.getElementById('createSession');
 const deleteSessionBtn = document.getElementById('deleteSession');
 const tenantAdminBtn = document.getElementById('tenantAdminBtn');
 const tenantPanel = document.getElementById('tenantPanel');
+const outputsBtn = document.getElementById('outputsBtn');
+const outputsPanel = document.getElementById('outputsPanel');
+const outputRows = document.getElementById('outputRows');
 const tenantRows = document.getElementById('tenantRows');
 const approvalPanel = document.getElementById('approvalPanel');
 const approvalRows = document.getElementById('approvalRows');
@@ -584,6 +605,63 @@ tenantAdminBtn.addEventListener('click', () => {
   tenantPanel.hidden = !tenantPanel.hidden;
   if (!tenantPanel.hidden) loadTenantAdmin();
 });
+
+// 成果物パネル。現在のテナント×ユーザーの成果物を一覧し、各行から
+// ダウンロードできる。パネルを開くたびに /api/outputs で一覧を
+// 取り直す（会話中に新しい成果物が登録されるため）
+outputsBtn.addEventListener('click', () => {
+  outputsPanel.hidden = !outputsPanel.hidden;
+  if (!outputsPanel.hidden) loadOutputs();
+});
+
+function formatOutputSize(size) {
+  const bytes = Number(size) || 0;
+  if (bytes < 1024) return bytes + ' B';
+  const kb = bytes / 1024;
+  if (kb < 1024) return kb.toFixed(1) + ' KB';
+  return (kb / 1024).toFixed(1) + ' MB';
+}
+
+async function loadOutputs() {
+  outputRows.innerHTML = '';
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser);
+    const res = await fetch('/api/outputs' + query);
+    const data = await res.json();
+    const outputs = data.outputs || [];
+    if (!outputs.length) {
+      const row = document.createElement('div');
+      row.className = 'outputRow';
+      row.textContent = '成果物はまだありません';
+      outputRows.appendChild(row);
+      return;
+    }
+    for (const item of outputs) {
+      const row = document.createElement('div');
+      row.className = 'outputRow';
+      const title = document.createElement('span');
+      title.className = 'otitle';
+      title.textContent = item.title || item.filename;
+      row.appendChild(title);
+      const name = document.createElement('span');
+      name.className = 'oname';
+      name.textContent = item.filename;
+      row.appendChild(name);
+      const meta = document.createElement('span');
+      meta.className = 'ometa';
+      meta.textContent = formatOutputSize(item.size)
+        + (item.created_at ? ' / ' + String(item.created_at).replace('T', ' ').slice(0, 16) : '');
+      row.appendChild(meta);
+      const link = document.createElement('a');
+      link.textContent = 'ダウンロード';
+      link.href = '/api/outputs/download' + query
+        + '&name=' + encodeURIComponent(item.filename);
+      row.appendChild(link);
+      outputRows.appendChild(row);
+    }
+  } catch (e) { /* 一覧が取れなければパネルは空のままにする */ }
+}
 
 async function loadTenantAdmin() {
   try {
@@ -1348,6 +1426,26 @@ def _notify_prefs_payload(tenants: TenantStore, tenant: str,
     return {"tenant": tenant, "user": user, **payload}
 
 
+def _outputs_payload(tenants: TenantStore, tenant: str,
+                     user: str) -> dict:
+    """成果物 API の応答（GET /api/outputs）。
+
+    成果物はユーザーごとの置き場（outputs/ と index.json）にあり、
+    対象は tenant / user で指した組み合わせ。size_text と
+    created_text は表示用の整形済み文字列で、画面がそのまま
+    出せるように添える。
+    """
+    board = OutputBoard(
+        user_dir(tenant_dir(tenants.data_dir, tenant), user))
+    outputs = []
+    for output in board.list():
+        entry = output.to_dict()
+        entry["size_text"] = format_size(output.size)
+        entry["created_text"] = format_created_at(output.created_at)
+        outputs.append(entry)
+    return {"tenant": tenant, "user": user, "outputs": outputs}
+
+
 def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     """テナント設定 API の応答（GET / POST で共通の形）。
 
@@ -1372,10 +1470,13 @@ def make_handler(tenants: TenantStore, page: str):
         def log_message(self, format: str, *args: object) -> None:  # 標準のアクセスログを止める
             pass
 
-        def _send(self, status: int, body: bytes, content_type: str) -> None:
+        def _send(self, status: int, body: bytes, content_type: str,
+                  extra_headers: dict | None = None) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            for key, value in (extra_headers or {}).items():
+                self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)
 
@@ -1424,6 +1525,15 @@ def make_handler(tenants: TenantStore, page: str):
                 user = normalize_user_name(_first(query.get("user")))
                 self._send_json(200, {"approvals": tenants.approvals
                                       .list_pending(tenant, user)})
+            elif split.path == "/api/outputs":
+                tenant = normalize_tenant_name(
+                    _first(query.get("tenant")) or tenants.default_tenant)
+                user = normalize_user_name(
+                    _first(query.get("user")) or tenants.default_user)
+                self._send_json(
+                    200, _outputs_payload(tenants, tenant, user))
+            elif split.path == "/api/outputs/download":
+                self._download_output(query)
             elif split.path == "/api/history":
                 store = tenants.store(_first(query.get("tenant")),
                                       _first(query.get("user")))
@@ -1439,6 +1549,40 @@ def make_handler(tenants: TenantStore, page: str):
                 self._send_json(200, {"messages": messages})
             else:
                 self._send_json(404, {"error": "not found"})
+
+        def _download_output(self, query: dict) -> None:
+            """成果物ファイルを attachment として返す。
+
+            返してよいのは、そのテナント×ユーザーの index.json に
+            登録されているファイル名だけ（OutputBoard
+            .resolve_download が basename 検証と実在確認を担う）。
+            登録されていない名前や ../ を含む名前は 404 にする。
+            """
+            tenant = normalize_tenant_name(
+                _first(query.get("tenant")) or tenants.default_tenant)
+            user = normalize_user_name(
+                _first(query.get("user")) or tenants.default_user)
+            name = _first(query.get("name"))
+            if not name:
+                self._send_json(400, {"error": "name を指定してください"})
+                return
+            board = OutputBoard(
+                user_dir(tenant_dir(tenants.data_dir, tenant), user))
+            path = board.resolve_download(name)
+            if path is None:
+                self._send_json(404, {"error": "成果物が見つかりません"})
+                return
+            try:
+                body = path.read_bytes()
+            except OSError:
+                self._send_json(404, {"error": "成果物が見つかりません"})
+                return
+            content_type = (mimetypes.guess_type(path.name)[0]
+                            or "application/octet-stream")
+            disposition = ("attachment; filename*=UTF-8''"
+                           + quote(path.name))
+            self._send(200, body, content_type,
+                       {"Content-Disposition": disposition})
 
         def _read_json_body(self) -> dict | None:
             """POST の JSON 本文を辞書として読む。読めなければ None。"""

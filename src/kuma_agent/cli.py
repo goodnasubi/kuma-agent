@@ -148,6 +148,27 @@ def _run_jobs(cfg: Config) -> int:
     return 0
 
 
+def _run_outputs(cfg: Config) -> int:
+    """成果物の一覧表示（運用者向けコマンドの本体）。
+
+    対象は cfg が指すテナント×ユーザーの置き場。各成果物の
+    タイトル・ファイル名・サイズ・登録日時を表示する。モデルも
+    API キーも要らない（読み取り専用）。
+    """
+    from .outputs import OutputBoard, format_created_at, format_size
+
+    board = OutputBoard(cfg.user_data_dir)
+    outputs = board.list()
+    if not outputs:
+        print("成果物はありません")
+        return 0
+    for output in outputs:
+        print(f"{output.title}（{output.filename}、"
+              f"{format_size(output.size)}、"
+              f"{format_created_at(output.created_at)}）")
+    return 0
+
+
 def _run_memory_tidy(cfg: Config, client, dry_run: bool = False) -> int:
     """長期記憶（MEMORY.md）の整理（運用者向けコマンドの本体）。
 
@@ -340,6 +361,11 @@ def main(argv: list[str] | None = None) -> int:
                              help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
     jobs_parser.add_argument("--user", default=None,
                              help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
+    outputs_parser = sub.add_parser("outputs", help="成果物の一覧を表示する")
+    outputs_parser.add_argument("--tenant", default=None,
+                                help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
+    outputs_parser.add_argument("--user", default=None,
+                                help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     sub.add_parser(
         "telegram",
         help="Telegram からのメッセージを受けて会話する（単独実行）")
@@ -365,6 +391,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_search_history(cfg, args.query, limit=args.limit)
     if args.command == "jobs":  # 一覧表示もモデルも API キーも要らない
         return _run_jobs(cfg)
+    if args.command == "outputs":  # 一覧表示もモデルも API キーも要らない
+        return _run_outputs(cfg)
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)

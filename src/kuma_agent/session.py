@@ -42,6 +42,7 @@ from .memory import (
     normalize_tenant_name,
     normalize_user_name,
 )
+from .outputs import OutputBoard
 from .persona import load_persona
 from .settings import approvals_enabled_for
 from .skills import load_skills
@@ -149,6 +150,9 @@ class Session:
         # 定期ジョブもユーザーごとに 1 つ（jobs.json）だけを使う。
         # 用事系と違い、定期ジョブの道具はモードを問わず登録する
         self.job_board = JobBoard(data_dir)
+        # 成果物の置き場もユーザーごとに 1 つ（outputs/）だけを使う。
+        # 定期ジョブと同じく、成果物の道具はモードを問わず登録する
+        self.output_board = OutputBoard(data_dir)
         # スレッドモードでは用事の一覧を無効にする: 道具に用事系を登録せず、
         # 進行中の用事もプロンプトへ注入しない。長期記憶の検索道具も
         # 用事系と同じ条件（相棒モードのときだけ）で出す。
@@ -161,7 +165,8 @@ class Session:
             memory=None if self.mode == "wall" else self.memory,
             data_dir=None if self.mode == "wall" else cfg.data_dir,
             job_board=self.job_board,
-            chat_model=model)
+            chat_model=model,
+            output_board=self.output_board)
         # MCP サーバーの道具を組み込み道具と並べて登録する。接続は
         # データ置き場ルート単位で共有する（Web 経路でもテナントや
         # 部屋ごとにサーバープロセスを複製しない）

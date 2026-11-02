@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from .jobs import Job, JobBoard
     from .llm import ChatModel
     from .memory import Memory
+    from .outputs import OutputBoard
     from .tasks import Task, TaskBoard
 
 
@@ -62,6 +63,7 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "list_jobs": "定期ジョブを確認中",
     "delete_job": "定期ジョブを記録中",
     "set_job_enabled": "定期ジョブを記録中",
+    "deliver_file": "成果物を用意しています",
 }
 
 
@@ -82,7 +84,8 @@ def activity_label(name: str, args: dict | None = None) -> str:
         return f"道具を実行中（{name}）"
     hint: object = None
     if args:
-        if name in ("read_file", "write_file", "edit_file", "edit"):
+        if name in ("read_file", "write_file", "edit_file", "edit",
+                    "deliver_file"):
             hint = args.get("path")
         elif name == "create_task":
             hint = args.get("title")
@@ -147,10 +150,15 @@ class ToolBox:
                  memory: Memory | None = None,
                  data_dir: Path | None = None,
                  job_board: JobBoard | None = None,
-                 chat_model: ChatModel | None = None) -> None:
+                 chat_model: ChatModel | None = None,
+                 output_board: OutputBoard | None = None) -> None:
         self.work_dir = work_dir.resolve()
         self.task_board = task_board
         self.memory = memory
+        # 成果物の置き場（ユーザーごとの outputs/）。定期ジョブと
+        # 同じく、成果物の道具はモードを問わず登録するため、
+        # Session は常にこれを渡す。None の間は登録しない
+        self.output_board = output_board
         # 長期記憶の整理（tidy_memory 道具）で使う頭脳。道具なしの
         # 単発 chat で記憶の統合をさせるため、Session が自分の
         # モデルを渡す。None の間は tidy_memory を登録しない
@@ -182,6 +190,8 @@ class ToolBox:
             self._register_skill_tools()
         if job_board is not None:
             self._register_job_tools()
+        if output_board is not None:
+            self._register_output_tools()
 
     def _register_defaults(self) -> None:
         self.register(Tool(
@@ -484,6 +494,47 @@ class ToolBox:
             return f"error: 定期ジョブ「{job}」が見つかりません"
         state = "ON" if updated.enabled else "OFF"
         return f"更新しました: #{updated.id} {updated.title}（{state}）"
+
+    def _register_output_tools(self) -> None:
+        # 成果物の道具はモードを問わず登録する（置き場はユーザー
+        # ごとの outputs/）。作ったファイルをそのまま渡すのでは
+        # なく、置き場へコピーして Web 画面から開ける形にする
+        self.register(Tool(
+            "deliver_file",
+            "作ったファイルを利用者に成果物として渡す。レポートや"
+            "文書、表など、利用者に渡すために作ったファイルが完成"
+            "したら、path にそのファイルのパスを入れて呼ぶこと。"
+            "登録した成果物は Web 画面の「成果物」から開ける"
+            "（ダウンロードできる）。表示名を付けたい場合は title "
+            "に入れる（省略するとファイル名が表示名になる）。",
+            {"type": "object", "properties": {
+                "path": {"type": "string",
+                         "description": "渡すファイルのパス"},
+                "title": {"type": "string",
+                          "description": "表示名（省略するとファイル名）"}},
+             "required": ["path"]},
+            self._deliver_file,
+        ))
+
+    def _deliver_file(self, path: str, title: str | None = None) -> str:
+        assert self.output_board is not None
+        raw = str(path or "").strip()
+        if not raw:
+            return "error: ファイルのパスが空です"
+        source = Path(raw).expanduser()
+        if not source.is_absolute():
+            source = self.work_dir / source
+        if not source.exists():
+            return f"error: ファイルが見つかりません: {path}"
+        if not source.is_file():
+            return f"error: ディレクトリは成果物として登録できません: {path}"
+        try:
+            output = self.output_board.add(source, title=title)
+        except (OSError, ValueError) as e:
+            return f"error: 成果物を登録できませんでした: {e}"
+        return (f"成果物として登録しました: {output.title}"
+                f"（{output.filename}）。"
+                "Web画面の「成果物」から開けます")
 
     def _register_memory_tools(self) -> None:
         self._register_tidy_tool()
