@@ -109,6 +109,13 @@ class Config:
     # （proactive）。0 以下で巡回しない
     proactive_interval_seconds: int = field(
         default_factory=lambda: _env_int("KUMA_PROACTIVE_INTERVAL_SECONDS", 300))
+    # 朝のまとめ（能動発信の日報の拡張）の時刻。"HH:MM" 形式の
+    # 文字列で、この時刻を過ぎた最初の巡回で、子エージェントが
+    # 予定と用事をまとめた知らせを投稿する（日報の代わり）。
+    # "off" で無効（従来の日報になる）。値の解釈（不正な値は
+    # 既定の 07:30 に倒す）は proactive.py 側で行う
+    briefing_time: str = field(
+        default_factory=lambda: os.environ.get("KUMA_BRIEFING_TIME", "07:30"))
     # MCP サーバーへの要求の応答待ち上限（秒）。サーバーがこの時間に
     # 応答しなければ、その道具の呼び出しは失敗として扱う（接続は
     # 捨てて次回に再起動を試みる）。0 以下は既定値として扱う

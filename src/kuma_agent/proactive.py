@@ -30,6 +30,23 @@ notify_prefs.py）が効く:
 つまり日報の投稿は 1 ユーザーにつき 1 日最大 1 回で、投稿済みの
 日付はユーザーの置き場に proactive_state.json として記録する。
 
+日報には拡張として「朝のまとめ」がある（環境変数
+KUMA_BRIEFING_TIME、既定 07:30、"off" で無効）:
+- 有効な間は、まとめの時刻より前に日報を投稿しない。時刻を
+  過ぎた最初の巡回で、委任の子セッションに「今日の予定（カレン
+  ダーの道具があれば）と進行中の用事」をまとめさせ、その文章を
+  日報の代わりに投稿して、その日の声かけ枠（1 日 1 回）を使う
+- 子を動かすのは、進行中の用事があるか、そのセッションの道具に
+  カレンダーらしい道具（名前に list-events を含むもの）がある
+  ときだけ。どちらも無ければ何もしない
+- 子が「なし」と答えたら投稿せず、「今日は確認済み」
+  （briefing_checked_on）だけを proactive_state.json に記録して、
+  その日子を二度と動かさない。子が失敗したら、用事がある場合に
+  従来の日報の文面に倒す（声かけ自体は欠かさない）
+- モデルなしの一時 Session（_UnusedModel、CLI の proactive
+  など）では子を動かさない。この場合は従来の日報の組み立て
+  （モデルなしでできる）だけを行う
+
 対象は相棒モード（ledger）の用事だけである。スレッドモード
 （wall）では用事の一覧を使わないため、結果として発言しない。
 
@@ -66,7 +83,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 from typing import Callable
 
@@ -81,7 +98,7 @@ from .memory import (
     tenant_dir,
 )
 from .memory_tidy import auto_tidy_memory
-from .notify_prefs import load_notify_prefs
+from .notify_prefs import load_notify_prefs, parse_hhmm
 from .session import Session
 from .settings import proactive_enabled_for
 from .tasks import Task, TaskBoard
@@ -116,23 +133,51 @@ def _as_local_naive(moment: datetime) -> datetime:
     return moment
 
 
-def _last_posted_on(user_data_dir: Path) -> str | None:
-    """最後に投稿した日（YYYY-MM-DD）。無ければ・読めなければ None。"""
+def _load_state(user_data_dir: Path) -> dict:
+    """proactive_state.json を読む。無い・壊れていたら空の辞書。"""
     try:
         raw = json.loads(
             (user_data_dir / STATE_FILENAME).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
-    if isinstance(raw, dict) and isinstance(raw.get("last_posted_on"), str):
-        return raw["last_posted_on"]
-    return None
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _save_state(user_data_dir: Path, state: dict) -> None:
+    """proactive_state.json を書き直す（他の項目は保持する）。"""
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(state, ensure_ascii=False)
+    (user_data_dir / STATE_FILENAME).write_text(text + "\n", encoding="utf-8")
+
+
+def _last_posted_on(user_data_dir: Path) -> str | None:
+    """最後に投稿した日（YYYY-MM-DD）。無ければ・読めなければ None。"""
+    value = _load_state(user_data_dir).get("last_posted_on")
+    return value if isinstance(value, str) else None
 
 
 def _record_posted(user_data_dir: Path, day: str) -> None:
     """投稿済みの日付をユーザーの置き場に記録する。"""
-    user_data_dir.mkdir(parents=True, exist_ok=True)
-    text = json.dumps({"last_posted_on": day}, ensure_ascii=False)
-    (user_data_dir / STATE_FILENAME).write_text(text + "\n", encoding="utf-8")
+    state = _load_state(user_data_dir)
+    state["last_posted_on"] = day
+    _save_state(user_data_dir, state)
+
+
+def _briefing_checked_on(user_data_dir: Path) -> str | None:
+    """朝のまとめで「今日は確認済み」と記録した日。無ければ None。"""
+    value = _load_state(user_data_dir).get("briefing_checked_on")
+    return value if isinstance(value, str) else None
+
+
+def _record_briefing_checked(user_data_dir: Path, day: str) -> None:
+    """朝のまとめの子が「なし」と答えた日を記録する。
+
+    投稿はしていないので声かけ枠（last_posted_on）は消費しないが、
+    同じ日に子を何度も動かさないための目印として残す。
+    """
+    state = _load_state(user_data_dir)
+    state["briefing_checked_on"] = day
+    _save_state(user_data_dir, state)
 
 
 def _open_days(task: Task, now: datetime) -> int | None:
@@ -217,6 +262,128 @@ class _UnusedModel:
 
 # ジョブの失敗の知らせに添える理由の上限（知らせ自体は短く保つ）
 _MAX_JOB_ERROR_CHARS = 200
+
+# 朝のまとめの既定の時刻（KUMA_BRIEFING_TIME が未設定・不正な値の
+# ときに使う）
+DEFAULT_BRIEFING_TIME = time(7, 30)
+# カレンダーらしい道具の目印。Google カレンダーの MCP サーバーの
+# 予定一覧の道具（gcal__list-events）の名前に含まれる文字列で
+# 判断する
+_CALENDAR_TOOL_MARKER = "list-events"
+_WEEKDAY_NAMES = "月火水木金土日"
+
+
+def _briefing_at(cfg: Config) -> time | None:
+    """朝のまとめの時刻。"off" なら None、不正な値は既定に倒す。"""
+    raw = (cfg.briefing_time or "").strip().lower()
+    if raw == "off":
+        return None
+    parsed = parse_hhmm(raw)
+    return parsed if parsed is not None else DEFAULT_BRIEFING_TIME
+
+
+def build_briefing_prompt(open_tasks: list[Task], now: datetime) -> str:
+    """朝のまとめを子へ頼む指示文を組み立てる。
+
+    その日の日付と、進行中の用事の一覧（ミュート分は呼び出し側で
+    除いてある）を含める。用事が無い場合はその旨を明記する
+    （カレンダーの予定だけでもまとめられるように）。
+    """
+    date_text = (f"{now.year}年{now.month}月{now.day}日"
+                 f"（{_WEEKDAY_NAMES[now.weekday()]}）")
+    lines = [
+        "朝のまとめを作ってください。",
+        "",
+        f"今日は {date_text} です。",
+        "",
+    ]
+    if open_tasks:
+        lines.append("進行中の用事:")
+        for task in open_tasks:
+            memo = f"（{task.memo}）" if task.memo else ""
+            lines.append(f"・{task.title}{memo}")
+    else:
+        lines.append("進行中の用事はありません。")
+    lines += [
+        "",
+        "やること:",
+        "- カレンダーを確認できる道具（予定の一覧を取る道具）が"
+        "あれば、今日の予定を確認してください。",
+        "- 今日の予定も進行中の用事も無ければ、「なし」とだけ"
+        "答えてください。",
+        "- どちらかあれば、朝の挨拶に続けて、今日の予定（時刻と"
+        "題名）と進行中の用事を短くまとめた、利用者への知らせを"
+        "書いてください（その文章がそのまま利用者へ投稿されます）。",
+    ]
+    return "\n".join(lines)
+
+
+def _has_calendar_tool(session: Session) -> bool:
+    """そのセッションの道具にカレンダーらしい道具があるか。
+
+    名前に list-events を含む道具（Google カレンダーの
+    gcal__list-events 等）を目印にする。道具一覧が取れなければ
+    「無い」として扱う（巡回を落とさないため）。
+    """
+    try:
+        return any(_CALENDAR_TOOL_MARKER in str(schema.get("name", ""))
+                   for schema in session.tools.schemas())
+    except Exception:
+        return False
+
+
+def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
+                   user_data_dir: Path,
+                   get_session: Callable[[], Session],
+                   briefing_executor: Callable[[Session, str], str] | None,
+                   manual: bool = False,
+                   ) -> str | None:
+    """その日の声かけ（朝のまとめ／日報）の文面を決める。
+
+    投稿すべき文面があればそれを返し、無ければ None を返す。
+    朝のまとめで子が「なし」と答えた場合は、確認済みの記録だけを
+    残して None を返す（投稿と声かけ枠の消費は呼び出し側の仕事）。
+
+    判断の順序:
+    1. 朝のまとめが無効（off）なら従来の日報（用事があるときだけ）
+    2. まとめの時刻より前なら、まだ何も言わない（日報も出さない）。
+       ただし手動実行（manual）のときはこの制限を受けない
+    3. 今日すでに子が確認済み（「なし」）なら何も言わない
+    4. モデルなしの一時 Session では子を動かさず、従来の日報に
+       倒す（日報の組み立てはモデルなしでできるため）
+    5. 用事もカレンダーらしい道具も無ければ、子を動かす材料が
+       無いので何も言わない
+    6. 子にまとめさせ、失敗・空応答なら用事がある場合だけ従来の
+       日報に倒す。「なし」なら確認済みを記録して何も言わない
+    """
+    briefing_at = _briefing_at(cfg)
+    if briefing_at is None:
+        return build_message(visible_tasks, now) if visible_tasks else None
+    today = now.date().isoformat()
+    if now.time() < briefing_at and not manual:
+        return None
+    if _briefing_checked_on(user_data_dir) == today:
+        return None
+    session = get_session()
+    if isinstance(session.model, _UnusedModel):
+        return build_message(visible_tasks, now) if visible_tasks else None
+    if not visible_tasks and not _has_calendar_tool(session):
+        return None
+    executor = (briefing_executor if briefing_executor is not None
+                else run_delegated_task)
+    try:
+        result = executor(session, build_briefing_prompt(visible_tasks, now))
+    except Exception as e:  # 子の失敗で声かけ自体は欠かさない
+        result = f"error: {e}"
+    if not isinstance(result, str):
+        result = str(result)
+    result = result.strip()
+    if not result or result.startswith("error:"):
+        return build_message(visible_tasks, now) if visible_tasks else None
+    if result.rstrip("。") == "なし":
+        _record_briefing_checked(user_data_dir, today)
+        return None
+    return result
 
 # 通知コールバックの型: (テナント名, ユーザー名, 投稿文) を受け取る
 NotifyCallback = Callable[[str, str, str], None]
@@ -307,6 +474,8 @@ def check_and_post(cfg: Config, now: datetime | None = None,
                    session_provider: Callable[[], Session] | None = None,
                    job_executor: Callable[[Session, str], str] | None = None,
                    notify: NotifyCallback | None = None,
+                   briefing_executor: Callable[[Session, str], str] | None = None,
+                   manual: bool = False,
                    ) -> str | None:
     """1 テナント×1 ユーザー分をチェックし、投稿したら文面を返す。
 
@@ -317,9 +486,13 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     既存の Session を引くための関数で、投稿すると決まったときだけ
     呼ばれる。無ければ一時的に Session を作って追記し、破棄する。
     job_executor は定期ジョブの実行関数の差し替え（テスト用）で、
-    既定は委任の仕組み（run_due_jobs を参照）。notify があれば、
-    投稿した文面をその都度通知コールバックへも渡す（Telegram への
-    配信など。渡すのはこの cfg のテナント・ユーザー名と文面）。
+    既定は委任の仕組み（run_due_jobs を参照）。briefing_executor は
+    朝のまとめの実行関数の差し替え（テスト用）で、既定は同じく
+    委任の仕組み。notify があれば、投稿した文面をその都度通知
+    コールバックへも渡す（Telegram への配信など。渡すのはこの
+    cfg のテナント・ユーザー名と文面）。manual が True のとき
+    （CLI の手動実行）は、朝のまとめの時刻より前でも日報を出す
+    （自動巡回は時刻まで待つ。手動で今すぐ出す判断を優先する）。
 
     定期ジョブはモードを問わず実行する。用事のリマインダーと日報
     は従来どおり相棒モード（ledger）だけが対象で、スレッドモード
@@ -383,17 +556,21 @@ def check_and_post(cfg: Config, now: datetime | None = None,
         posted.append(text)
         _notify(notify, cfg.tenant, cfg.user, text)
 
-    # 日報（1 日最大 1 回）。静かな時間帯の間は出さず、投稿済みの
-    # 記録も消費しない（時間帯が明けてからその日の分を出す）。
-    # 全件ミュートされた場合は言うべきことが無いので出さない
+    # 日報／朝のまとめ（1 日最大 1 回）。静かな時間帯の間は出さず、
+    # 投稿済みの記録も消費しない（時間帯が明けてからその日の分を
+    # 出す）。文面の決め方（朝のまとめの時刻・子の実行・失敗時の
+    # 日報への倒し方）は _daily_message が担う。全件ミュートされた
+    # 場合は、用事が材料として渡らない形で判断される
     today = now.date().isoformat()
-    if (_last_posted_on(user_data_dir) != today and visible_tasks
+    if (_last_posted_on(user_data_dir) != today
             and not prefs.in_quiet_hours(now)):
-        text = build_message(visible_tasks, now)
-        get_session().post_proactive_message(text)
-        _record_posted(user_data_dir, today)
-        posted.append(text)
-        _notify(notify, cfg.tenant, cfg.user, text)
+        text = _daily_message(cfg, now, visible_tasks, user_data_dir,
+                              get_session, briefing_executor, manual=manual)
+        if text is not None:
+            get_session().post_proactive_message(text)
+            _record_posted(user_data_dir, today)
+            posted.append(text)
+            _notify(notify, cfg.tenant, cfg.user, text)
 
     if not posted:
         return None  # 言うべきことが無い
@@ -405,6 +582,8 @@ def run_sweep(cfg: Config, tenant: str | None = None,
               session_getter: Callable[[str, str], Session | None] | None = None,
               job_executor: Callable[[Session, str], str] | None = None,
               notify: NotifyCallback | None = None,
+              briefing_executor: Callable[[Session, str], str] | None = None,
+              manual: bool = False,
               ) -> list[tuple[str, str, str]]:
     """テナント×ユーザーを巡回して能動発信をチェックする。
 
@@ -416,7 +595,7 @@ def run_sweep(cfg: Config, tenant: str | None = None,
     session_getter は (テナント名, ユーザー名) から既存の Session を
     引くための関数で、投稿するときだけ呼ばれる（Web サーバーが保持
     している Session を使うため）。無ければ投稿のたびに一時 Session
-    を作る。job_executor は定期ジョブの実行関数の差し替え
+    を作る。job_executor / briefing_executor は実行関数の差し替え
     （check_and_post と同じ）。notify は通知コールバックで、各
     ユーザーへの投稿のたびにそのユーザー名で呼ばれる（届けるか
     どうかの判断はコールバック側の役目）。
@@ -435,7 +614,9 @@ def run_sweep(cfg: Config, tenant: str | None = None,
                 provider = (lambda getter=session_getter, t=tenant_name,
                             u=user_name: getter(t, u))
             text = check_and_post(scoped, now=now, session_provider=provider,
-                                  job_executor=job_executor, notify=notify)
+                                  job_executor=job_executor, notify=notify,
+                                  briefing_executor=briefing_executor,
+                                  manual=manual)
             if text is not None:
                 posted.append((tenant_name, user_name, text))
     return posted

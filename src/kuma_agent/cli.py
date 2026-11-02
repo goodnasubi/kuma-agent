@@ -101,9 +101,11 @@ def _run_proactive(cfg: Config, tenant: str | None = None,
     from .telegram import build_proactive_notifier
 
     # Telegram が設定されていれば、対象ユーザーの投稿は Telegram
-    # へも届ける（未設定・無効化・許可リスト空なら通知は付かない）
+    # へも届ける（未設定・無効化・許可リスト空なら通知は付かない）。
+    # 手動実行なので、朝のまとめの時刻より前でも日報を出す
+    # （manual=True。自動巡回は時刻まで待つ）
     posted = run_sweep(cfg, tenant=tenant, user=user,
-                       notify=build_proactive_notifier(cfg))
+                       notify=build_proactive_notifier(cfg), manual=True)
     if not posted:
         print("投稿する内容はありませんでした")
         return 0
