@@ -148,6 +148,15 @@ class Config:
         default_factory=lambda: os.environ.get("KUMA_TELEGRAM_USER", "default"))
     telegram_allowed_chats: str = field(
         default_factory=lambda: os.environ.get("KUMA_TELEGRAM_ALLOWED_CHATS", ""))
+    # Web UI のログイン（アクセス制御）。パスワードが未設定（空）なら
+    # ログインは無効で、従来どおり認証なしで開く。設定したときだけ
+    # Web UI 全体がパスワードで守られる（CLI / TUI は対象外）。
+    # web_secure_cookie は Cookie に Secure 属性を付けるかどうかで、
+    # HTTPS で公開する場合に運用者が 1 にする（既定は付けない）
+    web_password: str = field(
+        default_factory=lambda: os.environ.get("KUMA_WEB_PASSWORD", ""))
+    web_secure_cookie: bool = field(
+        default_factory=lambda: os.environ.get("KUMA_WEB_SECURE_COOKIE", "") == "1")
 
     @property
     def tenant_data_dir(self) -> Path:

@@ -1,19 +1,24 @@
 """Web UI。標準ライブラリの http.server だけで動く単一ページのチャット画面。
 
-前提: これは単一ユーザー・ローカル利用専用の UI である。認証や
-アクセス制御は持たないので、既定では 127.0.0.1 にだけバインドする。
-外部に公開する用途では使わないこと。
+前提: これは単一ユーザー・ローカル利用専用の UI である。既定では
+127.0.0.1 にだけバインドし、認証も無い。外に出して使う場合は、
+環境変数 KUMA_WEB_PASSWORD でパスワードログインを有効にすること
+（有効化しなければ認証なしのままなので、公開は推奨しない）。
 """
 from __future__ import annotations
 
 import base64
 import binascii
+import hmac
 import json
 import mimetypes
+import secrets
 import threading
+import time
 import uuid
 from dataclasses import replace
 from datetime import datetime
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
@@ -239,6 +244,7 @@ _PAGE_TEMPLATE = """\
   <div class="sessions">
     <button id="tenantAdminBtn" type="button">テナント管理</button>
     <button id="outputsBtn" type="button">成果物</button>
+    __LOGOUT_BUTTON__
   </div>
 </header>
 <section id="outputsPanel" hidden>
@@ -1123,16 +1129,182 @@ input.focus();
 """
 
 
-def render_page(provider: str, avatar_svg: str | None = None) -> str:
-    """チャット画面の HTML を組み立てる。"""
+def render_page(provider: str, avatar_svg: str | None = None,
+                web_auth: bool = False) -> str:
+    """チャット画面の HTML を組み立てる。
+
+    web_auth が True（ログイン有効）のときだけ、ヘッダーに
+    ログアウトボタンを出す。無効時は従来の見た目のままにする。
+    """
     return (
         _PAGE_TEMPLATE
         .replace("__AVATAR__", avatar_svg if avatar_svg is not None else load_avatar_svg())
         .replace("__PROVIDER__", provider)
+        .replace("__LOGOUT_BUTTON__",
+                 _LOGOUT_BUTTON_HTML if web_auth else "")
         .replace("__HONEY__", HONEY)
         .replace("__COCOA__", COCOA)
         .replace("__CREAM__", CREAM)
     )
+
+
+# ログイン有効時にヘッダーへ差し込むログアウトボタン。押すと
+# POST /api/logout でトークンを破棄してからログイン画面へ移る
+_LOGOUT_BUTTON_HTML = """\
+<button id="logoutBtn" type="button">ログアウト</button>
+    <script>
+    document.getElementById('logoutBtn').addEventListener('click', async () => {
+      try { await fetch('/api/logout', {method: 'POST'}); } catch (e) { /* 失敗してもログイン画面へは移る */ }
+      location.href = '/login';
+    });
+    </script>"""
+
+
+_LOGIN_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ログイン - kuma-agent</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: sans-serif; background: __CREAM__; color: __COCOA__;
+         display: flex; align-items: center; justify-content: center; min-height: 100dvh; }
+  .card { background: #fff; border: 1px solid __HONEY__; border-radius: 14px;
+          padding: 24px; width: min(360px, 90vw); text-align: center; }
+  .card .avatar { width: 64px; height: 64px; margin: 0 auto 8px; }
+  .card .avatar svg { width: 100%; height: 100%; display: block; }
+  .card h1 { font-size: 20px; margin: 0 0 4px; }
+  .card p { font-size: 14px; margin: 0 0 16px; }
+  .card .error { color: #B3402A; min-height: 1.2em; }
+  .card form { display: flex; flex-direction: column; gap: 10px; }
+  .card input { padding: 10px; font-size: 16px; border: 1px solid __COCOA__;
+                border-radius: 8px; }
+  .card button { padding: 10px 20px; font-size: 16px; border: none; border-radius: 8px;
+                 background: __HONEY__; color: #fff; cursor: pointer; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="avatar">__AVATAR__</div>
+    <h1>クマ</h1>
+    <p>続けるにはパスワードを入力してください</p>
+    <p class="error">__ERROR__</p>
+    <form method="post" action="/login">
+      <input type="password" name="password" autocomplete="current-password"
+             placeholder="パスワード" autofocus>
+      <button type="submit">ログイン</button>
+    </form>
+  </div>
+</body>
+</html>
+"""
+
+
+def render_login_page(error: str = "", avatar_svg: str | None = None) -> str:
+    """ログイン画面の HTML を組み立てる。error は失敗時の文言。"""
+    return (
+        _LOGIN_TEMPLATE
+        .replace("__AVATAR__", avatar_svg if avatar_svg is not None else load_avatar_svg())
+        .replace("__ERROR__", error)
+        .replace("__HONEY__", HONEY)
+        .replace("__COCOA__", COCOA)
+        .replace("__CREAM__", CREAM)
+    )
+
+
+class AuthGate:
+    """Web UI のログイン（アクセス制御）を担う。
+
+    運用者がパスワード（Config.web_password、環境変数
+    KUMA_WEB_PASSWORD）を設定したときだけ有効になる。未設定なら
+    enabled が False で、ハンドラは従来どおり素通しする。
+
+    ログインに成功したら推測できないトークンを発行し、Cookie と
+    対応付けてメモリ上にだけ保持する。トークンはサーバーの再起動で
+    すべて失効する（その場合は再ログインが必要）。パスワードの
+    連続失敗は同一 IP ごとに数え、上限（MAX_FAILURES 回）に達したら
+    LOCKOUT_SECONDS 秒のあいだ、その IP からのログインを受け付け
+    ない（その間は正しいパスワードでも通さない）。
+    """
+
+    COOKIE_NAME = "kuma_session"
+    TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 日
+    MAX_FAILURES = 5
+    LOCKOUT_SECONDS = 60
+
+    def __init__(self, password: str, secure_cookie: bool = False) -> None:
+        self._password = password
+        self.secure_cookie = secure_cookie
+        self._tokens: dict[str, float] = {}  # トークン → 失効時刻
+        self._failures: dict[str, int] = {}  # IP → 連続失敗の回数
+        self._lockouts: dict[str, float] = {}  # IP → 受付を再開する時刻
+        self._lock = threading.Lock()
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self._password)
+
+    def try_login(self, ip: str, candidate: str) -> str | None:
+        """パスワードを照合し、合えば新しいトークンを返す。
+
+        失敗した場合と、連続失敗で受け付けを止めている間は None
+        を返す。照合は hmac.compare_digest で行う。
+        """
+        if not self._password:
+            return None
+        now = time.time()
+        with self._lock:
+            if now < self._lockouts.get(ip, 0.0):
+                return None
+            if hmac.compare_digest(candidate, self._password):
+                self._failures.pop(ip, None)
+                token = secrets.token_urlsafe(32)
+                self._tokens[token] = now + self.TOKEN_TTL_SECONDS
+                return token
+            count = self._failures.get(ip, 0) + 1
+            if count >= self.MAX_FAILURES:
+                self._lockouts[ip] = now + self.LOCKOUT_SECONDS
+                self._failures.pop(ip, None)
+            else:
+                self._failures[ip] = count
+            return None
+
+    def validate(self, token: str | None) -> bool:
+        """トークンが有効（発行済みで失効前）かどうかを返す。"""
+        if not token:
+            return False
+        now = time.time()
+        with self._lock:
+            expiry = self._tokens.get(token)
+            if expiry is None:
+                return False
+            if expiry <= now:  # 失効していたら掃除して無効とする
+                del self._tokens[token]
+                return False
+            return True
+
+    def revoke(self, token: str | None) -> None:
+        """トークンを破棄する（ログアウト）。無いトークンでもよい。"""
+        if token:
+            with self._lock:
+                self._tokens.pop(token, None)
+
+    def session_cookie(self, token: str) -> str:
+        """ログイン用 Cookie の Set-Cookie ヘッダー値を組み立てる。"""
+        return self._cookie(token, self.TOKEN_TTL_SECONDS)
+
+    def cleared_cookie(self) -> str:
+        """Cookie を消すための Set-Cookie ヘッダー値（即時失効）。"""
+        return self._cookie("", 0)
+
+    def _cookie(self, value: str, max_age: int) -> str:
+        parts = [f"{self.COOKIE_NAME}={value}",
+                 f"Max-Age={max_age}", "Path=/", "HttpOnly", "SameSite=Lax"]
+        if self.secure_cookie:
+            parts.append("Secure")
+        return "; ".join(parts)
 
 
 def parse_attachments(raw: object) -> list[Attachment]:
@@ -1477,9 +1649,16 @@ def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     }
 
 
-def make_handler(tenants: TenantStore, page: str):
-    """TenantStore を受け取るリクエストハンドラクラスを作る。"""
+def make_handler(tenants: TenantStore, page: str, auth: AuthGate):
+    """TenantStore を受け取るリクエストハンドラクラスを作る。
+
+    auth（AuthGate）が有効なときは、ログイン画面（/login）以外の
+    全経路でログインを求める: 画面はログイン画面へリダイレクトし、
+    API は 401 を返す。無効なときは従来どおり素通しする。
+    """
     lock = threading.Lock()
+    login_page = render_login_page()
+    login_error_page = render_login_page(error="パスワードが違います")
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: object) -> None:  # 標準のアクセスログを止める
@@ -1495,13 +1674,84 @@ def make_handler(tenants: TenantStore, page: str):
             self.end_headers()
             self.wfile.write(body)
 
-        def _send_json(self, status: int, obj: dict) -> None:
+        def _send_json(self, status: int, obj: dict,
+                       extra_headers: dict | None = None) -> None:
             self._send(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
-                       "application/json; charset=utf-8")
+                       "application/json; charset=utf-8", extra_headers)
+
+        def _redirect(self, location: str,
+                      extra_headers: dict | None = None) -> None:
+            headers = {"Location": location}
+            headers.update(extra_headers or {})
+            self._send(302, b"", "text/plain; charset=utf-8", headers)
+
+        def _cookie_token(self) -> str | None:
+            """リクエストの Cookie からセッショントークンを取り出す。"""
+            raw = self.headers.get("Cookie")
+            if not raw:
+                return None
+            try:
+                jar = SimpleCookie(raw)
+            except CookieError:
+                return None
+            morsel = jar.get(AuthGate.COOKIE_NAME)
+            return morsel.value if morsel is not None else None
+
+        def _authenticated(self) -> bool:
+            """ログインが不要か、トークンが有効なら True。"""
+            return not auth.enabled or auth.validate(self._cookie_token())
+
+        def _login_page(self) -> None:
+            """ログイン画面を出す。
+
+            ログインが無効か、すでにログイン済みなら画面（/）へ戻す。
+            """
+            if not auth.enabled or self._authenticated():
+                self._redirect("/")
+                return
+            self._send(200, login_page.encode("utf-8"),
+                       "text/html; charset=utf-8")
+
+        def _login(self) -> None:
+            """パスワードを照合し、合えば Cookie を発行して画面へ戻す。
+
+            間違っている場合と、連続失敗で受け付けを止めている間は
+            401 でログイン画面（失敗の文言付き）を返す。
+            """
+            if not auth.enabled:
+                self._redirect("/")
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                form = parse_qs(self.rfile.read(length).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                form = {}
+            candidate = _first(form.get("password")) or ""
+            token = auth.try_login(self.client_address[0], candidate)
+            if token is None:
+                self._send(401, login_error_page.encode("utf-8"),
+                           "text/html; charset=utf-8")
+                return
+            self._redirect("/", {"Set-Cookie": auth.session_cookie(token)})
+
+        def _logout(self) -> None:
+            """トークンを破棄し、Cookie を消してログアウトする。"""
+            auth.revoke(self._cookie_token())
+            self._send_json(200, {"logged_out": True},
+                            {"Set-Cookie": auth.cleared_cookie()})
 
         def do_GET(self) -> None:
             split = urlsplit(self.path)
             query = parse_qs(split.query)
+            if split.path == "/login":
+                self._login_page()
+                return
+            if not self._authenticated():
+                if split.path.startswith("/api/"):
+                    self._send_json(401, {"error": "ログインが必要です"})
+                else:
+                    self._redirect("/login")
+                return
             if split.path == "/":
                 self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             elif split.path == "/api/meta":
@@ -1610,6 +1860,15 @@ def make_handler(tenants: TenantStore, page: str):
 
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
+            if path == "/login":
+                self._login()
+                return
+            if not self._authenticated():
+                self._send_json(401, {"error": "ログインが必要です"})
+                return
+            if path == "/api/logout":
+                self._logout()
+                return
             if path == "/api/sessions/delete":
                 self._delete_session()
                 return
@@ -1844,9 +2103,12 @@ def build_server(session: Session, host: str = "127.0.0.1",
     モデルを共有する。テナントとユーザーは TenantStore が組み合わせ
     ごとに SessionStore を持ち、ページからの切り替えに応じる。
     """
-    page = render_page(session.cfg.provider)
+    auth = AuthGate(session.cfg.web_password,
+                    session.cfg.web_secure_cookie)
+    page = render_page(session.cfg.provider, web_auth=auth.enabled)
     tenants = TenantStore(session, session_factory)
-    server = ThreadingHTTPServer((host, port), make_handler(tenants, page))
+    server = ThreadingHTTPServer((host, port),
+                                 make_handler(tenants, page, auth))
     # 能動発信の巡回が保持中の Session を引けるよう、サーバーに
     # TenantStore をぶら下げておく（serve が使う）
     server.tenants = tenants  # type: ignore[attr-defined]
@@ -1896,6 +2158,8 @@ def serve(session: Session, host: str = "127.0.0.1", port: int = 8765) -> None:
               f"部屋の記録 {result.sessions_removed} 件、"
               f"完了した用事 {result.tasks_removed} 件")
     server = build_server(session, host, port)
+    if cfg.web_password:
+        print("Web UI のログインが有効です（パスワードは環境変数 KUMA_WEB_PASSWORD）")
     _start_proactive_loop(server.tenants, cfg)  # type: ignore[attr-defined]
     # Telegram のトークンが設定されていれば、裏側スレッドで受信も始める
     # （未設定なら何もしない。Telegram 用の Session は承認者なしで作る）

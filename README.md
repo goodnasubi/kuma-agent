@@ -183,6 +183,8 @@ Telegram の Bot（@BotFather で発行）を通じて会話できます。環�
 | `KUMA_TELEGRAM_BOT_TOKEN` | Telegram Bot のトークン | （未設定＝無効） |
 | `KUMA_TELEGRAM_ALLOWED_CHATS` | 会話を許可する chat id（カンマ区切り） | （無し＝処理しない） |
 | `KUMA_TELEGRAM_TENANT` / `KUMA_TELEGRAM_USER` | Telegram の会話の行き先 | `default` / `default` |
+| `KUMA_WEB_PASSWORD` | Web UI のログインパスワード | （未設定＝ログインなし） |
+| `KUMA_WEB_SECURE_COOKIE` | ログイン Cookie に Secure を付けるか（`1` で有効） | （無効） |
 
 ### コンテナで動かす
 
@@ -197,9 +199,12 @@ docker compose up -d --build
 
 ### Web UI の注意
 
-Web UI は `--host` / `--port` で待ち受け先を変えられますが、認証を
-持たない単一ユーザー前提の画面です。既定の 127.0.0.1 から外に出す
-場合は注意してください。
+Web UI は `--host` / `--port` で待ち受け先を変えられます。既定は
+認証を持たない単一ユーザー前提の画面です。環境変数
+`KUMA_WEB_PASSWORD` を設定すると、パスワードによるログインが
+有効になります（未設定なら従来どおり認証なし）。それでも、
+既定の 127.0.0.1 から外に出す場合は、信頼できる範囲に限るか、
+HTTPS の逆プロキシの後ろに置くなど注意してください。
 
 ## アバターとイメージカラー
 
