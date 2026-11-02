@@ -24,12 +24,33 @@ MAX_QUOTE_CHARS = 200  # モデルへ渡す引用文の最大文字数
 
 IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 PDF_MEDIA_TYPE = "application/pdf"
+# 音声のメディア種別。対応形式は mp3 / wav / m4a / ogg / webm で、
+# ブラウザや OS によって揺れる表記（audio/x-wav 等）も含める。
+# video/webm はブラウザの録音（MediaRecorder）が音声だけでも
+# この種別で出すことがあるため、音声として扱う。
+AUDIO_MEDIA_TYPES = frozenset({
+    "audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave",
+    "audio/mp4", "audio/x-m4a", "audio/aac", "audio/ogg", "audio/webm",
+    "audio/flac", "audio/aiff", "video/webm",
+})
 _TEXT_MEDIA_TYPES = frozenset({"application/json"})
 _EXTENSION_MEDIA_TYPES = {".md": "text/markdown"}
+# mimetypes の推定より優先する拡張子ごとの種別。音声の webm は
+# video/webm と推定されてしまうため、音声（audio/webm）に寄せる。
+# wav / m4a も頭脳（Gemini）が受け付ける表記にそろえる。
+_EXTENSION_OVERRIDES = {
+    ".md": "text/markdown",
+    ".webm": "audio/webm",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+}
 
 
 def guess_media_type(name: str) -> str:
     """ファイル名の拡張子からメディア種別を推定する。"""
+    override = _EXTENSION_OVERRIDES.get(Path(name).suffix.lower())
+    if override:
+        return override
     media_type, _ = mimetypes.guess_type(name)
     if media_type:
         return media_type
@@ -38,7 +59,7 @@ def guess_media_type(name: str) -> str:
 
 @dataclass
 class Attachment:
-    """発話に添えるファイル（画像・文書）。バイト列そのものを持つ。"""
+    """発話に添えるファイル（画像・文書・音声）。バイト列そのものを持つ。"""
 
     name: str
     media_type: str
@@ -53,6 +74,12 @@ class Attachment:
         return self.media_type == PDF_MEDIA_TYPE
 
     @property
+    def is_audio(self) -> bool:
+        """音声ファイル（mp3 / wav / m4a / ogg / webm 等）かどうか。"""
+        return (self.media_type.startswith("audio/")
+                or self.media_type in AUDIO_MEDIA_TYPES)
+
+    @property
     def is_text(self) -> bool:
         """テキストとして本文をそのまま渡せる文書かどうか。"""
         return self.media_type.startswith("text/") or self.media_type in _TEXT_MEDIA_TYPES
@@ -64,7 +91,12 @@ class Attachment:
         return base64.b64encode(self.data).decode("ascii")
 
     def placeholder(self) -> str:
-        """添付をそのまま渡せない場合にモデルへ存在を知らせる文。"""
+        """添付をそのまま渡せない場合にモデルへ存在を知らせる文。
+
+        音声は利用者にも記録で分かりやすいよう「音声」と明示する。
+        """
+        if self.is_audio:
+            return f"[添付: 音声 {self.name}（{self.media_type}）]"
         return f"[添付: {self.name}（{self.media_type}）]"
 
     def embedded_text(self) -> str:
@@ -145,8 +177,9 @@ class MetaModelClient:
     def _content(msg: Message) -> str | list[dict]:
         """添付があれば content をパート配列にする。
 
-        画像は image_url の data URI で渡せる。PDF は渡せないので
-        プレースホルダ文に落とし、テキスト文書は本文を埋め込む。
+        画像は image_url の data URI で渡せる。PDF と音声は渡せ
+        ないのでプレースホルダ文に落とし、テキスト文書は本文を
+        埋め込む。
         """
         if not msg.attachments:
             return quoted_content(msg)
@@ -227,7 +260,8 @@ class AnthropicClient:
         """添付があれば content をブロック配列にする。
 
         画像は image ブロック、PDF は document ブロック（いずれも
-        base64）で渡せる。テキスト文書は本文を埋め込み、それ以外は
+        base64）で渡せる。音声は直接渡せないのでプレースホルダ文
+        に落とし、テキスト文書は本文を埋め込み、それ以外も
         プレースホルダ文に落とす。
         """
         if not msg.attachments:
@@ -354,9 +388,10 @@ class GeminiClient:
                 if text:
                     parts.append({"text": text})
                 for att in msg.attachments:
-                    # 画像・PDF は inlineData で渡せる。テキスト文書は
-                    # 本文を埋め込み、それ以外はプレースホルダ文に落とす
-                    if att.is_image or att.is_pdf:
+                    # 画像・PDF・音声は inlineData で渡せる。テキスト
+                    # 文書は本文を埋め込み、それ以外はプレースホルダ
+                    # 文に落とす
+                    if att.is_image or att.is_pdf or att.is_audio:
                         parts.append({"inlineData": {
                             "mimeType": att.media_type, "data": att.to_base64()}})
                     else:

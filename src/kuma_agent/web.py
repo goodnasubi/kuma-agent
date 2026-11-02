@@ -145,9 +145,12 @@ _PAGE_TEMPLATE = """\
                  border-left: 3px solid currentColor; padding-left: 6px;
                  margin-bottom: 4px; }
   .msg .bodyText { display: block; }
-  .quote-btn { display: block; margin-top: 6px; padding: 2px 8px;
+  .quote-btn, .speak-btn { display: block; margin-top: 6px; padding: 2px 8px;
                font-size: 12px; background: transparent; color: inherit;
                border: 1px solid currentColor; border-radius: 999px; }
+  #record.recording { background: #B3402A; color: #fff; border-color: #B3402A; }
+  #recordStatus { font-size: 13px; align-self: center; }
+  #recordStatus[hidden] { display: none; }
   form { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; background: #fff;
          border-top: 1px solid __HONEY__; }
   #quoteBox { flex-basis: 100%; display: flex; gap: 8px; align-items: center;
@@ -171,7 +174,7 @@ _PAGE_TEMPLATE = """\
   button { padding: 10px 20px; font-size: 16px; border: none; border-radius: 8px;
            background: __HONEY__; color: #fff; cursor: pointer; }
   button:disabled { opacity: .5; }
-  #attach { background: #fff; color: __COCOA__; border: 1px solid __COCOA__; }
+  #attach, #record { background: #fff; color: __COCOA__; border: 1px solid __COCOA__; }
   body.dragover #log { outline: 3px dashed __HONEY__; outline-offset: -8px; }
   #dropHint { display: none; text-align: center; padding: 8px; font-size: 14px;
               background: #fff; border-top: 1px solid __HONEY__; }
@@ -244,6 +247,8 @@ _PAGE_TEMPLATE = """\
   </div>
   <div id="files"></div>
   <button id="attach" type="button">添付</button>
+  <button id="record" type="button">録音</button>
+  <span id="recordStatus" hidden></span>
   <input id="file" type="file" multiple hidden>
   <input id="input" autocomplete="off" placeholder="話しかけてください">
   <button id="send" type="submit">送信</button>
@@ -254,6 +259,8 @@ const form = document.getElementById('form');
 const input = document.getElementById('input');
 const send = document.getElementById('send');
 const attachBtn = document.getElementById('attach');
+const recordBtn = document.getElementById('record');
+const recordStatus = document.getElementById('recordStatus');
 const fileInput = document.getElementById('file');
 const filesLabel = document.getElementById('files');
 const tenantSelect = document.getElementById('tenantSelect');
@@ -289,6 +296,9 @@ const statusBox = document.getElementById('statusBox');
 const statusText = document.getElementById('statusText');
 let pendingFiles = [];
 let pendingQuote = null;
+let mediaRecorder = null;
+let recordedChunks = [];
+let speakingBtn = null;
 let currentTenant = 'default';
 let currentUser = 'default';
 let currentSession = 'main';
@@ -328,8 +338,52 @@ function addMsg(role, text, quote = null, quoteSource = null) {
   quoteBtn.textContent = '引用';
   quoteBtn.addEventListener('click', () => setQuote(quoteSource || text));
   div.appendChild(quoteBtn);
+  if (role === 'assistant') {
+    const speakBtn = document.createElement('button');
+    speakBtn.type = 'button';
+    speakBtn.className = 'speak-btn';
+    speakBtn.textContent = '読み上げ';
+    speakBtn.addEventListener('click', () => toggleSpeak(speakBtn, text));
+    div.appendChild(speakBtn);
+  }
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
+}
+
+// 読み上げ: ブラウザの speechSynthesis（ja-JP）で読む。読み上げ中に
+// 同じボタンか別の発話のボタンを押したら、いったん止めてから
+// （別の発話なら）そちらを読む。サーバー側の処理は無い
+function stopSpeaking() {
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+  if (speakingBtn) {
+    speakingBtn.textContent = '読み上げ';
+    speakingBtn = null;
+  }
+}
+
+function toggleSpeak(btn, text) {
+  if (!('speechSynthesis' in window) || !text) {
+    window.alert('このブラウザでは読み上げに対応していません');
+    return;
+  }
+  if (speakingBtn === btn) {
+    stopSpeaking();
+    return;
+  }
+  stopSpeaking();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = 'ja-JP';
+  const done = () => {
+    if (speakingBtn === btn) {
+      btn.textContent = '読み上げ';
+      speakingBtn = null;
+    }
+  };
+  utterance.onend = done;
+  utterance.onerror = done;
+  speakingBtn = btn;
+  btn.textContent = '止める';
+  window.speechSynthesis.speak(utterance);
 }
 
 function describe(text, names) {
@@ -732,6 +786,70 @@ function setPending(files) {
 attachBtn.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', () => setPending(fileInput.files));
 
+// 録音: ブラウザの MediaRecorder でマイクから録り、止めたら音声
+// ファイルとして通常の添付（pendingFiles）に合流させる。送信は
+// 既存の送信処理がそのまま行う。マイクの許可が得られない場合や
+// ブラウザが未対応の場合は、状態表示にエラーを出して会話は壊さない
+function setRecording(on) {
+  recordBtn.textContent = on ? '録音を止める' : '録音';
+  recordBtn.classList.toggle('recording', on);
+  recordStatus.hidden = !on;
+  recordStatus.textContent = on ? '録音中…' : '';
+}
+
+function showRecordError(message) {
+  mediaRecorder = null;
+  recordBtn.textContent = '録音';
+  recordBtn.classList.remove('recording');
+  recordStatus.hidden = false;
+  recordStatus.textContent = message;
+}
+
+recordBtn.addEventListener('click', async () => {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    return;
+  }
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    showRecordError('このブラウザでは録音に対応していません');
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({audio: true});
+  } catch (e) {
+    showRecordError('マイクを使えませんでした（許可が必要です）');
+    return;
+  }
+  recordedChunks = [];
+  try {
+    mediaRecorder = new MediaRecorder(stream);
+  } catch (e) {
+    stream.getTracks().forEach((t) => t.stop());
+    showRecordError('録音を開始できませんでした');
+    return;
+  }
+  mediaRecorder.ondataavailable = (ev) => {
+    if (ev.data && ev.data.size) recordedChunks.push(ev.data);
+  };
+  mediaRecorder.onstop = () => {
+    stream.getTracks().forEach((t) => t.stop());
+    const mime = (mediaRecorder.mimeType || 'audio/webm').split(';')[0];
+    const ext = mime.includes('ogg') ? '.ogg'
+      : mime.includes('mp4') ? '.m4a'
+      : mime.includes('mpeg') ? '.mp3'
+      : mime.includes('wav') ? '.wav' : '.webm';
+    const file = new File(recordedChunks,
+                          'recording-' + Date.now() + ext, {type: mime});
+    mediaRecorder = null;
+    recordedChunks = [];
+    setRecording(false);
+    setPending([...pendingFiles, file]);
+  };
+  mediaRecorder.start();
+  setRecording(true);
+});
+
 // ドラッグ＆ドロップでも添付できる（画面全体がドロップ先）
 document.addEventListener('dragover', (ev) => {
   ev.preventDefault();
@@ -940,7 +1058,10 @@ def parse_attachments(raw: object) -> list[Attachment]:
         if not isinstance(item, dict):
             raise ValueError("添付の形式が不正です")
         name = Path(str(item.get("name") or "attachment")).name or "attachment"
-        media_type = str(item.get("media_type") or "") or guess_media_type(name)
+        # ブラウザの録音は "audio/webm;codecs=opus" のような種別を
+        # 送ることがあるため、パラメータ部分は落としておく
+        media_type = str(item.get("media_type") or "").split(";")[0].strip()
+        media_type = media_type or guess_media_type(name)
         try:
             data = base64.b64decode(str(item["data_base64"]), validate=True)
         except (KeyError, binascii.Error) as exc:
