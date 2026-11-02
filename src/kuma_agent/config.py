@@ -68,6 +68,10 @@ class Config:
     def __post_init__(self) -> None:
         # どの経路で作られてもモードは正規化済みの値にそろえる
         self.mode = normalize_mode(self.mode)
+        # 承認待ちの上限が 0 以下なら既定値として扱う（MCP の応答待ちと
+        # 同じ流儀）。フィールドの既定値が組み立てられた後に直す
+        if self.approval_timeout_seconds <= 0:
+            self.approval_timeout_seconds = 300
 
     @property
     def is_cli_provider(self) -> bool:
@@ -107,6 +111,11 @@ class Config:
     # 捨てて次回に再起動を試みる）。0 以下は既定値として扱う
     mcp_timeout_seconds: int = field(
         default_factory=lambda: _env_int("KUMA_MCP_TIMEOUT_SECONDS", 60))
+    # 危険な道具（run_shell と MCP 道具）の承認待ちの上限（秒）。
+    # 承認側がこの時間に決めなければ却下として扱う。0 以下は
+    # __post_init__ で既定値（300）として扱う
+    approval_timeout_seconds: int = field(
+        default_factory=lambda: _env_int("KUMA_APPROVAL_TIMEOUT_SECONDS", 300))
 
     @property
     def tenant_data_dir(self) -> Path:

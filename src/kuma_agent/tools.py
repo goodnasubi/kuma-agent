@@ -5,6 +5,7 @@ LLM が呼べる道具を dict のスキーマと Python 関数の組で管理�
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -62,6 +63,49 @@ def activity_label(name: str, args: dict | None = None) -> str:
     return label
 
 
+# 実行前に利用者の承認が要る道具（組み込み分）。MCP 道具は
+# 名前に区切り（__）を含むことで対象に含める: 外部サーバーが
+# 実体を持つため、組み込み以上に素性が読みにくく、一律で対象
+# にする。ファイル読み書き・用事・記憶などの通常の道具は対象外
+APPROVAL_TARGET_NAMES = frozenset({"run_shell"})
+
+# 承認が下りなかったときに道具の結果として返す文言。例外ではなく
+# 結果文字列にすることで、モデルが受けて会話を続けられる
+APPROVAL_DENIED_RESULT = "error: 承認されませんでした"
+
+
+def requires_approval(name: str) -> bool:
+    """その道具の実行前に利用者の承認が要るかどうか。
+
+    run_shell（任意のコマンド実行）と、MCP 道具（名前に __ を含む
+    <サーバー名>__<道具名>）だけが対象。それ以外は承認なしで実行
+    する。
+    """
+    return name in APPROVAL_TARGET_NAMES or "__" in name
+
+
+def summarize_tool_args(name: str, args: dict, limit: int = 200) -> str:
+    """承認の判断に要る引数の要約を 1 行で返す。
+
+    run_shell はコマンド文字列そのものが判断材料になるため、その
+    まま出す。それ以外は引数全体を JSON にして出す。改行などは
+    空白に潰し、長すぎる場合は切り詰める。
+    """
+    if name == "run_shell":
+        text = str(args.get("command", ""))
+    elif args:
+        try:
+            text = json.dumps(args, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            text = str(args)
+    else:
+        text = ""
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
+
+
 @dataclass
 class Tool:
     name: str
@@ -75,6 +119,13 @@ class ToolBox:
         self.work_dir = work_dir.resolve()
         self.task_board = task_board
         self._tools: dict[str, Tool] = {}
+        # 承認フック: 承認対象の道具を実行する前に呼ばれる
+        # （道具名, 引数）→ 真偽 の callable。None の間は承認を
+        # 挟まない（従来動作）。Session がテナント設定に応じて
+        # 差し込み、承認の要否の判断自体はフック側に寄せる
+        # （フックが無い・例外・False のいずれも実行しない側に倒す
+        # 配線は Session の仕事）
+        self.approval_check: Callable[[str, dict], bool] | None = None
         self._register_defaults()
         if task_board is not None:
             self._register_task_tools()
@@ -189,6 +240,15 @@ class ToolBox:
         tool = self._tools.get(name)
         if tool is None:
             return f"error: unknown tool {name}"
+        if self.approval_check is not None and requires_approval(name):
+            # 承認対象の道具は、フックが True を返すまで実行しない。
+            # フックの例外も却下として扱う（安全側に倒す）
+            try:
+                approved = bool(self.approval_check(name, dict(args)))
+            except Exception:
+                approved = False
+            if not approved:
+                return APPROVAL_DENIED_RESULT
         try:
             return str(tool.func(**args))
         except Exception as e:  # 道具の失敗は LLM に返して対処させる

@@ -11,6 +11,7 @@ from .memory import (cleanup_expired, delete_session_record,
                      list_session_ids, normalize_session_id,
                      normalize_tenant_name, retention_days_for)
 from .session import Session
+from .tools import summarize_tool_args
 
 
 def _run_cleanup(cfg: Config, dry_run: bool = False,
@@ -116,6 +117,25 @@ def _show_status(status: str) -> None:
         print("\r" + " " * 40 + "\r", end="", flush=True)
 
 
+def _cli_approver(name: str, args: dict) -> bool:
+    """プレーンな対話ループ用の承認者（標準入力で y/N を尋ねる）。
+
+    対象の道具と引数の要約を示し、「y」の入力があったときだけ
+    許可する。Enter のみ・それ以外の入力・入力の終わり（EOF）は
+    すべて却下として扱う。端末の前に人がいてプロンプト自体が
+    待ちになるため、この経路に時間切れは設けない（Web / TUI の
+    承認待ちには Config.approval_timeout_seconds が効く）。
+    """
+    summary = summarize_tool_args(name, args)
+    print()  # 作業中表示の同じ行上書きを区切ってから尋ねる
+    print(f"承認が必要です: {name}" + (f"（{summary}）" if summary else ""))
+    try:
+        answer = input("許可しますか？ [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kuma-agent")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -202,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_tui(session, cfg.provider)
     session.on_status = _show_status
+    session.approver = _cli_approver
     print("クマです。話しかけてください（終了は Ctrl-D）")
     try:
         while True:

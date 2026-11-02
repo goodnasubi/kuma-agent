@@ -10,7 +10,9 @@ import base64
 import binascii
 import json
 import threading
+import uuid
 from dataclasses import replace
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
@@ -37,7 +39,13 @@ from .memory import (
 from .mcp_client import close_shared_managers
 from .proactive import run_sweep
 from .session import Session
-from .settings import proactive_enabled_for, set_proactive_enabled
+from .settings import (
+    approvals_enabled_for,
+    proactive_enabled_for,
+    set_approvals_enabled,
+    set_proactive_enabled,
+)
+from .tools import summarize_tool_args
 
 # ブランド色（README のイメージカラー）
 HONEY = "#E79A3C"
@@ -98,6 +106,16 @@ _PAGE_TEMPLATE = """\
   .adminNew { display: flex; gap: 8px; align-items: center; margin-top: 10px;
               font-size: 14px; }
   .adminNew input { padding: 6px; font-size: 13px; border-radius: 6px;
+               border: 1px solid __COCOA__; }
+  #approvalPanel { background: #fff; border-bottom: 2px solid __HONEY__;
+                 padding: 12px 16px; }
+  #approvalPanel[hidden] { display: none; }
+  #approvalPanel h2 { font-size: 15px; margin: 0 0 8px; }
+  .approvalRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+               padding: 8px 0; border-top: 1px dashed __HONEY__; font-size: 14px; }
+  .approvalRow .asummary { flex: 1; min-width: 12em; word-break: break-all; }
+  .approvalRow button { padding: 6px 14px; font-size: 13px; }
+  .approvalRow button.deny { background: #fff; color: __COCOA__;
                border: 1px solid __COCOA__; }
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex;
          flex-direction: column; gap: 10px; }
@@ -182,6 +200,10 @@ _PAGE_TEMPLATE = """\
     <button id="adminCreateTenant" type="button">テナントを作成</button>
   </div>
 </section>
+<section id="approvalPanel" hidden>
+  <h2>承認の確認</h2>
+  <div id="approvalRows"></div>
+</section>
 <div id="log"></div>
 <div id="dropHint">ファイルを離すと添付します</div>
 <form id="form">
@@ -219,6 +241,8 @@ const deleteSessionBtn = document.getElementById('deleteSession');
 const tenantAdminBtn = document.getElementById('tenantAdminBtn');
 const tenantPanel = document.getElementById('tenantPanel');
 const tenantRows = document.getElementById('tenantRows');
+const approvalPanel = document.getElementById('approvalPanel');
+const approvalRows = document.getElementById('approvalRows');
 const adminNewTenant = document.getElementById('adminNewTenant');
 const adminCreateTenant = document.getElementById('adminCreateTenant');
 const quoteBox = document.getElementById('quoteBox');
@@ -501,6 +525,13 @@ async function buildTenantRow(name) {
   proactiveLabel.appendChild(toggle);
   proactiveLabel.appendChild(document.createTextNode(' 能動発信'));
   row.appendChild(proactiveLabel);
+  const approvalLabel = document.createElement('label');
+  const approvalToggle = document.createElement('input');
+  approvalToggle.type = 'checkbox';
+  approvalToggle.checked = settings.approvals_enabled !== false;
+  approvalLabel.appendChild(approvalToggle);
+  approvalLabel.appendChild(document.createTextNode(' 承認確認'));
+  row.appendChild(approvalLabel);
   const retentionLabel = document.createElement('label');
   retentionLabel.appendChild(document.createTextNode('保持期限（日）: '));
   const days = document.createElement('input');
@@ -517,6 +548,7 @@ async function buildTenantRow(name) {
   saveBtn.textContent = '保存';
   saveBtn.addEventListener('click', async () => {
     const body = {tenant: name, proactive_enabled: toggle.checked,
+                  approvals_enabled: approvalToggle.checked,
                   retention_days: days.value === '' ? null : Number(days.value)};
     try {
       const res = await fetch('/api/tenant_settings', {
@@ -621,6 +653,61 @@ async function pollStatus() {
     const data = await res.json();
     showStatus(data.status || '');
   } catch (e) { /* 状態が取れなくても会話は続けられる */ }
+  pollApprovals();
+}
+
+// 承認の確認: 危険な道具の実行待ちがあれば、内容と許可・却下の
+// ボタンを出す。承認待ちは会話リクエストの処理中にだけ現れる
+// ため、状態ポーリングに相乗りして取りにいく。決定は
+// /api/approvals/decide に送り、待ち中の会話が先へ進む
+async function pollApprovals() {
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser);
+    const res = await fetch('/api/approvals' + query);
+    const data = await res.json();
+    renderApprovals(data.approvals || []);
+  } catch (e) { /* 取れなければ前回の表示のままにする */ }
+}
+
+function renderApprovals(list) {
+  approvalRows.innerHTML = '';
+  approvalPanel.hidden = !list.length;
+  for (const item of list) {
+    const row = document.createElement('div');
+    row.className = 'approvalRow';
+    const text = document.createElement('span');
+    text.className = 'asummary';
+    text.textContent = '「' + item.tool + '」を実行しようとしています'
+      + (item.summary ? ': ' + item.summary : '');
+    row.appendChild(text);
+    row.appendChild(approvalButton(item, true, '許可'));
+    row.appendChild(approvalButton(item, false, '却下'));
+    approvalRows.appendChild(row);
+  }
+}
+
+function approvalButton(item, approved, label) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = label;
+  if (!approved) btn.className = 'deny';
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/approvals/decide', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({id: item.id, approved,
+                              tenant: currentTenant, user: currentUser}),
+      });
+      if (!res.ok) throw new Error('decide failed');
+    } catch (e) {
+      window.alert('承認の決定に失敗しました');
+    }
+    pollApprovals();
+  });
+  return btn;
 }
 
 form.addEventListener('submit', async (ev) => {
@@ -654,6 +741,7 @@ form.addEventListener('submit', async (ev) => {
   } finally {
     clearInterval(poller);
     showStatus('');
+    pollApprovals();
     send.disabled = false;
     input.focus();
   }
@@ -734,6 +822,64 @@ def parse_attachments(raw: object) -> list[Attachment]:
     return attachments
 
 
+class ApprovalBroker:
+    """保留中の承認（危険な道具の実行許可）を保持し、決定を待つ。
+
+    会話リクエストのスレッドが request() で承認待ちに入り、画面側が
+    GET /api/approvals で保留一覧を見て、POST /api/approvals/decide
+    で decide() を呼ぶまで待つ。待ちには上限（timeout 秒）があり、
+    時間切れは却下として扱う。保留はテナント×ユーザー単位で分け、
+    一覧と決定はその組み合わせの中だけで効く。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pending: dict[str, dict] = {}
+
+    def request(self, tenant: str, user: str, name: str, args: dict,
+                timeout: float) -> bool:
+        """承認を 1 件登録し、決定（または時間切れ）まで待つ。"""
+        entry = {
+            "id": uuid.uuid4().hex,
+            "tenant": tenant,
+            "user": user,
+            "tool": name,
+            "summary": summarize_tool_args(name, args),
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "event": threading.Event(),
+            "approved": False,
+        }
+        with self._lock:
+            self._pending[entry["id"]] = entry
+        try:
+            entry["event"].wait(timeout if timeout and timeout > 0 else None)
+            return bool(entry["approved"])
+        finally:
+            with self._lock:
+                self._pending.pop(entry["id"], None)
+
+    def list_pending(self, tenant: str, user: str) -> list[dict]:
+        """そのテナント×ユーザーの保留一覧（画面に出す項目だけ）。"""
+        with self._lock:
+            entries = [e for e in self._pending.values()
+                       if e["tenant"] == tenant and e["user"] == user]
+        entries.sort(key=lambda e: e["time"])
+        return [{"id": e["id"], "tool": e["tool"], "summary": e["summary"],
+                 "time": e["time"]} for e in entries]
+
+    def decide(self, tenant: str, user: str, approval_id: str,
+               approved: bool) -> bool:
+        """保留中の承認を決定する。対象が無ければ False。"""
+        with self._lock:
+            entry = self._pending.get(approval_id)
+            if (entry is None or entry["tenant"] != tenant
+                    or entry["user"] != user):
+                return False
+            entry["approved"] = bool(approved)
+        entry["event"].set()
+        return True
+
+
 class SessionStore:
     """名前 → Session の対応を管理する（Web UI の部屋の切り替え用）。
 
@@ -743,13 +889,15 @@ class SessionStore:
     """
 
     def __init__(self, initial: Session,
-                 factory: Callable[[str], Session] | None = None) -> None:
+                 factory: Callable[[str], Session] | None = None,
+                 approvals: ApprovalBroker | None = None) -> None:
         self._sessions: dict[str, Session] = {}
         self._factory = factory or (
             lambda name: Session(initial.cfg, initial.model, name))
         self.tenant = initial.tenant
         self.user = initial.user
         self._data_dir = initial.cfg.user_data_dir
+        self._approvals = approvals
         self._lock = threading.Lock()
         # 部屋ごとの作業中表示（空文字列は「作業していない」）。
         # Session の状態コールバックをここへ差し込み、/api/status が読む
@@ -766,6 +914,17 @@ class SessionStore:
                 self._statuses[_id] = status
 
         session.on_status = on_status
+        if self._approvals is not None:
+            # 承認者も差し込む: このストアのテナント×ユーザーの
+            # 保留としてブローカーに登録し、画面の決定を待つ
+            broker = self._approvals
+
+            def approver(name: str, args: dict, _s: Session = session) -> bool:
+                return broker.request(
+                    _s.tenant, _s.user, name, args,
+                    _s.cfg.approval_timeout_seconds)
+
+            session.approver = approver
 
     def get(self, name: str | None) -> Session:
         session_id = normalize_session_id(name)
@@ -817,11 +976,13 @@ class UserStore:
     def __init__(self, tenant: str, tenant_data_dir: Path,
                  default_user: str,
                  make_session: Callable[[str, str], Session],
-                 initial: SessionStore | None = None) -> None:
+                 initial: SessionStore | None = None,
+                 approvals: ApprovalBroker | None = None) -> None:
         self.tenant = tenant
         self.default_user = default_user
         self._tenant_data_dir = tenant_data_dir
         self._make_session = make_session
+        self._approvals = approvals
         self._stores: dict[str, SessionStore] = {}
         if initial is not None:
             self._stores[initial.user] = initial
@@ -833,7 +994,7 @@ class UserStore:
             store = self._stores.get(name)
             if store is None:
                 initial = self._make_session(name, DEFAULT_SESSION_ID)
-                store = SessionStore(initial)
+                store = SessionStore(initial, approvals=self._approvals)
                 self._stores[name] = store
             return store
 
@@ -865,10 +1026,15 @@ class TenantStore:
         self.default_user = initial.user
         # モードはサーバー起動時の設定で決まる（ページが /api/meta で知る）
         self.mode = normalize_mode(initial.cfg.mode)
+        # 承認の保留はサーバー全体で 1 つのブローカーが持ち、
+        # 全テナント×ユーザーの Session で共有する
+        self.approvals = ApprovalBroker()
         seeded = UserStore(
             self.default_tenant, initial.cfg.tenant_data_dir,
             self.default_user, self._session_maker(self.default_tenant),
-            initial=SessionStore(initial, session_factory))
+            initial=SessionStore(initial, session_factory,
+                                 approvals=self.approvals),
+            approvals=self.approvals)
         self._user_stores: dict[str, UserStore] = {self.default_tenant: seeded}
         self._lock = threading.Lock()
 
@@ -890,7 +1056,8 @@ class TenantStore:
             if store is None:
                 cfg = replace(self._cfg, tenant=name)
                 store = UserStore(name, cfg.tenant_data_dir,
-                                  self.default_user, self._session_maker(name))
+                                  self.default_user, self._session_maker(name),
+                                  approvals=self.approvals)
                 self._user_stores[name] = store
             return store
 
@@ -923,6 +1090,7 @@ def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     return {
         "tenant": name,
         "proactive_enabled": proactive_enabled_for(tenants.data_dir, name),
+        "approvals_enabled": approvals_enabled_for(tenants.data_dir, name),
         "retention_days": load_retention_overrides(tenants.data_dir).get(name),
         "retention_effective_days": retention_days_for(
             tenants.data_dir, name, tenants.retention_days),
@@ -977,6 +1145,11 @@ def make_handler(tenants: TenantStore, page: str):
                                       _first(query.get("user")))
                 self._send_json(200, {"status": store.status(
                     _first(query.get("session")))})
+            elif split.path == "/api/approvals":
+                tenant = normalize_tenant_name(_first(query.get("tenant")))
+                user = normalize_user_name(_first(query.get("user")))
+                self._send_json(200, {"approvals": tenants.approvals
+                                      .list_pending(tenant, user)})
             elif split.path == "/api/history":
                 store = tenants.store(_first(query.get("tenant")),
                                       _first(query.get("user")))
@@ -1012,6 +1185,9 @@ def make_handler(tenants: TenantStore, page: str):
                 return
             if path == "/api/tenants/create":
                 self._create_tenant()
+                return
+            if path == "/api/approvals/decide":
+                self._decide_approval()
                 return
             if path != "/api/chat":
                 self._send_json(404, {"error": "not found"})
@@ -1057,12 +1233,12 @@ def make_handler(tenants: TenantStore, page: str):
             self._send_json(200, {"deleted": deleted, "session": session_id})
 
         def _save_tenant_settings(self) -> None:
-            """テナント設定（能動発信の ON/OFF と保持期間）を保存する。
+            """テナント設定（能動発信・承認の ON/OFF と保持期間）を保存する。
 
-            能動発信は settings.json、保持期間は retention.json に書く
-            （どちらも既存の仕組み）。retention_days に null を渡すと
-            そのテナントの指定を取り除いて全体の既定に戻す。渡されて
-            いない項目は変更しない。保存後の最新の設定を返す。
+            能動発信と承認は settings.json、保持期間は retention.json
+            に書く（どちらも既存の仕組み）。retention_days に null を
+            渡すとそのテナントの指定を取り除いて全体の既定に戻す。
+            渡されていない項目は変更しない。保存後の最新の設定を返す。
             """
             data = self._read_json_body()
             if data is None:
@@ -1077,6 +1253,13 @@ def make_handler(tenants: TenantStore, page: str):
                         "error": "proactive_enabled は true / false で指定してください"})
                     return
                 set_proactive_enabled(tenants.data_dir, name, enabled)
+            if "approvals_enabled" in data:
+                enabled = data["approvals_enabled"]
+                if not isinstance(enabled, bool):
+                    self._send_json(400, {
+                        "error": "approvals_enabled は true / false で指定してください"})
+                    return
+                set_approvals_enabled(tenants.data_dir, name, enabled)
             if "retention_days" in data:
                 days = data["retention_days"]
                 if days is not None and (isinstance(days, bool)
@@ -1087,6 +1270,33 @@ def make_handler(tenants: TenantStore, page: str):
                     return
                 save_retention_override(tenants.data_dir, name, days)
             self._send_json(200, _tenant_settings_payload(tenants, name))
+
+        def _decide_approval(self) -> None:
+            """保留中の承認（危険な道具の実行許可）を決定する。
+
+            対象は本文の tenant / user（無ければ起動時の組み合わせ）
+            の保留だけ。決定すると、承認待ちで止まっていた会話
+            リクエストのスレッドが先へ進む。対象が見つからなければ
+            404（すでに時間切れ・決定済みのものを含む）。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            approved = data.get("approved")
+            approval_id = data.get("id")
+            if not isinstance(approved, bool) \
+                    or not isinstance(approval_id, str) or not approval_id:
+                self._send_json(400, {
+                    "error": "id と approved（true / false）を指定してください"})
+                return
+            tenant = normalize_tenant_name(
+                data.get("tenant") or tenants.default_tenant)
+            user = normalize_user_name(data.get("user") or tenants.default_user)
+            if not tenants.approvals.decide(tenant, user, approval_id, approved):
+                self._send_json(404, {"error": "対象の承認が見つかりません"})
+                return
+            self._send_json(200, {"decided": True, "approved": approved})
 
         def _create_tenant(self) -> None:
             """テナントの置き場を新規作成する。

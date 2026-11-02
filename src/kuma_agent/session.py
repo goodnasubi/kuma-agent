@@ -39,6 +39,7 @@ from .memory import (
     normalize_user_name,
 )
 from .persona import load_persona
+from .settings import approvals_enabled_for
 from .tasks import TaskBoard, format_remind_at
 from .tools import Tool, ToolBox, activity_label
 
@@ -71,6 +72,14 @@ SUMMARY_PREFIX = "（これまでの会話の要約）"
 # 通知して「表示なし」に戻す。
 THINKING = "考え中"
 SUMMARIZING = "会話を要約中"
+# 承認待ちと、その結果の文言。結果は次の状態通知ですぐ上書き
+# されるが、ポーリング間隔によっては画面に残ることもある
+APPROVAL_DENIED = "承認されませんでした"
+
+
+def approval_waiting_text(name: str) -> str:
+    """承認待ちの作業中表示（どの道具の承認待ちか添える）。"""
+    return f"承認を待っています（{name}）"
 
 # 要約役に渡す専用プロンプト（人格プロンプトとは分ける）
 _SUMMARY_SYSTEM = (
@@ -98,13 +107,21 @@ class Session:
     def __init__(self, cfg: Config, model: ChatModel,
                  session_id: str = "main",
                  on_status: Callable[[str], None] | None = None,
-                 mcp_manager: McpManager | None = None) -> None:
+                 mcp_manager: McpManager | None = None,
+                 approver: Callable[[str, dict], bool] | None = None) -> None:
         self.cfg = cfg
         self.model = model
         # 作業中表示のコールバック。対話ループの各段階で「今なにを
         # しているか」を文字列で通知し、終わったら空文字列を通知する。
         # UI はこれを受けて表示を切り替える。属性として差し替えも可。
         self.on_status = on_status
+        # UI 側の承認者: 承認対象の道具（run_shell と MCP 道具）を
+        # 実行する前に（道具名, 引数）で呼ばれ、True のときだけ実行
+        # する。UI（Web / CLI / TUI）が属性として差し込む。承認が
+        # 有効なテナントで承認者が付いていない場合は、安全側に倒
+        # して常に却下になる（_check_approval）。属性として差し
+        # 替えも可。
+        self.approver = approver
         self.tenant = normalize_tenant_name(cfg.tenant)
         self.user = normalize_user_name(cfg.user)
         self.mode = normalize_mode(cfg.mode)
@@ -130,6 +147,12 @@ class Session:
             self.mcp_manager = get_shared_manager(
                 cfg.data_dir, cfg.mcp_timeout_seconds)
         self._register_mcp_tools()
+        # 承認の配線: テナント設定で承認が有効なら、ToolBox の承認
+        # フックに _check_approval を差し込む。無効ならフック自体を
+        # 差し込まない（承認者は呼ばれず、従来どおり実行される）
+        self.approvals_enabled = approvals_enabled_for(cfg.data_dir, self.tenant)
+        if self.approvals_enabled:
+            self.tools.approval_check = self._check_approval
         self.history: list[Message] = self._restore_history()
         memory_text = self.memory.load_long_term()
         self.system_prompt = load_persona(data_dir)
@@ -265,6 +288,30 @@ class Session:
             callback(status)
         except Exception:
             pass
+
+    def _check_approval(self, name: str, args: dict) -> bool:
+        """承認対象の道具を実行してよいか、UI 側の承認者に聞く。
+
+        承認待ちであることは作業中表示にも出す。承認者が付いて
+        いない経路（テストや組み込み利用）では安全側に倒して常に
+        却下する。承認者の例外も却下として扱う。承認されたら表示
+        をその道具の作業名に戻す（実行中の表示が承認待ちのままに
+        ならないよう）。
+        """
+        self._notify(approval_waiting_text(name))
+        approver = self.approver
+        if approver is None:
+            self._notify(APPROVAL_DENIED)
+            return False
+        try:
+            approved = bool(approver(name, dict(args)))
+        except Exception:
+            approved = False
+        if approved:
+            self._notify(activity_label(name, args))
+        else:
+            self._notify(APPROVAL_DENIED)
+        return approved
 
     # ---------------------------------------------------------- 圧縮
 

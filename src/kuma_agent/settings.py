@@ -1,14 +1,19 @@
 """テナントごとの設定（settings.json）。
 
 データ置き場ルートの settings.json に
-{"tenants": {"<テナント名>": {"proactive_enabled": true/false}}}
-と書くと、テナントごとに能動発信（エージェントから先に発言する
-仕組み）の ON/OFF を切り替えられる。保持期間のテナント別指定が
-retention.json に分かれているのと同じ考え方で、こちらは振る舞いの
-設定を持つ。
+{"tenants": {"<テナント名>": {"proactive_enabled": true/false,
+                              "approvals_enabled": true/false}}}
+と書くと、テナントごとに振る舞いを切り替えられる。保持期間の
+テナント別指定が retention.json に分かれているのと同じ考え方で、
+こちらは振る舞いの設定を持つ。
+
+- proactive_enabled: 能動発信（エージェントから先に発言する仕組み）
+  の ON/OFF
+- approvals_enabled: 危険な道具（run_shell と MCP 道具）の実行前に
+  利用者の承認を挟むかどうか
 
 ファイルが無い・壊れている場合や、そのテナントの指定が無い場合は
-既定値で動く（能動発信は ON）。値が真偽値でない項目は無視する。
+既定値で動く（どちらも ON）。値が真偽値でない項目は無視する。
 テナント名は通常の正規化を通して照合する。
 """
 from __future__ import annotations
@@ -22,6 +27,13 @@ SETTINGS_FILENAME = "settings.json"
 
 # 能動発信の既定値（settings.json に指定が無いテナントはこれで動く）
 DEFAULT_PROACTIVE_ENABLED = True
+
+# 承認の既定値（指定が無いテナントは承認を挟む側＝安全側で動く）
+DEFAULT_APPROVALS_ENABLED = True
+
+# 真偽値として読む設定項目（キー → 既定値）。ファイルに真偽値で
+# 書かれている項目だけを読み取り、指定が無い項目は含めない
+_BOOL_KEYS = ("proactive_enabled", "approvals_enabled")
 
 
 def _load_raw(data_dir: Path) -> dict:
@@ -37,8 +49,8 @@ def _load_raw(data_dir: Path) -> dict:
 def load_tenant_settings(data_dir: Path) -> dict[str, dict[str, bool]]:
     """テナントごとの設定を読む。
 
-    戻り値は {正規化したテナント名: {"proactive_enabled": 真偽値}} で、
-    真偽値として読める項目だけを含む。指定が無いテナントは含まれ
+    戻り値は {正規化したテナント名: {項目名: 真偽値}} で、真偽値と
+    して読める項目だけを含む。指定が無いテナント・項目は含まれ
     ない（呼び出し側で既定値に倒す）。
     """
     raw = _load_raw(data_dir)
@@ -49,24 +61,40 @@ def load_tenant_settings(data_dir: Path) -> dict[str, dict[str, bool]]:
     for name, entry in tenants.items():
         if not isinstance(entry, dict):
             continue
-        enabled = entry.get("proactive_enabled")
-        if isinstance(enabled, bool):
-            settings[normalize_tenant_name(name)] = {
-                "proactive_enabled": enabled}
+        parsed = {key: entry[key] for key in _BOOL_KEYS
+                  if isinstance(entry.get(key), bool)}
+        if parsed:
+            settings[normalize_tenant_name(name)] = parsed
     return settings
+
+
+def _bool_setting_for(data_dir: Path, tenant: str | None, key: str,
+                      default: bool) -> bool:
+    """テナントの真偽値設定を読む（未設定なら既定値）。"""
+    entry = load_tenant_settings(data_dir).get(normalize_tenant_name(tenant))
+    if entry is None:
+        return default
+    return entry.get(key, default)
 
 
 def proactive_enabled_for(data_dir: Path, tenant: str | None) -> bool:
     """テナントの能動発信が有効かどうかを返す（未設定なら既定で有効）。"""
-    entry = load_tenant_settings(data_dir).get(normalize_tenant_name(tenant))
-    if entry is None:
-        return DEFAULT_PROACTIVE_ENABLED
-    return entry["proactive_enabled"]
+    return _bool_setting_for(data_dir, tenant, "proactive_enabled",
+                             DEFAULT_PROACTIVE_ENABLED)
 
 
-def set_proactive_enabled(data_dir: Path, tenant: str | None,
-                          enabled: bool) -> None:
-    """テナントの能動発信 ON/OFF を settings.json に保存する。
+def approvals_enabled_for(data_dir: Path, tenant: str | None) -> bool:
+    """テナントの承認（危険な道具の実行前確認）が有効かどうかを返す。
+
+    未設定なら既定で有効（承認を挟む側＝安全側）。
+    """
+    return _bool_setting_for(data_dir, tenant, "approvals_enabled",
+                             DEFAULT_APPROVALS_ENABLED)
+
+
+def _set_bool_setting(data_dir: Path, tenant: str | None, key: str,
+                      enabled: bool) -> None:
+    """テナントの真偽値設定を settings.json に保存する（共通処理）。
 
     他のテナントの指定や、同じテナントの他の設定項目はそのまま
     残す。既存ファイルが壊れている場合は、読めた範囲を引き継げ
@@ -82,9 +110,21 @@ def set_proactive_enabled(data_dir: Path, tenant: str | None,
         normalize_tenant_name(key): value for key, value in tenants.items()}
     entry = merged.get(name)
     entry = dict(entry) if isinstance(entry, dict) else {}
-    entry["proactive_enabled"] = bool(enabled)
+    entry[key] = bool(enabled)
     merged[name] = entry
     raw["tenants"] = merged
     data_dir.mkdir(parents=True, exist_ok=True)
     text = json.dumps(raw, ensure_ascii=False, indent=2)
     (data_dir / SETTINGS_FILENAME).write_text(text + "\n", encoding="utf-8")
+
+
+def set_proactive_enabled(data_dir: Path, tenant: str | None,
+                          enabled: bool) -> None:
+    """テナントの能動発信 ON/OFF を settings.json に保存する。"""
+    _set_bool_setting(data_dir, tenant, "proactive_enabled", enabled)
+
+
+def set_approvals_enabled(data_dir: Path, tenant: str | None,
+                          enabled: bool) -> None:
+    """テナントの承認 ON/OFF を settings.json に保存する。"""
+    _set_bool_setting(data_dir, tenant, "approvals_enabled", enabled)

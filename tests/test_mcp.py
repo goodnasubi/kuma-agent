@@ -181,6 +181,13 @@ class _PlainModel:
 
 def test_session_exposes_and_calls_mcp_tools(tmp_path: Path):
     _write_mcp_json(tmp_path, [_fake_server_entry()])
+    # このテストは MCP の道具が Session 経由で届くことの確認が目的。
+    # MCP 道具は承認対象（0.20.0）で、承認者がいない経路では安全側に
+    # 倒して却下されるため、ここではテナントの承認を無効にしておく
+    # （承認自体の検証は tests/test_approvals.py）
+    (tmp_path / "settings.json").write_text(json.dumps(
+        {"tenants": {"default": {"approvals_enabled": False}}}),
+        encoding="utf-8")
     model = _AddModel()
     mgr = McpManager(tmp_path, timeout_seconds=10)
     try:

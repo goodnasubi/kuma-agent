@@ -21,6 +21,7 @@ from .llm import (
     quoted_content,
 )
 from .session import THINKING, Session
+from .tools import summarize_tool_args
 
 USER_LABEL = "あなた"
 ASSISTANT_LABEL = "クマ"
@@ -165,6 +166,67 @@ def parse_quote_command(text: str) -> int | None:
     return number if number >= 1 else 0
 
 
+class TuiApprover:
+    """TUI 用の承認者。say のワーカースレッドから呼ばれ、画面の入力を待つ。
+
+    承認待ちの間は pending() が対象（道具名と引数の要約）を返し、
+    画面側は入力欄の文字列を answer() に渡して決定する。「y」
+    （yes も可）だけが許可で、それ以外は却下。timeout 秒（None で
+    無制限）以内に決定が無ければ時間切れで却下にする。同時に
+    扱える承認待ちは 1 件だけ（2 件目は即却下）。
+    """
+
+    def __init__(self, timeout: float | None = None) -> None:
+        self._timeout = timeout
+        self._lock = threading.Lock()
+        self._current: dict | None = None
+
+    def __call__(self, name: str, args: dict) -> bool:
+        request = {
+            "name": name,
+            "summary": summarize_tool_args(name, args),
+            "event": threading.Event(),
+            "approved": False,
+        }
+        with self._lock:
+            if self._current is not None:
+                return False  # 承認待ちが重なったら安全側に倒す
+            self._current = request
+        try:
+            request["event"].wait(self._timeout)
+            return bool(request["approved"])
+        finally:
+            with self._lock:
+                if self._current is request:
+                    self._current = None
+
+    def pending(self) -> dict | None:
+        """承認待ちの対象（{"name", "summary"}）。無ければ None。"""
+        with self._lock:
+            if self._current is None:
+                return None
+            return {"name": self._current["name"],
+                    "summary": self._current["summary"]}
+
+    def answer(self, text: str) -> bool:
+        """入力された文字列で承認を決定する。待ちが無ければ False。"""
+        with self._lock:
+            request = self._current
+        if request is None:
+            return False
+        request["approved"] = text.strip().lower() in ("y", "yes")
+        request["event"].set()
+        return True
+
+
+def approval_prompt_text(request: dict) -> str:
+    """承認待ちの間に状態行へ出す文言（対象と答え方）。"""
+    text = f"承認を待っています（{request['name']}）"
+    if request["summary"]:
+        text += f": {request['summary']}"
+    return text + " ─ 許可は y、却下は n を入力して Enter"
+
+
 def status_dots(frame: int) -> str:
     """作業中表示の点。フレームが進むたびに 0〜3 個を繰り返す。"""
     return "." * (frame % 4)
@@ -244,6 +306,10 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
     # say を回すワーカースレッドの完了で done が立つ
     status: dict[str, object] = {"text": THINKING, "busy": False, "done": False}
     session.on_status = lambda text: status.__setitem__("text", text)
+    # 承認者: say のワーカーが承認待ちになると、入力欄の y/n で
+    # 決めるまで待つ（時間切れは却下）
+    approver = TuiApprover(timeout=session.cfg.approval_timeout_seconds)
+    session.approver = approver
     frame = 0  # 作業中表示の点のアニメーション用カウンタ
 
     def notice(text: str) -> None:
@@ -282,6 +348,7 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
             _safe_addstr(stdscr, 1, 0, "-" * max(0, width - 1))
 
         busy = bool(status["busy"])
+        approval = approver.pending()
         # 作業中表示の行（入力欄の上）を出す間はログを 1 行短くする
         log_height = max(0, height - 4 - (1 if busy else 0))
         lines = format_log(session.history, width - 2)
@@ -294,10 +361,16 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
             _safe_addstr(stdscr, 2 + i, 0, line)
 
         if busy:
-            shown_status = status_line(str(status["text"]), frame)
-            if shown_status:
+            if approval is not None:
+                # 承認待ちの間は、対象と答え方を状態行に出す
+                prompt_text = approval_prompt_text(approval)
                 _safe_addstr(stdscr, height - 2, 0,
-                             f"{ASSISTANT_LABEL}: {shown_status}")
+                             prompt_text[: max(0, width - 1)])
+            else:
+                shown_status = status_line(str(status["text"]), frame)
+                if shown_status:
+                    _safe_addstr(stdscr, height - 2, 0,
+                                 f"{ASSISTANT_LABEL}: {shown_status}")
 
         prompt = "> "
         shown = prompt + buffer
@@ -326,9 +399,21 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
             continue
 
         if status["busy"]:
-            # 応答待ちの間はスクロールと終了だけを受け付ける
+            # 応答待ちの間はスクロールと終了だけを受け付ける。
+            # ただし承認待ちの間は、入力欄を y/n の回答欄として使う
             if key == "\x03":  # Ctrl-C
                 return
+            if approver.pending() is not None:
+                if key in ("\n", "\r"):
+                    approver.answer(buffer)
+                    buffer = ""
+                elif isinstance(key, str) and key in ("\x7f", "\b"):
+                    buffer = buffer[:-1]
+                elif key == curses.KEY_BACKSPACE:
+                    buffer = buffer[:-1]
+                elif isinstance(key, str) and key.isprintable():
+                    buffer += key
+                continue
             if key == curses.KEY_PPAGE:
                 offset += 5
             elif key == curses.KEY_NPAGE:
