@@ -13,6 +13,7 @@ import hmac
 import json
 import mimetypes
 import secrets
+import shutil
 import threading
 import time
 import uuid
@@ -25,7 +26,11 @@ from typing import Callable
 from urllib.parse import parse_qs, quote, urlsplit
 
 from .config import Config, mode_label, normalize_mode
-from .export import build_export_zip, default_export_filename
+from .export import (
+    build_export_zip,
+    default_export_filename,
+    save_tenant_backup,
+)
 from .llm import MAX_ATTACHMENT_BYTES, Attachment, guess_media_type
 from .memory import (
     DEFAULT_SESSION_ID,
@@ -61,6 +66,7 @@ from .telegram import start_polling_thread as start_telegram_polling
 from .settings import (
     approvals_enabled_for,
     proactive_enabled_for,
+    remove_tenant_settings,
     set_approvals_enabled,
     set_proactive_enabled,
 )
@@ -1066,6 +1072,46 @@ async function buildTenantRow(name) {
   switchBtn.textContent = '切り替え';
   switchBtn.addEventListener('click', () => applyTenant(name));
   row.appendChild(switchBtn);
+  // 削除は取り消せないため既定テナントには出さず、確認として
+  // テナント名の入力を求める（一致しない場合は進めない）。実際の
+  // 削除は /api/tenants/delete が担い、サーバー側で控えを取って
+  // から置き場を消す
+  if (name !== 'default') {
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.textContent = '削除';
+    deleteBtn.addEventListener('click', async () => {
+      const typed = window.prompt(
+        'テナント「' + name + '」を削除します。'
+        + 'データは控え（ZIP）を取ってから消え、取り消せません。'
+        + '確認のため、テナント名を入力してください');
+      if (typed === null) return;
+      if (typed.trim() !== name) {
+        window.alert('テナント名が一致しないため、削除しませんでした');
+        return;
+      }
+      let data = {};
+      try {
+        const res = await fetch('/api/tenants/delete', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({tenant: name}),
+        });
+        data = await res.json();
+        if (!res.ok) throw new Error(data.error || '削除に失敗しました');
+      } catch (e) {
+        window.alert('削除に失敗しました: ' + (e.message || e));
+        return;
+      }
+      window.alert('テナント「' + name + '」を削除しました'
+        + (data.backup ? '（控え: ' + data.backup + '）' : ''));
+      const wasCurrent = currentTenant === name;
+      await loadTenants();
+      await loadTenantAdmin();
+      if (wasCurrent) applyTenant('default');
+    });
+    row.appendChild(deleteBtn);
+  }
   return row;
 }
 
@@ -1794,6 +1840,19 @@ class TenantStore:
     def store(self, tenant: str | None, user: str | None = None) -> SessionStore:
         return self.users(tenant).store(user)
 
+    def discard_tenant(self, tenant: str | None) -> None:
+        """テナントの UserStore を破棄する（テナント削除後の後始末）。
+
+        置き場を消した後も抱えたままにすると、一覧に消えたはずの
+        テナントが残ったり、記録の保存で置き場が作り直されたり
+        するため、削除の完了に合わせて落とす。起動時のテナントは
+        サーバーの土台なので破棄しない（削除側でも拒否する）。
+        """
+        name = normalize_tenant_name(tenant)
+        with self._lock:
+            if name != self.default_tenant:
+                self._user_stores.pop(name, None)
+
     def names(self) -> list[str]:
         """開いているテナントと、保存済みテナントの一覧。"""
         with self._lock:
@@ -2142,6 +2201,9 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate):
             if path == "/api/tenants/create":
                 self._create_tenant()
                 return
+            if path == "/api/tenants/delete":
+                self._delete_tenant()
+                return
             if path == "/api/profile":
                 self._save_profile()
                 return
@@ -2371,7 +2433,7 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate):
             名前は既存の正規化（normalize_tenant_name）を通して検証
             する。既定テナント（default）は作成済みとして扱い、すでに
             置き場がある名前も 400 で理由を返す。テナントの削除は
-            データを消す操作のため、この API では扱わない。
+            /api/tenants/delete で扱う。
             """
             data = self._read_json_body()
             if data is None:
@@ -2398,6 +2460,64 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate):
                     "error": "テナントの置き場を作れませんでした"})
                 return
             self._send_json(200, {"tenant": name, "created": True})
+
+        def _delete_tenant(self) -> None:
+            """テナントを削除する（控えを取ってから置き場を丸ごと消す）。
+
+            削除は取り消せないため、段取りを厳密に守る:
+            1. テナントの全データの控えをデータ置き場ルートの
+               backups/ に ZIP で保存する（作れなければ削除しない）
+            2. テナントの置き場（tenants/<名前>）を丸ごと削除する
+            3. 置き場の外にあるテナント設定（settings.json と
+               retention.json のそのテナントの項目）を取り除き、
+               サーバーが抱えている UserStore も破棄する
+            既定テナント（default）は置き場がデータ置き場そのもの
+            のため削除できない。サーバーの起動時テナントも、土台と
+            なる UserStore を抱えているため削除できない。置き場が
+            無いテナントは 404。名前は作成と同じ正規化を通す。
+            応答には控えのファイル名（backup）を含める。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            raw = data.get("tenant", data.get("name"))
+            if not isinstance(raw, str) or not raw.strip():
+                self._send_json(400, {"error": "テナント名を指定してください"})
+                return
+            name = normalize_tenant_name(raw)
+            if name == DEFAULT_TENANT:
+                self._send_json(400, {
+                    "error": "既定のテナント（default）は削除できません"})
+                return
+            if name == tenants.default_tenant:
+                self._send_json(400, {
+                    "error": "起動中のテナントは削除できません"})
+                return
+            tdir = tenant_dir(tenants.data_dir, name)
+            if not tdir.is_dir():
+                self._send_json(404, {
+                    "error": f"テナント「{name}」が見つかりません"})
+                return
+            try:
+                backup_path = save_tenant_backup(tenants.data_dir, name)
+            except OSError:
+                self._send_json(500, {
+                    "error": "控え（バックアップ）を作れなかったため、"
+                             "削除しませんでした"})
+                return
+            try:
+                shutil.rmtree(tdir)
+            except OSError:
+                self._send_json(500, {
+                    "error": "テナントの置き場を削除できませんでした"})
+                return
+            remove_tenant_settings(tenants.data_dir, name)
+            if name in load_retention_overrides(tenants.data_dir):
+                save_retention_override(tenants.data_dir, name, None)
+            tenants.discard_tenant(name)
+            self._send_json(200, {"tenant": name, "deleted": True,
+                                  "backup": backup_path.name})
 
         def _chat(self, session: Session, message: str,
                   attachments: list[Attachment], quote: str | None) -> None:

@@ -15,6 +15,11 @@
 書き出しは読み取り専用で、サーバー側にファイルは残さない（Web は
 メモリ上で組み立てて返す）。読み込み（復元）は未対応で、将来の
 課題とする（DESIGN.md の「データの書き出し」参照）。
+
+テナント削除前の控え（バックアップ）もここで担う。こちらは
+ユーザー単位の書き出しと違い、テナントの置き場全体（全ユーザー
+分）を ZIP にし、データ置き場ルートの backups/ にファイルとして
+残す（テナントの置き場を消しても控えが残るようにするため）。
 """
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ from pathlib import Path
 from .memory import (
     TENANTS_DIRNAME,
     USERS_DIRNAME,
+    list_user_names,
     normalize_tenant_name,
     normalize_user_name,
     tenant_dir,
@@ -35,6 +41,11 @@ from .memory import (
 )
 
 EXPORT_INFO_NAME = "export-info.json"
+
+# テナント削除前の控え（バックアップ）の置き場（データ置き場ルート
+# の配下）。控えはテナントの置き場の外に作るため、置き場を丸ごと
+# 消しても控えは残る
+BACKUPS_DIRNAME = "backups"
 
 
 def app_version() -> str:
@@ -142,3 +153,82 @@ def build_export_zip(data_dir: Path, tenant: str, user: str,
             except OSError:
                 continue  # 消えた・読めないファイルは飛ばす
     return buffer.getvalue()
+
+
+# ---------------------------------------------------------- テナントの控え
+
+def tenant_backup_filename(tenant: str,
+                           now: datetime | None = None) -> str:
+    """テナントの控え ZIP のファイル名。
+
+    形は tenant-<テナント>-<日時>.zip（日時は
+    YYYYMMDD-HHMMSS）。テナント名は通常の正規化を通すため、
+    ファイル名に使えない文字は含まれない。
+    """
+    now = now or datetime.now()
+    return (f"tenant-{normalize_tenant_name(tenant)}"
+            f"-{now:%Y%m%d-%H%M%S}.zip")
+
+
+def build_tenant_backup_zip(data_dir: Path, tenant: str,
+                            now: datetime | None = None) -> bytes:
+    """テナントの置き場全体の控え ZIP をメモリ上で組み立てて返す。
+
+    テナント削除の前に取る控えで、ユーザー単位の書き出しと違い、
+    そのテナントの全ユーザー分を置き場からの相対パスのまま収める
+    （テナントの置き場の中身はすべてそのテナントのデータなので、
+    書き出しのような他テナント／他ユーザーの除外は要らない）。
+    先頭には export-info.json の形で、控えである旨・テナント名・
+    ユーザー一覧を入れる。置き場が無い・空でも、情報ファイルだけ
+    の ZIP ができる。読み込み中に消えた・読めないファイルは飛ばす。
+    """
+    tenant_name = normalize_tenant_name(tenant)
+    tdir = tenant_dir(data_dir, tenant_name)
+    now = now or datetime.now()
+    info = {
+        "format": "kuma-agent tenant backup",
+        "description": "このファイルは kuma-agent のテナント削除前に"
+                       "自動で取られた控え（バックアップ）です",
+        "backed_up_at": now.isoformat(timespec="seconds"),
+        "tenant": tenant_name,
+        "users": list_user_names(tdir),
+        "kuma_agent_version": app_version(),
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(EXPORT_INFO_NAME,
+                    json.dumps(info, ensure_ascii=False, indent=2) + "\n")
+        if tdir.is_dir():
+            for root, dirs, names in os.walk(tdir):
+                root_path = Path(root)
+                dirs[:] = sorted(dirs)
+                for name in sorted(names):
+                    path = root_path / name
+                    if not path.is_file():
+                        continue
+                    arcname = path.relative_to(tdir).as_posix()
+                    if arcname == EXPORT_INFO_NAME:
+                        continue
+                    try:
+                        zf.write(path, arcname)
+                    except OSError:
+                        continue  # 消えた・読めないファイルは飛ばす
+    return buffer.getvalue()
+
+
+def save_tenant_backup(data_dir: Path, tenant: str,
+                       now: datetime | None = None) -> Path:
+    """テナントの控え ZIP を backups/ に保存し、そのパスを返す。
+
+    控えの置き場はデータ置き場ルートの backups/（テナントの置き場
+    の外）で、テナントの置き場を消しても控えは残る。保存に失敗
+    したら OSError をそのまま伝える（呼び出し側は、控えが作れ
+    なければ削除に進まない判断に使う）。
+    """
+    now = now or datetime.now()
+    body = build_tenant_backup_zip(data_dir, tenant, now)
+    backups_dir = data_dir / BACKUPS_DIRNAME
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    path = backups_dir / tenant_backup_filename(tenant, now)
+    path.write_bytes(body)
+    return path

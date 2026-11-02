@@ -118,6 +118,29 @@ def _set_bool_setting(data_dir: Path, tenant: str | None, key: str,
     (data_dir / SETTINGS_FILENAME).write_text(text + "\n", encoding="utf-8")
 
 
+def remove_tenant_settings(data_dir: Path, tenant: str | None) -> None:
+    """テナントの設定項目を settings.json から取り除く（テナント削除用）。
+
+    そのテナントの指定が無ければ何もしない（ファイルも作らない）。
+    他のテナントの指定はそのまま残す。既存ファイルが壊れている
+    場合は、引き継げる指定が無いため何もしない。
+    """
+    name = normalize_tenant_name(tenant)
+    raw = _load_raw(data_dir)
+    tenants = raw.get("tenants")
+    if not isinstance(tenants, dict):
+        return
+    # 既存のキーも正規化して照合する（読み書きの流儀にそろえる）
+    merged: dict[str, object] = {
+        normalize_tenant_name(key): value for key, value in tenants.items()}
+    if name not in merged:
+        return
+    del merged[name]
+    raw["tenants"] = merged
+    text = json.dumps(raw, ensure_ascii=False, indent=2)
+    (data_dir / SETTINGS_FILENAME).write_text(text + "\n", encoding="utf-8")
+
+
 def set_proactive_enabled(data_dir: Path, tenant: str | None,
                           enabled: bool) -> None:
     """テナントの能動発信 ON/OFF を settings.json に保存する。"""
