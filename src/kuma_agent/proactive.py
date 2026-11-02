@@ -55,6 +55,12 @@ memory_tidy_state.json に記録する。
 （proactive: true）を付けるが、読み込み側は role / content /
 quote 以外のキーを無視するため、復元は通常の assistant 発言
 として扱われ、記録が壊れることはない。
+
+投稿した内容は、呼び出し側が通知コールバック（notify: テナント名・
+ユーザー名・文面を受け取る）を渡していれば、それにも渡す。
+Telegram への配信（telegram.build_proactive_notifier）はこの口を
+使う。通知は投稿が済んだ後に行い、通知側の失敗で投稿や巡回を
+落とすことはしない。
 """
 from __future__ import annotations
 
@@ -212,6 +218,23 @@ class _UnusedModel:
 # ジョブの失敗の知らせに添える理由の上限（知らせ自体は短く保つ）
 _MAX_JOB_ERROR_CHARS = 200
 
+# 通知コールバックの型: (テナント名, ユーザー名, 投稿文) を受け取る
+NotifyCallback = Callable[[str, str, str], None]
+
+
+def _notify(notify: NotifyCallback | None, tenant: str, user: str,
+            text: str) -> None:
+    """通知コールバックを呼ぶ（投稿が済んだ文面を外部へ渡す口）。
+
+    通知側の失敗で投稿や巡回を落とさないよう、例外はここで飲む。
+    """
+    if notify is None:
+        return
+    try:
+        notify(tenant, user, text)
+    except Exception:
+        pass  # 通知の失敗は巡回全体に影響させない
+
 
 def build_job_result_message(job: Job, result: str) -> str:
     """ジョブの実行結果から投稿文を組み立てる（成功時）。"""
@@ -233,6 +256,7 @@ def build_job_failure_message(job: Job, result: str) -> str:
 
 def run_due_jobs(cfg: Config, now: datetime, get_session: Callable[[], Session],
                  job_executor: Callable[[Session, str], str] | None = None,
+                 notify: NotifyCallback | None = None,
                  ) -> list[str]:
     """期限の来た定期ジョブを実行し、結果を main の会話へ投稿する。
 
@@ -243,7 +267,8 @@ def run_due_jobs(cfg: Config, now: datetime, get_session: Callable[[], Session],
     仕事をして最終応答を返す）。実行したら成功・失敗にかかわらず
     last_run_at を実行時刻に更新する。実行の例外や error の結果は
     失敗として扱い、短い失敗の知らせを投稿する。投稿した文面の
-    一覧を返す。
+    一覧を返す。notify があれば、投稿した文面（結果・失敗の知らせ
+    とも）をその都度通知コールバックへも渡す。
     """
     board = JobBoard(cfg.user_data_dir)
     due = [job for job in board.list() if is_due(job, now)]
@@ -274,12 +299,14 @@ def run_due_jobs(cfg: Config, now: datetime, get_session: Callable[[], Session],
             # 投稿まで進んだら、成否にかかわらず実行済みを記録する
             board.mark_run(job.id, now)
         posted.append(text)
+        _notify(notify, cfg.tenant, cfg.user, text)
     return posted
 
 
 def check_and_post(cfg: Config, now: datetime | None = None,
                    session_provider: Callable[[], Session] | None = None,
                    job_executor: Callable[[Session, str], str] | None = None,
+                   notify: NotifyCallback | None = None,
                    ) -> str | None:
     """1 テナント×1 ユーザー分をチェックし、投稿したら文面を返す。
 
@@ -290,7 +317,9 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     既存の Session を引くための関数で、投稿すると決まったときだけ
     呼ばれる。無ければ一時的に Session を作って追記し、破棄する。
     job_executor は定期ジョブの実行関数の差し替え（テスト用）で、
-    既定は委任の仕組み（run_due_jobs を参照）。
+    既定は委任の仕組み（run_due_jobs を参照）。notify があれば、
+    投稿した文面をその都度通知コールバックへも渡す（Telegram への
+    配信など。渡すのはこの cfg のテナント・ユーザー名と文面）。
 
     定期ジョブはモードを問わず実行する。用事のリマインダーと日報
     は従来どおり相棒モード（ledger）だけが対象で、スレッドモード
@@ -327,7 +356,7 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     # 定期ジョブは用事とは独立の仕組みで、モードも静かな時間帯も
     # 問わず、期限が来ていれば先に実行して結果を投稿する
     posted.extend(run_due_jobs(cfg, now, get_session,
-                               job_executor=job_executor))
+                               job_executor=job_executor, notify=notify))
 
     if normalize_mode(cfg.mode) != "ledger":
         # スレッドモードでは用事を使わないため、残りは発言しない
@@ -352,6 +381,7 @@ def check_and_post(cfg: Config, now: datetime | None = None,
         for task in due:
             board.mark_reminded(task.id)
         posted.append(text)
+        _notify(notify, cfg.tenant, cfg.user, text)
 
     # 日報（1 日最大 1 回）。静かな時間帯の間は出さず、投稿済みの
     # 記録も消費しない（時間帯が明けてからその日の分を出す）。
@@ -363,6 +393,7 @@ def check_and_post(cfg: Config, now: datetime | None = None,
         get_session().post_proactive_message(text)
         _record_posted(user_data_dir, today)
         posted.append(text)
+        _notify(notify, cfg.tenant, cfg.user, text)
 
     if not posted:
         return None  # 言うべきことが無い
@@ -373,6 +404,7 @@ def run_sweep(cfg: Config, tenant: str | None = None,
               user: str | None = None, now: datetime | None = None,
               session_getter: Callable[[str, str], Session | None] | None = None,
               job_executor: Callable[[Session, str], str] | None = None,
+              notify: NotifyCallback | None = None,
               ) -> list[tuple[str, str, str]]:
     """テナント×ユーザーを巡回して能動発信をチェックする。
 
@@ -385,7 +417,9 @@ def run_sweep(cfg: Config, tenant: str | None = None,
     引くための関数で、投稿するときだけ呼ばれる（Web サーバーが保持
     している Session を使うため）。無ければ投稿のたびに一時 Session
     を作る。job_executor は定期ジョブの実行関数の差し替え
-    （check_and_post と同じ）。
+    （check_and_post と同じ）。notify は通知コールバックで、各
+    ユーザーへの投稿のたびにそのユーザー名で呼ばれる（届けるか
+    どうかの判断はコールバック側の役目）。
     """
     posted: list[tuple[str, str, str]] = []
     tenant_names = ([normalize_tenant_name(tenant)] if tenant is not None
@@ -401,7 +435,7 @@ def run_sweep(cfg: Config, tenant: str | None = None,
                 provider = (lambda getter=session_getter, t=tenant_name,
                             u=user_name: getter(t, u))
             text = check_and_post(scoped, now=now, session_provider=provider,
-                                  job_executor=job_executor)
+                                  job_executor=job_executor, notify=notify)
             if text is not None:
                 posted.append((tenant_name, user_name, text))
     return posted

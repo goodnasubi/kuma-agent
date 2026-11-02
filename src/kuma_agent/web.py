@@ -54,6 +54,7 @@ from .notify_prefs import (
 from .outputs import OutputBoard, format_created_at, format_size
 from .proactive import run_sweep
 from .session import Session
+from .telegram import build_proactive_notifier
 from .telegram import start_polling_thread as start_telegram_polling
 from .settings import (
     approvals_enabled_for,
@@ -2122,19 +2123,24 @@ def _start_proactive_loop(tenants: TenantStore, cfg: Config) -> None:
     （環境変数 KUMA_PROACTIVE_INTERVAL_SECONDS、既定 300 秒）ごとに
     全テナント×全ユーザーを巡回し、言うべきことがあるユーザーに
     だけ main の会話へ発言する。投稿はサーバーが保持している
-    Session を通す。間隔が 0 以下なら巡回しない。1 回の巡回の
-    失敗で Web サーバー自体は落とさない。
+    Session を通す。Telegram が設定されていれば、対象ユーザーの
+    投稿は Telegram へも届ける（telegram.build_proactive_notifier）。
+    間隔が 0 以下なら巡回しない。1 回の巡回の失敗で Web サーバー
+    自体は落とさない。
     """
     interval = cfg.proactive_interval_seconds
     if interval <= 0:
         return
     stopped = threading.Event()
+    # Telegram が設定されていれば、投稿を Telegram へも届ける通知を
+    # 用意する（未設定・無効化・許可リスト空なら None で従来どおり）
+    notify = build_proactive_notifier(cfg)
 
     def loop() -> None:
         while not stopped.is_set():
             try:
                 run_sweep(cfg, session_getter=lambda t, u: tenants.store(
-                    t, u).get(DEFAULT_SESSION_ID))
+                    t, u).get(DEFAULT_SESSION_ID), notify=notify)
             except Exception:
                 pass  # 巡回の失敗は次回に回す
             stopped.wait(interval)

@@ -93,11 +93,17 @@ def _run_proactive(cfg: Config, tenant: str | None = None,
     tenant を指定するとそのテナント（配下の全ユーザー）だけ、user も
     指定するとその 1 ユーザーだけを対象にする。投稿した場合は対象と
     文面を表示し、投稿が無ければその旨を表示する。モデルも API キー
-    も要らない（発言文は用事の一覧から組み立てる）。
+    も要らない（発言文は用事の一覧から組み立てる）。Telegram が設定
+    されていれば、Web の巡回と同じく対象ユーザーの投稿は Telegram
+    へも届ける。
     """
     from .proactive import run_sweep
+    from .telegram import build_proactive_notifier
 
-    posted = run_sweep(cfg, tenant=tenant, user=user)
+    # Telegram が設定されていれば、対象ユーザーの投稿は Telegram
+    # へも届ける（未設定・無効化・許可リスト空なら通知は付かない）
+    posted = run_sweep(cfg, tenant=tenant, user=user,
+                       notify=build_proactive_notifier(cfg))
     if not posted:
         print("投稿する内容はありませんでした")
         return 0

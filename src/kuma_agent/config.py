@@ -148,6 +148,13 @@ class Config:
         default_factory=lambda: os.environ.get("KUMA_TELEGRAM_USER", "default"))
     telegram_allowed_chats: str = field(
         default_factory=lambda: os.environ.get("KUMA_TELEGRAM_ALLOWED_CHATS", ""))
+    # 能動発信の Telegram 配信（telegram.build_proactive_notifier）。
+    # 巡回が telegram_tenant / telegram_user の main の会話へ投稿した
+    # 内容（日報・リマインダー・定期ジョブの結果）を、許可リストの
+    # チャットへも送るかどうか。"0" で無効化し、それ以外（未設定を
+    # 含む）は有効。トークン未設定・許可リスト空なら有効でも送らない
+    telegram_proactive: bool = field(
+        default_factory=lambda: os.environ.get("KUMA_TELEGRAM_PROACTIVE", "") != "0")
     # Web UI のログイン（アクセス制御）。パスワードが未設定（空）なら
     # ログインは無効で、従来どおり認証なしで開く。設定したときだけ
     # Web UI 全体がパスワードで守られる（CLI / TUI は対象外）。

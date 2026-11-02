@@ -26,10 +26,17 @@ telegram_state.json に保存し、再起動で同じ更新を再処理しない
 Bot API の呼び出しは TelegramApi（httpx 実装）に閉じ込め、テストでは
 差し替えられるようにしてある。トークンは URL に含まれるため、例外の
 文面などにも出さないよう、失敗は一般的な文面で扱う。
+
+受信だけでなく、能動発信の配信も担う: 巡回（proactive）が
+KUMA_TELEGRAM_TENANT / KUMA_TELEGRAM_USER の指すユーザーの main の
+会話へ投稿した内容は、build_proactive_notifier が作る通知コール
+バック経由で許可リストのチャットへも送られる（KUMA_TELEGRAM_
+PROACTIVE=0 で無効化）。
 """
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -375,3 +382,56 @@ def run_polling(cfg: Config, model) -> None:
         poller.run_forever(log=print)
     except KeyboardInterrupt:
         print()
+
+
+# ---------------------------------------------------------------- 能動発信の配信
+
+def build_proactive_notifier(
+        cfg: Config, api: TelegramApi | None = None,
+) -> Callable[[str, str, str], None] | None:
+    """能動発信の投稿を Telegram へも届ける通知コールバックを作る。
+
+    巡回（proactive）は会話へ投稿するたびに (テナント名, ユーザー名,
+    文面) でこのコールバックを呼ぶ。届けるのは Config の
+    telegram_tenant / telegram_user が指すユーザーの投稿だけで、
+    許可リスト（telegram_allowed_chats）の全チャットへ、返信と同じ
+    分割（split_message）で送る。他のテナント／ユーザーの投稿は
+    送らない。
+
+    次のどれかに当てはまれば、通知自体が無いものとして None を返す
+    （巡回は従来どおり会話への投稿だけを行う）:
+    - Bot トークンが未設定（Telegram 機能が無効）
+    - 配信が無効化されている（KUMA_TELEGRAM_PROACTIVE=0）
+    - 許可リストが未設定・空（届け先が無い）
+
+    api はテスト用の差し替えで、省略時は httpx の実装を作る。送信に
+    失敗しても例外は上げない: 会話への投稿は巡回側で先に済んでおり、
+    失敗したチャットへは標準エラーへ短く出すだけで、再送もしない
+    （二重送信を避ける）。
+    """
+    if not cfg.telegram_bot_token or not cfg.telegram_proactive:
+        return None
+    allowed = sorted(parse_allowed_chats(cfg.telegram_allowed_chats))
+    if not allowed:
+        return None
+    if api is None:
+        api = HttpxTelegramApi(cfg.telegram_bot_token)
+    target = (normalize_tenant_name(cfg.telegram_tenant),
+              normalize_user_name(cfg.telegram_user))
+
+    def notify(tenant: str, user: str, text: str) -> None:
+        if (normalize_tenant_name(tenant),
+                normalize_user_name(user)) != target:
+            return  # Telegram の行き先以外のユーザーの投稿は送らない
+        for chat_id in allowed:
+            try:
+                for chunk in split_message(text):
+                    if chunk:
+                        api.send_message(chat_id, chunk)
+            except Exception:
+                # 1 チャットの失敗で他のチャットや巡回は止めない。
+                # 文面にはトークンや本文を含めない
+                print("Telegram への能動発信の配信に失敗しました"
+                      f"（chat id: {chat_id}）", file=sys.stderr)
+
+    return notify

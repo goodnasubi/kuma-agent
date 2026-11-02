@@ -144,6 +144,8 @@ Telegram の Bot（@BotFather で発行）を通じて会話できます。環�
 
 安全のため、会話を処理するのは `KUMA_TELEGRAM_ALLOWED_CHATS` に登録したチャットだけです。未登録のチャットには、登録に必要な chat id の案内だけが返ります。対象のテナント・ユーザーは `KUMA_TELEGRAM_TENANT` / `KUMA_TELEGRAM_USER` で指定します。今はテキストのみ対応です。
 
+また、能動発信（日報・リマインダー・定期ジョブの結果）は、対象ユーザーの分が許可リストのチャットにも届きます（`KUMA_TELEGRAM_PROACTIVE=0` で止められます）。
+
 ### 添付の渡し方
 
 添付できるのは画像（png / jpg / gif / webp）と文書（PDF、.txt /
@@ -183,6 +185,7 @@ Telegram の Bot（@BotFather で発行）を通じて会話できます。環�
 | `KUMA_TELEGRAM_BOT_TOKEN` | Telegram Bot のトークン | （未設定＝無効） |
 | `KUMA_TELEGRAM_ALLOWED_CHATS` | 会話を許可する chat id（カンマ区切り） | （無し＝処理しない） |
 | `KUMA_TELEGRAM_TENANT` / `KUMA_TELEGRAM_USER` | Telegram の会話の行き先 | `default` / `default` |
+| `KUMA_TELEGRAM_PROACTIVE` | 能動発信を Telegram にも届けるか（`0` で止める） | （届ける） |
 | `KUMA_WEB_PASSWORD` | Web UI のログインパスワード | （未設定＝ログインなし） |
 | `KUMA_WEB_SECURE_COOKIE` | ログイン Cookie に Secure を付けるか（`1` で有効） | （無効） |
 
