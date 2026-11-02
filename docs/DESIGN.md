@@ -585,6 +585,60 @@ Microsoft の Playwright MCP サーバーを `mcp.json` に登録する
   コンテナで使う場合はそれらを用意した環境が別途要る
   （将来課題）。
 
+### 実サービスの接続例（Google カレンダー）
+
+実サービスも専用の実装を持たず、MCP サーバーに任せる。
+Google カレンダーの MCP サーバー（`@cocal/google-calendar-mcp`、
+nspady の google-calendar-mcp の現在の npm 名）を `mcp.json`
+に登録し、OAuth 認証情報ファイルの場所を環境変数で渡す形で
+つなげることを 2026-11-02 に実証した。設定例（サーバー名は
+`gcal`、確認時の版は 2.8.1）:
+
+```json
+{"servers": [{"name": "gcal", "command": "npx",
+  "args": ["-y", "@cocal/google-calendar-mcp@2.8.1"],
+  "env": {"GOOGLE_OAUTH_CREDENTIALS": "</path/to/gcp-oauth.keys.json>"}}]}
+```
+
+- **実証内容**: 登録すると道具が 13 個出る
+  （`gcal__list-events`、`gcal__create-event`、
+  `gcal__delete-event`、`gcal__get-freebusy`、
+  `gcal__manage-accounts` など）。サーバーは従来方式の
+  ハンドシェイク（2025-11-25）で応答し、このクライアントで
+  問題なくつながった。認証情報ファイルがあれば（中身が
+  本物でなくても）サーバーは起動して道具一覧は出ることも
+  確認した。ただし実際に予定を読むには本物の認証が要り、
+  未認証で道具を呼ぶと認証を促すエラーが返る。
+- **利用者側の準備**: (1) Google Cloud Console でプロジェ
+  クトを作り、Google Calendar API を有効化し、OAuth
+  クライアント（デスクトップアプリ）を作成して
+  `gcp-oauth.keys.json` をダウンロードする。(2) そのファ
+  イルのパスを設定例のように `GOOGLE_OAUTH_CREDENTIALS`
+  で渡す。(3) 初回だけ
+  `npx @cocal/google-calendar-mcp auth` を一度実行して
+  ブラウザで Google にサインインする（道具
+  `gcal__manage-accounts` の add でもよい）。ここまで済むと
+  予定の読み書きができる。
+- **同意画面と 7 日失効**: OAuth 同意画面が「テスト」の
+  ままだと更新トークンは 7 日で失効する。継続して使うには
+  同意画面を公開（本番）にする。
+- **版の固定と初回の遅さ**: ブラウザ操作の小節と同じ注意
+  があてはまる。`@latest` ではなく版を固定し、初回は npx
+  のパッケージ取得で起動が遅く道具が一覧に出ないことが
+  あるため、一度手で実行して取得を済ませておくと安定する。
+- **秘密情報の置き場所**: `gcp-oauth.keys.json` とトークン
+  （サーバー側の既定で
+  `~/.config/google-calendar-mcp/tokens.json`）は認証情報
+  そのものである。運用者の管理下に置き、リポジトリや
+  データ置き場の共有範囲には含めない。
+- **承認**: MCP の道具なので、危険な操作の承認の仕組みが
+  そのまま効く。予定の作成・変更・削除も承認の対象になる
+  （実データを書き換える操作なので、安全上むしろ望ましい）。
+- **頭脳の範囲とコンテナ**: 道具が出るのは API 系の頭脳
+  だけ（MCP の既存仕様どおり）。kuma-agent の Docker
+  イメージには Node.js が入っていないため、コンテナでは
+  そのまま使えない（ブラウザ操作と同じ将来課題）。
+
 ## 承認（危険な操作の確認）
 
 危険な道具は、実行前に利用者の承認を挟む。承認の確認は
