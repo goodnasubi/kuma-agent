@@ -141,6 +141,13 @@ def test_web_quote_roundtrip_and_page_controls(tmp_path: Path):
     assert "quote-btn" in page and "pendingQuote" in page
 
 
+def test_message_buttons_sit_side_by_side():
+    """「引用」と「読み上げ」のボタンは横並び（inline-block）にする。"""
+    page = render_page("muse")
+    assert ".quote-btn, .speak-btn { display: inline-block;" in page
+    assert ".quote-btn { margin-right: 6px; }" in page
+
+
 def test_tui_quote_numbering_and_lookup():
     messages = [
         Message("user", "一つ目"),

@@ -208,9 +208,10 @@ _PAGE_TEMPLATE = """\
                  border-left: 3px solid currentColor; padding-left: 6px;
                  margin-bottom: 4px; }
   .msg .bodyText { display: block; }
-  .quote-btn, .speak-btn { display: block; margin-top: 6px; padding: 2px 8px;
+  .quote-btn, .speak-btn { display: inline-block; margin-top: 6px; padding: 2px 8px;
                font-size: 12px; background: transparent; color: inherit;
                border: 1px solid currentColor; border-radius: 999px; }
+  .quote-btn { margin-right: 6px; }
   #record.recording { background: #B3402A; color: #fff; border-color: #B3402A; }
   #recordStatus { font-size: 13px; align-self: center; }
   #recordStatus[hidden] { display: none; }
