@@ -115,6 +115,57 @@ def fallback_text(attachment: Attachment) -> str:
 
 
 @dataclass
+class Usage:
+    """1 回のモデル呼び出しの使用量（トークン数）を正規化した形。
+
+    頭脳ごとに API の応答に含まれる使用量の形式が違うため、各
+    クライアントがこの形にそろえて Message.usage に載せる。応答に
+    無い・読み取れない項目は None のままにする（会話記録とは別に、
+    usage.py が使用量の記録へ書き出すための情報）。
+    """
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+def _usage_int(value: object) -> int | None:
+    """使用量の値を整数として防御的に読む。数値でなければ None。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def normalize_usage(raw: object, input_key: str, output_key: str,
+                    total_key: str) -> Usage | None:
+    """頭脳の応答に含まれる使用量の辞書を Usage に正規化する。
+
+    raw が辞書でない・項目が 1 つも読み取れない場合は None（使用量
+    不明）を返す。合計だけが無く入力と出力がそろっている場合は、
+    合計をその和で補う（Claude の応答は合計を返さないため）。
+    想定外の形式でも例外は出さない（会話を壊さないことが優先）。
+    """
+    if not isinstance(raw, dict):
+        return None
+    usage = Usage(
+        input_tokens=_usage_int(raw.get(input_key)),
+        output_tokens=_usage_int(raw.get(output_key)),
+        total_tokens=_usage_int(raw.get(total_key)),
+    )
+    if (usage.total_tokens is None and usage.input_tokens is not None
+            and usage.output_tokens is not None):
+        usage.total_tokens = usage.input_tokens + usage.output_tokens
+    if (usage.input_tokens is None and usage.output_tokens is None
+            and usage.total_tokens is None):
+        return None
+    return usage
+
+
+@dataclass
 class Message:
     role: str  # "user" | "assistant" | "tool"
     content: str
@@ -123,6 +174,7 @@ class Message:
     tool_name: str | None = None  # role == "tool" のとき道具名（Gemini は名前で対応付ける）
     attachments: list[Attachment] = field(default_factory=list)  # 利用者の添付ファイル
     quote: str | None = None  # この発話が返信する過去の発話の本文
+    usage: Usage | None = None  # 応答した頭脳が返した使用量（assistant のみ、無ければ None）
 
 
 def truncate_quote(quote: str, limit: int = MAX_QUOTE_CHARS) -> str:
@@ -227,7 +279,8 @@ class MetaModelClient:
             ]
         resp = self._client.post("/chat/completions", json=payload)
         resp.raise_for_status()
-        data = resp.json()["choices"][0]["message"]
+        body = resp.json()
+        data = body["choices"][0]["message"]
         calls = []
         for c in data.get("tool_calls") or []:
             fn = c.get("function", {})
@@ -236,7 +289,10 @@ class MetaModelClient:
             except json.JSONDecodeError:
                 args = {}
             calls.append({"id": c.get("id", ""), "name": fn.get("name", ""), "args": args})
-        return Message("assistant", data.get("content") or "", tool_calls=calls)
+        usage = normalize_usage(body.get("usage"), "prompt_tokens",
+                                "completion_tokens", "total_tokens")
+        return Message("assistant", data.get("content") or "",
+                       tool_calls=calls, usage=usage)
 
 
 # ---------------------------------------------------------------- Claude
@@ -332,14 +388,17 @@ class AnthropicClient:
             ]
         resp = self._client.post("/v1/messages", json=payload)
         resp.raise_for_status()
+        body = resp.json()
         text, calls = "", []
-        for block in resp.json().get("content", []):
+        for block in body.get("content", []):
             if block.get("type") == "text":
                 text += block.get("text", "")
             elif block.get("type") == "tool_use":
                 calls.append({"id": block.get("id", ""), "name": block.get("name", ""),
                               "args": block.get("input", {})})
-        return Message("assistant", text, tool_calls=calls)
+        usage = normalize_usage(body.get("usage"), "input_tokens",
+                                "output_tokens", "total_tokens")
+        return Message("assistant", text, tool_calls=calls, usage=usage)
 
 
 # ---------------------------------------------------------------- Gemini
@@ -413,8 +472,9 @@ class GeminiClient:
             ]}]
         resp = self._client.post(f"/v1beta/models/{self.model}:generateContent", json=payload)
         resp.raise_for_status()
+        body = resp.json()
         text, calls = "", []
-        parts = resp.json()["candidates"][0]["content"].get("parts", [])
+        parts = body["candidates"][0]["content"].get("parts", [])
         for i, part in enumerate(parts):
             if "text" in part:
                 text += part["text"]
@@ -422,7 +482,9 @@ class GeminiClient:
                 fc = part["functionCall"]
                 calls.append({"id": f"gemini-{i}", "name": fc.get("name", ""),
                               "args": fc.get("args", {})})
-        return Message("assistant", text, tool_calls=calls)
+        usage = normalize_usage(body.get("usageMetadata"), "promptTokenCount",
+                                "candidatesTokenCount", "totalTokenCount")
+        return Message("assistant", text, tool_calls=calls, usage=usage)
 
 
 # ---------------------------------------------------------------- factory

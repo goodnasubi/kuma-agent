@@ -64,6 +64,7 @@ from .settings import (
     set_proactive_enabled,
 )
 from .tools import summarize_tool_args
+from .usage import summarize_usage
 
 # ブランド色（README のイメージカラー）
 HONEY = "#E79A3C"
@@ -170,6 +171,16 @@ _PAGE_TEMPLATE = """\
                margin-top: 8px; }
   .profileActions button { padding: 6px 16px; font-size: 14px; }
   #profileStatus { font-size: 13px; }
+  #usagePanel { background: #fff; border-bottom: 1px solid __HONEY__;
+                 padding: 12px 16px; }
+  #usagePanel[hidden] { display: none; }
+  #usagePanel h2 { font-size: 15px; margin: 0 0 8px; }
+  #usagePanel h3 { font-size: 14px; margin: 14px 0 4px; }
+  #usagePanel .usageTotal { font-size: 14px; margin: 0 0 4px; }
+  #usagePanel table { border-collapse: collapse; font-size: 14px; }
+  #usagePanel th, #usagePanel td { padding: 4px 10px 4px 0;
+               text-align: right; }
+  #usagePanel th:first-child, #usagePanel td:first-child { text-align: left; }
   .notifyRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
                padding: 6px 0; font-size: 14px; }
   .notifyRow .tname { min-width: 8em; }
@@ -264,6 +275,7 @@ _PAGE_TEMPLATE = """\
     <button id="tenantAdminBtn" type="button">テナント管理</button>
     <button id="outputsBtn" type="button">成果物</button>
     <button id="profileBtn" type="button">人格・記憶</button>
+    <button id="usageBtn" type="button">使用量</button>
     __LOGOUT_BUTTON__
   </div>
 </header>
@@ -280,6 +292,14 @@ _PAGE_TEMPLATE = """\
     <button id="profileSave" type="button">保存</button>
     <span id="profileStatus"></span>
   </div>
+</section>
+<section id="usagePanel" hidden>
+  <h2>使用量</h2>
+  <p class="usageTotal" id="usageTotal"></p>
+  <h3>頭脳別</h3>
+  <div id="usageProviderRows"></div>
+  <h3>日別（直近30日）</h3>
+  <div id="usageDayRows"></div>
 </section>
 <section id="tenantPanel" hidden>
   <h2>テナント管理</h2>
@@ -351,6 +371,11 @@ const outputsPanel = document.getElementById('outputsPanel');
 const outputRows = document.getElementById('outputRows');
 const profileBtn = document.getElementById('profileBtn');
 const profilePanel = document.getElementById('profilePanel');
+const usageBtn = document.getElementById('usageBtn');
+const usagePanel = document.getElementById('usagePanel');
+const usageTotal = document.getElementById('usageTotal');
+const usageProviderRows = document.getElementById('usageProviderRows');
+const usageDayRows = document.getElementById('usageDayRows');
 const profileTabs = document.getElementById('profileTabs');
 const profileText = document.getElementById('profileText');
 const profileSaveBtn = document.getElementById('profileSave');
@@ -686,6 +711,81 @@ profileBtn.addEventListener('click', () => {
   profilePanel.hidden = !profilePanel.hidden;
   if (!profilePanel.hidden) loadProfileFile(currentProfileFile);
 });
+
+// 使用量パネル。現在のテナント×ユーザーの頭脳の使用量（呼び出し
+// 回数とトークン数）を合計・頭脳別・日別で表示する。読み取りは
+// /api/usage を使い、パネルを開くたびに取り直す。費用への換算は
+// しない（単価が頭脳ごとに異なるため、トークン数だけを見せる）
+usageBtn.addEventListener('click', () => {
+  usagePanel.hidden = !usagePanel.hidden;
+  if (!usagePanel.hidden) loadUsage();
+});
+
+function formatCount(value) {
+  return (Number(value) || 0).toLocaleString('ja-JP');
+}
+
+function usageTokenCells(totals) {
+  // トークン数が記録されていない区分（CLI 系の頭脳など）は「—」
+  if (!totals.has_tokens) return ['—', '—', '—'];
+  return [formatCount(totals.input_tokens), formatCount(totals.output_tokens),
+          formatCount(totals.total_tokens)];
+}
+
+function usageTable(rows, firstHeader) {
+  const table = document.createElement('table');
+  const head = document.createElement('tr');
+  for (const label of [firstHeader, '呼び出し', '入力', '出力', '合計']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    head.appendChild(th);
+  }
+  table.appendChild(head);
+  for (const [label, totals] of rows) {
+    const tr = document.createElement('tr');
+    const name = document.createElement('td');
+    name.textContent = label;
+    tr.appendChild(name);
+    const calls = document.createElement('td');
+    calls.textContent = formatCount(totals.calls) + ' 回';
+    tr.appendChild(calls);
+    for (const text of usageTokenCells(totals)) {
+      const td = document.createElement('td');
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+  return table;
+}
+
+async function loadUsage() {
+  usageTotal.textContent = '';
+  usageProviderRows.innerHTML = '';
+  usageDayRows.innerHTML = '';
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser);
+    const res = await fetch('/api/usage' + query);
+    const data = await res.json();
+    if (!data.calls) {
+      usageTotal.textContent = '使用量の記録はまだありません';
+      return;
+    }
+    usageTotal.textContent = '呼び出し ' + formatCount(data.calls) + ' 回'
+      + (data.has_tokens
+        ? '、入力 ' + formatCount(data.input_tokens)
+          + '、出力 ' + formatCount(data.output_tokens)
+          + '、合計 ' + formatCount(data.total_tokens) + ' トークン'
+        : '（トークン数は記録されていません）');
+    usageProviderRows.appendChild(usageTable(
+      (data.by_provider || []).map((p) => [
+        p.provider + (p.model ? ' / ' + p.model : ''), p]), '頭脳'));
+    const days = (data.by_day || []).slice().reverse();
+    usageDayRows.appendChild(usageTable(
+      days.map((d) => [d.date, d]), '日付'));
+  } catch (e) { /* 取れなければパネルは空のままにする */ }
+}
 
 function renderProfileTabs() {
   profileTabs.innerHTML = '';
@@ -1731,6 +1831,20 @@ def _outputs_payload(tenants: TenantStore, tenant: str,
     return {"tenant": tenant, "user": user, "outputs": outputs}
 
 
+def _usage_payload(tenants: TenantStore, tenant: str,
+                   user: str) -> dict:
+    """使用量 API の応答（GET /api/usage）。
+
+    使用量の記録はユーザーごとの置き場（usage.jsonl）にあり、対象
+    は tenant / user で指した組み合わせ。集計（合計・頭脳／モデル
+    別・日別）は usage.summarize_usage が担う。費用への換算は
+    しない（単価が頭脳ごとに異なるため）。
+    """
+    summary = summarize_usage(
+        user_dir(tenant_dir(tenants.data_dir, tenant), user))
+    return {"tenant": tenant, "user": user, **summary.to_dict()}
+
+
 def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     """テナント設定 API の応答（GET / POST で共通の形）。
 
@@ -1897,6 +2011,13 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate):
                     200, _outputs_payload(tenants, tenant, user))
             elif split.path == "/api/outputs/download":
                 self._download_output(query)
+            elif split.path == "/api/usage":
+                tenant = normalize_tenant_name(
+                    _first(query.get("tenant")) or tenants.default_tenant)
+                user = normalize_user_name(
+                    _first(query.get("user")) or tenants.default_user)
+                self._send_json(
+                    200, _usage_payload(tenants, tenant, user))
             elif split.path == "/api/profile":
                 self._get_profile(query)
             elif split.path == "/api/history":

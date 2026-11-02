@@ -48,6 +48,7 @@ from .settings import approvals_enabled_for
 from .skills import load_skills
 from .tasks import TaskBoard, format_remind_at
 from .tools import Tool, ToolBox, activity_label
+from .usage import record_usage
 
 # 曜日（月曜始まり、datetime.weekday() の並び）
 _WEEKDAYS_JA = ("月", "火", "水", "木", "金", "土", "日")
@@ -94,6 +95,17 @@ _SUMMARY_SYSTEM = (
     "未完了の話題は残し、挨拶などの冗長な部分は省いてください。"
     "要約文だけを返してください。"
 )
+
+
+def _model_name(model: ChatModel) -> str:
+    """使用量の記録に載せるモデル名をクライアントから引く。
+
+    クライアントは実効モデル名を model 属性に持ち、未指定の場合は
+    クラス既定（DEFAULT_MODEL）を使う作りなので、その順に引く。
+    どちらも無い頭脳（テスト用のスタブ等）は空文字列にする。
+    """
+    name = getattr(model, "model", None) or getattr(model, "DEFAULT_MODEL", None)
+    return str(name) if name else ""
 
 
 def _message_text(msg: Message, include_quote: bool = False) -> str:
@@ -384,7 +396,7 @@ class Session:
                 self._notify(THINKING)
                 prompt = (f"{self.system_prompt}\n\n# 現在日時\n"
                           f"{current_time_text()}")
-                reply = self.model.chat(prompt, self.history, self.tools.schemas())
+                reply = self._call_model(prompt, self.history, self.tools.schemas())
                 self.history.append(reply)
                 if not reply.tool_calls:
                     self.memory.append_turn("assistant", reply.content)
@@ -495,5 +507,21 @@ class Session:
             elif msg.role == "tool":
                 lines.append(f"（道具の結果: {msg.content}）")
         prompt = Message("user", "\n".join(lines))
-        reply = self.model.chat(_SUMMARY_SYSTEM, [prompt], [])
+        reply = self._call_model(_SUMMARY_SYSTEM, [prompt], [])
         return reply.content.strip()
+
+    def _call_model(self, system_prompt: str, messages: list[Message],
+                    tools: list[dict]) -> Message:
+        """モデルを 1 回呼び、使用量を記録してから応答を返す。
+
+        使用量の記録（usage.record_usage）はこのユーザーへの帰属で、
+        委任の子セッションも自分の Session からここを通るため、子の
+        利用も同じユーザーに記録される（session_id で区別できる）。
+        記録は応答のたび（道具の往復で複数回呼ぶ場合は呼び出し
+        ごと）に行い、失敗しても会話には影響しない。
+        """
+        reply = self.model.chat(system_prompt, messages, tools)
+        record_usage(self.cfg.user_data_dir, self.cfg.provider,
+                     _model_name(self.model),
+                     getattr(reply, "usage", None), self.session_id)
+        return reply

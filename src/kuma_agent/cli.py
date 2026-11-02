@@ -175,6 +175,24 @@ def _run_outputs(cfg: Config) -> int:
     return 0
 
 
+def _run_usage(cfg: Config) -> int:
+    """頭脳の使用量の表示（運用者向けコマンドの本体）。
+
+    対象は cfg が指すテナント×ユーザーの置き場の記録（usage.jsonl）。
+    合計・頭脳別・日別（直近30日）をテキストで表示する。費用への
+    換算はしない（単価が頭脳ごとに異なるため）。モデルも API キー
+    も要らない（読み取り専用）。
+    """
+    from .usage import format_usage_summary, summarize_usage
+
+    summary = summarize_usage(cfg.user_data_dir)
+    if not summary.total.calls:
+        print("使用量の記録はまだありません")
+        return 0
+    print(format_usage_summary(summary))
+    return 0
+
+
 def _run_memory_tidy(cfg: Config, client, dry_run: bool = False) -> int:
     """長期記憶（MEMORY.md）の整理（運用者向けコマンドの本体）。
 
@@ -372,6 +390,11 @@ def main(argv: list[str] | None = None) -> int:
                                 help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
     outputs_parser.add_argument("--user", default=None,
                                 help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
+    usage_parser = sub.add_parser("usage", help="頭脳の使用量を表示する")
+    usage_parser.add_argument("--tenant", default=None,
+                              help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
+    usage_parser.add_argument("--user", default=None,
+                              help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     sub.add_parser(
         "telegram",
         help="Telegram からのメッセージを受けて会話する（単独実行）")
@@ -399,6 +422,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_jobs(cfg)
     if args.command == "outputs":  # 一覧表示もモデルも API キーも要らない
         return _run_outputs(cfg)
+    if args.command == "usage":  # 使用量の表示もモデルも API キーも要らない
+        return _run_usage(cfg)
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)
