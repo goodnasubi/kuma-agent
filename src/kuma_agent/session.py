@@ -33,7 +33,7 @@ from .config import Config, normalize_mode
 from .delegate import DELEGATE_NOTICE, run_delegated_task
 from .jobs import JobBoard
 from .llm import Attachment, ChatModel, GeminiClient, Message, quoted_content
-from .mcp_client import McpManager, get_shared_manager
+from .mcp_client import McpManager, get_shared_manager, resolve_config_dir
 from .memory import (
     DEFAULT_SESSION_ID,
     Memory,
@@ -184,12 +184,14 @@ class Session:
             chat_model=model,
             output_board=self.output_board)
         # MCP サーバーの道具を組み込み道具と並べて登録する。接続は
-        # データ置き場ルート単位で共有する（Web 経路でもテナントや
-        # 部屋ごとにサーバープロセスを複製しない）
+        # 実効の設定の置き場単位で共有する（テナントの置き場に
+        # mcp.json があればその置き場、無ければデータ置き場ルート。
+        # Web 経路でも部屋ごとにサーバープロセスを複製しない）
         self.mcp_manager = mcp_manager
         if self.mcp_manager is None and not cfg.is_cli_provider:
             self.mcp_manager = get_shared_manager(
-                cfg.data_dir, cfg.mcp_timeout_seconds)
+                resolve_config_dir(cfg.data_dir, self.tenant),
+                cfg.mcp_timeout_seconds)
         self._register_mcp_tools()
         # 承認の配線: テナント設定で承認が有効なら、ToolBox の承認
         # フックに _check_approval を差し込む。無効ならフック自体を

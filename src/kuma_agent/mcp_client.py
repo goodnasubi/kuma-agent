@@ -14,9 +14,12 @@ tools/list → tools/call。2026-07-28 版（いわゆる v2）のサーバー�
 サーバー起点のリクエスト（sampling 等）には対応せず、メソッド
 不明のエラーで返す。
 
-設定（mcp.json）は全テナント共通で、形式は
+設定（mcp.json）の形式は
 {"servers": [{"name": ..., "command": ..., "args": [...],
               "env": {"K": "V"}}]}。
+置き場はテナントごとに変えられる: テナントの置き場に mcp.json
+があれば、そのテナントはその設定だけを使い、無ければデータ
+置き場ルートの設定を使う（resolve_config_dir）。
 ファイルが無い・壊れている・項目が不正な場合は、そのサーバー
 （または全体）を無効として静かに動く（例外で落とさない）。
 
@@ -25,9 +28,9 @@ tools/list → tools/call。2026-07-28 版（いわゆる v2）のサーバー�
 
 プロセス管理:
 - サーバーは遅延起動（最初に道具一覧が必要になった時点で起動）
-  し、プロセスは使い回す。接続はデータ置き場ルート単位で共有
-  する（get_shared_manager）ため、Web 経路でもテナントや部屋
-  ごとに複製されない。
+  し、プロセスは使い回す。接続は実効の設定の置き場単位で共有
+  する（get_shared_manager）ため、Web 経路でも部屋ごとに複製
+  されず、別々の設定を使うテナント同士でサーバーが混ざらない。
 - 呼び出しはサーバーごとに直列化し、応答待ちにはタイムアウト
   （既定 60 秒、Config の KUMA_MCP_TIMEOUT_SECONDS）を付ける。
   タイムアウトやプロセス終了時はその道具を失敗として扱い、
@@ -44,6 +47,8 @@ import subprocess
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .memory import tenant_dir
 
 MCP_FILENAME = "mcp.json"
 
@@ -128,6 +133,26 @@ def load_server_configs(data_dir: Path) -> list[McpServerConfig]:
         seen.add(config.name)
         configs.append(config)
     return configs
+
+
+def resolve_config_dir(data_dir: Path, tenant: str | None) -> Path:
+    """テナントの実効の MCP 設定（mcp.json）の置き場を返す。
+
+    テナントの置き場に mcp.json があれば、そのテナントはその
+    設定だけを使う（ルートの設定とは混ぜない）ため、テナントの
+    置き場を返す。無ければ従来どおりデータ置き場ルートを返す。
+    既定テナントの置き場はルートそのものなので、結果は従来と
+    変わらない。テナント側のファイルが壊れている場合は、その
+    テナントでは道具が出ないだけ（ルート側には倒れない）。
+
+    どちらのファイルを使うかはこの呼び出し（セッション作成時）
+    に決まり、内容はマネージャ生成時に一度だけ読まれる。設定の
+    追加・変更を反映するには、実質プロセスの再起動が要る。
+    """
+    place = tenant_dir(data_dir, tenant)
+    if (place / MCP_FILENAME).is_file():
+        return place
+    return data_dir
 
 
 # ---------------------------------------------------------------- 接続
@@ -507,11 +532,15 @@ _atexit_registered = False
 def get_shared_manager(data_dir: Path,
                        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
                        ) -> McpManager:
-    """データ置き場ルート単位で共有するマネージャを返す。
+    """mcp.json の置き場単位で共有するマネージャを返す。
 
-    Web 経路でも CLI 経路でも、同じ置き場に対しては同じマネージャ
-    （＝同じサーバープロセス群）を使い回す。プロセス終了時の掃除は
-    atexit に登録する。タイムアウトは最初に作ったときの値が使われる。
+    引数の data_dir は設定の置き場（データ置き場ルート、または
+    テナント別設定を使うテナントの置き場。呼び出し側が
+    resolve_config_dir で決める）。Web 経路でも CLI 経路でも、
+    同じ置き場に対しては同じマネージャ（＝同じサーバープロセス
+    群）を使い回し、置き場が違えば別のマネージャになる。
+    プロセス終了時の掃除は atexit に登録する。タイムアウトは
+    最初に作ったときの値が使われる。
     """
     global _atexit_registered
     key = data_dir.resolve()
