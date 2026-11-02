@@ -12,6 +12,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from .notify_prefs import (
+    add_muted_topic,
+    load_notify_prefs,
+    remove_muted_topic,
+)
 from .tasks import format_remind_at
 
 if TYPE_CHECKING:
@@ -36,6 +41,9 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "write_memory": "記憶に書き留め中",
     "save_memory": "記憶に書き留め中",
     "search_memory": "記憶を検索中",
+    "set_notify_mute": "知らせ方の設定を更新中",
+    "clear_notify_mute": "知らせ方の設定を更新中",
+    "list_notify_prefs": "知らせ方の設定を確認中",
 }
 
 
@@ -133,6 +141,7 @@ class ToolBox:
         self._register_defaults()
         if task_board is not None:
             self._register_task_tools()
+            self._register_notify_tools()
         if memory is not None:
             self._register_memory_tools()
 
@@ -232,6 +241,78 @@ class ToolBox:
         if task is None:
             return f"error: 用事 #{id} が見つかりません"
         return f"更新しました: #{task.id} {task.title}（{task.status}）"
+
+    def _register_notify_tools(self) -> None:
+        # 知らせ方の好みは用事系と同じ条件（相棒モード）で出す。
+        # 好みの置き場は用事の一覧と同じユーザーの置き場
+        # （task_board.data_dir）にある notify_prefs.json
+        self.register(Tool(
+            "set_notify_mute",
+            "能動発信で知らせない話題の語を登録する。利用者が「その話題は"
+            "知らせないで」「○○のことは通知しないで」のように言ったら、"
+            "その話題を表す短い語を topic に入れて呼ぶこと。登録した語を"
+            "題名やメモに含む用事は、今後、能動発信（進行中の用事の"
+            "お知らせとリマインダー）で知らせなくなる。",
+            {"type": "object", "properties": {
+                "topic": {"type": "string",
+                          "description": "知らせない話題を表す語（例: 買い物）"}},
+             "required": ["topic"]},
+            self._set_notify_mute,
+        ))
+        self.register(Tool(
+            "clear_notify_mute",
+            "能動発信で知らせない話題の登録を外す。利用者が「やっぱり"
+            "○○も知らせて」のように言ったら、登録したときの語を topic "
+            "に入れて呼ぶこと。",
+            {"type": "object", "properties": {
+                "topic": {"type": "string",
+                          "description": "登録を外す語（登録したときの語）"}},
+             "required": ["topic"]},
+            self._clear_notify_mute,
+        ))
+        self.register(Tool(
+            "list_notify_prefs",
+            "能動発信の「知らせる・知らせない」の現在の設定を返す"
+            "（知らせない話題の一覧と静かな時間帯）。",
+            {"type": "object", "properties": {}},
+            self._list_notify_prefs,
+        ))
+
+    def _set_notify_mute(self, topic: str) -> str:
+        assert self.task_board is not None
+        topic = topic.strip()
+        if not topic:
+            return "error: 知らせない話題の語が空です"
+        add_muted_topic(self.task_board.data_dir, topic)
+        return f"登録しました: 「{topic}」を含む用事は今後知らせません"
+
+    def _clear_notify_mute(self, topic: str) -> str:
+        assert self.task_board is not None
+        topic = topic.strip()
+        if not topic:
+            return "error: 外す語が空です"
+        before = load_notify_prefs(self.task_board.data_dir)
+        if topic.casefold() not in {t.casefold() for t in before.muted_topics}:
+            return f"「{topic}」は知らせない設定になっていません"
+        remove_muted_topic(self.task_board.data_dir, topic)
+        return f"解除しました: 「{topic}」を含む用事も今後は知らせます"
+
+    def _list_notify_prefs(self) -> str:
+        assert self.task_board is not None
+        prefs = load_notify_prefs(self.task_board.data_dir)
+        lines = []
+        if prefs.muted_topics:
+            topics = "、".join(f"「{t}」" for t in prefs.muted_topics)
+            lines.append(f"知らせない話題: {topics}")
+        else:
+            lines.append("知らせない話題: （なし）")
+        if prefs.quiet_enabled:
+            lines.append(
+                f"静かな時間帯: {prefs.quiet_start}〜{prefs.quiet_end}"
+                "（この間は用事のお知らせを出しません）")
+        else:
+            lines.append("静かな時間帯: （なし）")
+        return "\n".join(lines)
 
     def _register_memory_tools(self) -> None:
         self.register(Tool(

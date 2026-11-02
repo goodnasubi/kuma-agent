@@ -35,8 +35,16 @@ from .memory import (
     retention_days_for,
     save_retention_override,
     tenant_dir,
+    user_dir,
 )
 from .mcp_client import close_shared_managers
+from .notify_prefs import (
+    add_muted_topic,
+    clear_quiet_hours,
+    load_notify_prefs,
+    remove_muted_topic,
+    set_quiet_hours,
+)
 from .proactive import run_sweep
 from .session import Session
 from .settings import (
@@ -107,6 +115,14 @@ _PAGE_TEMPLATE = """\
               font-size: 14px; }
   .adminNew input { padding: 6px; font-size: 13px; border-radius: 6px;
                border: 1px solid __COCOA__; }
+  #tenantPanel h3 { font-size: 14px; margin: 16px 0 4px;
+               border-top: 1px solid __HONEY__; padding-top: 12px; }
+  .notifyRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+               padding: 6px 0; font-size: 14px; }
+  .notifyRow .tname { min-width: 8em; }
+  .notifyRow button { padding: 4px 12px; font-size: 13px;
+               background: #fff; color: __COCOA__; border: 1px solid __COCOA__; }
+  .adminNew input[type="time"] { padding: 4px; }
   #approvalPanel { background: #fff; border-bottom: 2px solid __HONEY__;
                  padding: 12px 16px; }
   #approvalPanel[hidden] { display: none; }
@@ -199,6 +215,19 @@ _PAGE_TEMPLATE = """\
     <input id="adminNewTenant" placeholder="新しいテナント名" size="14">
     <button id="adminCreateTenant" type="button">テナントを作成</button>
   </div>
+  <h3>知らせ方の好み（現在のユーザー）</h3>
+  <div id="notifyMutedRows"></div>
+  <div class="adminNew">
+    <input id="notifyNewTopic" placeholder="知らせない話題" size="14">
+    <button id="notifyAddTopic" type="button">追加</button>
+  </div>
+  <div class="adminNew">
+    <label>静かな時間帯:
+      <input id="notifyQuietStart" type="time"> 〜
+      <input id="notifyQuietEnd" type="time"></label>
+    <button id="notifySaveQuiet" type="button">時間帯を保存</button>
+    <button id="notifyClearQuiet" type="button">時間帯を解除</button>
+  </div>
 </section>
 <section id="approvalPanel" hidden>
   <h2>承認の確認</h2>
@@ -245,6 +274,13 @@ const approvalPanel = document.getElementById('approvalPanel');
 const approvalRows = document.getElementById('approvalRows');
 const adminNewTenant = document.getElementById('adminNewTenant');
 const adminCreateTenant = document.getElementById('adminCreateTenant');
+const notifyMutedRows = document.getElementById('notifyMutedRows');
+const notifyNewTopic = document.getElementById('notifyNewTopic');
+const notifyAddTopic = document.getElementById('notifyAddTopic');
+const notifyQuietStart = document.getElementById('notifyQuietStart');
+const notifyQuietEnd = document.getElementById('notifyQuietEnd');
+const notifySaveQuiet = document.getElementById('notifySaveQuiet');
+const notifyClearQuiet = document.getElementById('notifyClearQuiet');
 const quoteBox = document.getElementById('quoteBox');
 const quoteText = document.getElementById('quoteText');
 const clearQuoteBtn = document.getElementById('clearQuote');
@@ -503,7 +539,99 @@ async function loadTenantAdmin() {
       tenantRows.appendChild(await buildTenantRow(name));
     }
   } catch (e) { /* 一覧が取れなければパネルは空のままにする */ }
+  loadNotifyPrefs();
 }
+
+// 知らせ方の好み（現在のテナント×ユーザー分）。ミュート一覧の
+// 表示・追加・削除と、静かな時間帯の入力・保存を扱う。読み書きは
+// /api/notify_prefs を使う
+async function postNotifyPrefs(body) {
+  const res = await fetch('/api/notify_prefs', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({tenant: currentTenant, user: currentUser, ...body}),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || '保存に失敗しました');
+  return data;
+}
+
+function renderNotifyPrefs(prefs) {
+  notifyMutedRows.innerHTML = '';
+  const topics = prefs.muted_topics || [];
+  if (!topics.length) {
+    const row = document.createElement('div');
+    row.className = 'notifyRow';
+    row.textContent = '知らせない話題はありません';
+    notifyMutedRows.appendChild(row);
+  }
+  for (const topic of topics) {
+    const row = document.createElement('div');
+    row.className = 'notifyRow';
+    const label = document.createElement('span');
+    label.className = 'tname';
+    label.textContent = topic;
+    row.appendChild(label);
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.textContent = '削除';
+    delBtn.addEventListener('click', async () => {
+      try {
+        renderNotifyPrefs(await postNotifyPrefs({remove_topic: topic}));
+      } catch (e) {
+        window.alert('削除に失敗しました: ' + (e.message || e));
+      }
+    });
+    row.appendChild(delBtn);
+    notifyMutedRows.appendChild(row);
+  }
+  notifyQuietStart.value = prefs.quiet_start || '';
+  notifyQuietEnd.value = prefs.quiet_end || '';
+}
+
+async function loadNotifyPrefs() {
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser);
+    const res = await fetch('/api/notify_prefs' + query);
+    renderNotifyPrefs(await res.json());
+  } catch (e) { /* 好みが取れなければ節は空のままにする */ }
+}
+
+notifyAddTopic.addEventListener('click', async () => {
+  const topic = notifyNewTopic.value.trim();
+  if (!topic) return;
+  try {
+    renderNotifyPrefs(await postNotifyPrefs({add_topic: topic}));
+    notifyNewTopic.value = '';
+  } catch (e) {
+    window.alert('追加に失敗しました: ' + (e.message || e));
+  }
+});
+
+notifySaveQuiet.addEventListener('click', async () => {
+  if (!notifyQuietStart.value || !notifyQuietEnd.value) {
+    window.alert('静かな時間帯は開始と終了の両方を入れてください');
+    return;
+  }
+  try {
+    renderNotifyPrefs(await postNotifyPrefs(
+      {quiet_start: notifyQuietStart.value,
+       quiet_end: notifyQuietEnd.value}));
+    window.alert('静かな時間帯を保存しました');
+  } catch (e) {
+    window.alert('保存に失敗しました: ' + (e.message || e));
+  }
+});
+
+notifyClearQuiet.addEventListener('click', async () => {
+  try {
+    renderNotifyPrefs(await postNotifyPrefs(
+      {quiet_start: null, quiet_end: null}));
+  } catch (e) {
+    window.alert('解除に失敗しました: ' + (e.message || e));
+  }
+});
 
 async function buildTenantRow(name) {
   const row = document.createElement('div');
@@ -1081,6 +1209,23 @@ class TenantStore:
         return self._cfg.retention_days
 
 
+def _notify_prefs_payload(tenants: TenantStore, tenant: str,
+                          user: str) -> dict:
+    """知らせ方の好み API の応答（GET / POST で共通の形）。
+
+    好みはユーザーごとの置き場（notify_prefs.json）にあり、対象は
+    tenant / user で指した組み合わせ。quiet_start / quiet_end は
+    静かな時間帯が有効なときだけ "HH:MM"、無ければ None。
+    """
+    prefs = load_notify_prefs(
+        user_dir(tenant_dir(tenants.data_dir, tenant), user))
+    payload = prefs.to_dict()
+    if not prefs.quiet_enabled:
+        payload["quiet_start"] = None
+        payload["quiet_end"] = None
+    return {"tenant": tenant, "user": user, **payload}
+
+
 def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     """テナント設定 API の応答（GET / POST で共通の形）。
 
@@ -1132,6 +1277,13 @@ def make_handler(tenants: TenantStore, page: str):
             elif split.path == "/api/tenant_settings":
                 name = normalize_tenant_name(_first(query.get("tenant")))
                 self._send_json(200, _tenant_settings_payload(tenants, name))
+            elif split.path == "/api/notify_prefs":
+                tenant = normalize_tenant_name(
+                    _first(query.get("tenant")) or tenants.default_tenant)
+                user = normalize_user_name(
+                    _first(query.get("user")) or tenants.default_user)
+                self._send_json(
+                    200, _notify_prefs_payload(tenants, tenant, user))
             elif split.path == "/api/users":
                 users = tenants.users(_first(query.get("tenant")))
                 self._send_json(200, {"users": users.names(),
@@ -1182,6 +1334,9 @@ def make_handler(tenants: TenantStore, page: str):
                 return
             if path == "/api/tenant_settings":
                 self._save_tenant_settings()
+                return
+            if path == "/api/notify_prefs":
+                self._save_notify_prefs()
                 return
             if path == "/api/tenants/create":
                 self._create_tenant()
@@ -1270,6 +1425,54 @@ def make_handler(tenants: TenantStore, page: str):
                     return
                 save_retention_override(tenants.data_dir, name, days)
             self._send_json(200, _tenant_settings_payload(tenants, name))
+
+        def _save_notify_prefs(self) -> None:
+            """知らせ方の好み（ミュートと静かな時間帯）を保存する。
+
+            対象は本文の tenant / user（無ければ起動時の組み合わせ）
+            のユーザーの置き場（notify_prefs.json）。渡された項目
+            だけを変更する:
+            - add_topic: 知らせない話題の語を 1 つ追加
+            - remove_topic: 知らせない話題の語を 1 つ削除
+            - quiet_start / quiet_end: 両方そろえて渡す。どちらも
+              "HH:MM" なら時間帯を設定し、どちらも null なら解除
+            保存後の最新の好みを返す。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            tenant = normalize_tenant_name(
+                data.get("tenant") or tenants.default_tenant)
+            user = normalize_user_name(data.get("user") or tenants.default_user)
+            target_dir = user_dir(tenant_dir(tenants.data_dir, tenant), user)
+            for key, func in (("add_topic", add_muted_topic),
+                              ("remove_topic", remove_muted_topic)):
+                if key in data:
+                    topic = data[key]
+                    if not isinstance(topic, str) or not topic.strip():
+                        self._send_json(400, {
+                            "error": f"{key} は空でない文字列で指定してください"})
+                        return
+                    func(target_dir, topic)
+            if "quiet_start" in data or "quiet_end" in data:
+                start, end = data.get("quiet_start"), data.get("quiet_end")
+                if start is None and end is None:
+                    clear_quiet_hours(target_dir)
+                elif isinstance(start, str) and isinstance(end, str):
+                    try:
+                        set_quiet_hours(target_dir, start, end)
+                    except ValueError:
+                        self._send_json(400, {
+                            "error": "時間帯は HH:MM 形式で指定してください"})
+                        return
+                else:
+                    self._send_json(400, {
+                        "error": "quiet_start と quiet_end は両方そろえて"
+                                 "指定してください（解除は両方 null）"})
+                    return
+            self._send_json(
+                200, _notify_prefs_payload(tenants, tenant, user))
 
         def _decide_approval(self) -> None:
             """保留中の承認（危険な道具の実行許可）を決定する。

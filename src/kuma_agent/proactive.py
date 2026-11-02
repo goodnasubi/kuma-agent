@@ -18,6 +18,15 @@
 4. 7 日以上 open のままの用事がある場合は、その注意喚起も日報の
    発言に含める（別発言を増やさない）
 
+加えて、利用者の「知らせる・知らせない」の好み（notify_prefs.json、
+notify_prefs.py）が効く:
+- ミュート: 題名＋メモにミュート語を含む用事は日報にも
+  リマインダーにも出さない。ミュートされたリマインダーは通知
+  済みの印を付けずに保留し、ミュートを外せば後で通知される
+- 静かな時間帯: その間は日報だけを出さない（投稿済みの記録も
+  消費しないため、時間帯が明ければその日の日報を出せる）。
+  リマインダーは時間帯でも出す
+
 つまり日報の投稿は 1 ユーザーにつき 1 日最大 1 回で、投稿済みの
 日付はユーザーの置き場に proactive_state.json として記録する。
 
@@ -46,6 +55,7 @@ from .memory import (
     normalize_user_name,
     tenant_dir,
 )
+from .notify_prefs import load_notify_prefs
 from .session import Session
 from .settings import proactive_enabled_for
 from .tasks import Task, TaskBoard
@@ -199,6 +209,11 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     user_data_dir = cfg.user_data_dir
     board = TaskBoard(user_data_dir)
     open_tasks = board.open_tasks()
+    # 「知らせる・知らせない」の好み: ミュートされた用事は日報にも
+    # リマインダーにも出さない（日報側は絞った一覧で組み立てる）
+    prefs = load_notify_prefs(user_data_dir)
+    visible_tasks = [task for task in open_tasks
+                     if not prefs.is_muted(task.title, task.memo)]
 
     posted: list[str] = []
     session: Session | None = None
@@ -214,8 +229,10 @@ def check_and_post(cfg: Config, now: datetime | None = None,
 
     # リマインダーは利用者が時刻を指定した依頼なので、日報の
     # 上限とは独立に、先に投稿する。投稿できたら通知済みを記録
-    # して二度と通知しない
-    due = due_reminders(open_tasks, now)
+    # して二度と通知しない。ミュートされた用事は印を付けずに
+    # 保留する（ミュートを外せば後の巡回で通知される）ため、
+    # visible_tasks から拾う
+    due = due_reminders(visible_tasks, now)
     if due:
         text = build_reminder_message(due)
         get_session().post_proactive_message(text)
@@ -223,10 +240,13 @@ def check_and_post(cfg: Config, now: datetime | None = None,
             board.mark_reminded(task.id)
         posted.append(text)
 
-    # 日報（1 日最大 1 回）
+    # 日報（1 日最大 1 回）。静かな時間帯の間は出さず、投稿済みの
+    # 記録も消費しない（時間帯が明けてからその日の分を出す）。
+    # 全件ミュートされた場合は言うべきことが無いので出さない
     today = now.date().isoformat()
-    if _last_posted_on(user_data_dir) != today and open_tasks:
-        text = build_message(open_tasks, now)
+    if (_last_posted_on(user_data_dir) != today and visible_tasks
+            and not prefs.in_quiet_hours(now)):
+        text = build_message(visible_tasks, now)
         get_session().post_proactive_message(text)
         _record_posted(user_data_dir, today)
         posted.append(text)
