@@ -5,15 +5,21 @@
 
 チェック条件（ユーザーごと）:
 1. そのテナントの設定で能動発信が OFF なら何もしない
-   （settings.json の proactive_enabled、既定は ON）
-2. 本日まだ投稿していなければ、進行中の用事（tasks.json の open な
-   用事）がある場合に、その一覧を伝える発言を 1 回だけ投稿する。
-   用事が無ければ投稿しない
-3. 7 日以上 open のままの用事がある場合は、その注意喚起も同じ
+   （settings.json の proactive_enabled、既定は ON）。
+   リマインダーもこの設定に従う
+2. リマインダー: open な用事で通知時刻（remind_at）が来ていて
+   未通知のものがあれば、その発言を投稿し、通知済み（reminded_at）
+   を記録する。利用者が時刻を指定した依頼なので、後述の
+   「1 日 1 回まで」の上限（日報）とは独立に発言する。
+   同じ巡回で両方立つ場合はリマインダーを先に投稿する
+3. 日報: 本日まだ投稿していなければ、進行中の用事（tasks.json の
+   open な用事）がある場合に、その一覧を伝える発言を 1 回だけ
+   投稿する。用事が無ければ投稿しない
+4. 7 日以上 open のままの用事がある場合は、その注意喚起も日報の
    発言に含める（別発言を増やさない）
 
-つまり投稿は 1 ユーザーにつき 1 日最大 1 回で、投稿済みの日付は
-ユーザーの置き場に proactive_state.json として記録する。
+つまり日報の投稿は 1 ユーザーにつき 1 日最大 1 回で、投稿済みの
+日付はユーザーの置き場に proactive_state.json として記録する。
 
 対象は相棒モード（ledger）の用事だけである。スレッドモード
 （wall）では用事の一覧を使わないため、結果として発言しない。
@@ -60,6 +66,18 @@ def _parse_time(raw: str) -> datetime | None:
         return datetime.fromisoformat(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _as_local_naive(moment: datetime) -> datetime:
+    """オフセット付き時刻をサーバーのローカル時刻（naive）にそろえる。
+
+    通知時刻（remind_at）はオフセットなしならローカル時刻として
+    解釈する取り決めで、オフセット付きで入ってきた場合も現在時刻
+    （naive なローカル時刻）と比較できるように変換する。
+    """
+    if moment.tzinfo is not None:
+        return moment.astimezone().replace(tzinfo=None)
+    return moment
 
 
 def _last_posted_on(user_data_dir: Path) -> str | None:
@@ -118,6 +136,37 @@ def build_message(open_tasks: list[Task], now: datetime) -> str:
     return "\n".join(lines)
 
 
+def due_reminders(open_tasks: list[Task], now: datetime) -> list[Task]:
+    """通知時刻が来ていて未通知の open な用事（時刻の早い順）。
+
+    通知時刻が読めない用事は対象から外す（壊れたデータで巡回を
+    落とさないため）。
+    """
+    due: list[tuple[datetime, Task]] = []
+    for task in open_tasks:
+        if not task.remind_at or task.reminded_at:
+            continue
+        when = _parse_time(task.remind_at)
+        if when is None:
+            continue
+        when = _as_local_naive(when)
+        if when <= now:
+            due.append((when, task))
+    due.sort(key=lambda pair: pair[0])
+    return [task for _when, task in due]
+
+
+def build_reminder_message(due_tasks: list[Task]) -> str:
+    """リマインダーの発言文を組み立てる（日報の文面に似せる）。"""
+    lines = [f"お知らせです。通知の時刻になった用事が "
+             f"{len(due_tasks)} 件あります。"]
+    for task in due_tasks[:MAX_TITLES]:
+        lines.append(f"・{task.title}")
+    if len(due_tasks) > MAX_TITLES:
+        lines.append(f"ほか {len(due_tasks) - MAX_TITLES} 件あります。")
+    return "\n".join(lines)
+
+
 class _UnusedModel:
     """能動発信の一時 Session 専用のモデル。
 
@@ -137,29 +186,54 @@ def check_and_post(cfg: Config, now: datetime | None = None,
 
     cfg は対象のテナント・ユーザーを指した Config。投稿の条件を
     満たさなければ何もせず None を返す（モジュール冒頭の条件を
-    参照）。session_provider は既存の Session を引くための関数で、
-    投稿すると決まったときだけ呼ばれる。無ければ一時的に Session を
-    作って追記し、破棄する。
+    参照）。リマインダーと日報の両方を投稿した場合は、文面を
+    改行でつないで返す。session_provider は既存の Session を引く
+    ための関数で、投稿すると決まったときだけ呼ばれる。無ければ
+    一時的に Session を作って追記し、破棄する。
     """
     now = now or datetime.now()
     if normalize_mode(cfg.mode) != "ledger":
         return None  # スレッドモードでは用事を使わないため発言しない
     if not proactive_enabled_for(cfg.data_dir, cfg.tenant):
-        return None
+        return None  # テナント OFF ならリマインダーも含め何もしない
     user_data_dir = cfg.user_data_dir
+    board = TaskBoard(user_data_dir)
+    open_tasks = board.open_tasks()
+
+    posted: list[str] = []
+    session: Session | None = None
+
+    def get_session() -> Session:
+        nonlocal session
+        if session is None:
+            session = (session_provider()
+                       if session_provider is not None else None)
+            if session is None:
+                session = Session(cfg, _UnusedModel())
+        return session
+
+    # リマインダーは利用者が時刻を指定した依頼なので、日報の
+    # 上限とは独立に、先に投稿する。投稿できたら通知済みを記録
+    # して二度と通知しない
+    due = due_reminders(open_tasks, now)
+    if due:
+        text = build_reminder_message(due)
+        get_session().post_proactive_message(text)
+        for task in due:
+            board.mark_reminded(task.id)
+        posted.append(text)
+
+    # 日報（1 日最大 1 回）
     today = now.date().isoformat()
-    if _last_posted_on(user_data_dir) == today:
-        return None  # 本日は投稿済み（1 日最大 1 回）
-    open_tasks = TaskBoard(user_data_dir).open_tasks()
-    if not open_tasks:
+    if _last_posted_on(user_data_dir) != today and open_tasks:
+        text = build_message(open_tasks, now)
+        get_session().post_proactive_message(text)
+        _record_posted(user_data_dir, today)
+        posted.append(text)
+
+    if not posted:
         return None  # 言うべきことが無い
-    text = build_message(open_tasks, now)
-    session = session_provider() if session_provider is not None else None
-    if session is None:
-        session = Session(cfg, _UnusedModel())
-    session.post_proactive_message(text)
-    _record_posted(user_data_dir, today)
-    return text
+    return "\n".join(posted)
 
 
 def run_sweep(cfg: Config, tenant: str | None = None,

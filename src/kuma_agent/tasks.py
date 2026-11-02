@@ -34,6 +34,25 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _check_remind_at(remind_at: str) -> None:
+    """通知時刻の文字列を検証する。空（未設定）はそのまま通す。"""
+    if remind_at and _parse_time(remind_at) is None:
+        raise ValueError(
+            "通知時刻は ISO 8601 形式で指定してください（例: 2026-11-03T09:00:00）")
+
+
+def format_remind_at(raw: str) -> str:
+    """通知時刻を表示用に整える（例: 11/3 9:00）。
+
+    読めない文字列はそのまま返す（手編集されたデータでも表示が
+    壊れないように）。
+    """
+    parsed = _parse_time(raw)
+    if parsed is None:
+        return raw
+    return f"{parsed.month}/{parsed.day} {parsed.hour}:{parsed.minute:02d}"
+
+
 @dataclass
 class Task:
     """用事の一覧の 1 件の用事。"""
@@ -43,6 +62,11 @@ class Task:
     memo: str = ""
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
+    # 通知時刻（リマインダー）。空文字列は未設定。オフセットなしの
+    # ISO 文字列はサーバーのローカル時刻として解釈する
+    remind_at: str = ""
+    # 通知済み時刻。空文字列は未通知。通知は 1 回だけにするために持つ
+    reminded_at: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -52,6 +76,8 @@ class Task:
             "memo": self.memo,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "remind_at": self.remind_at,
+            "reminded_at": self.reminded_at,
         }
 
     @classmethod
@@ -79,6 +105,8 @@ class Task:
             memo=str(record.get("memo") or ""),
             created_at=str(record.get("created_at") or _now()),
             updated_at=str(record.get("updated_at") or _now()),
+            remind_at=str(record.get("remind_at") or ""),
+            reminded_at=str(record.get("reminded_at") or ""),
         )
 
 
@@ -190,10 +218,12 @@ class TaskBoard:
             n += 1
         return str(n)
 
-    def add(self, title: str, memo: str = "") -> Task:
-        """用事を追加して保存する。"""
+    def add(self, title: str, memo: str = "", remind_at: str = "") -> Task:
+        """用事を追加して保存する。remind_at は通知時刻（ISO 8601）。"""
+        _check_remind_at(remind_at)
         self._tasks = self._load()  # 他のセッションの追加を消さないよう読み直す
-        task = Task(id=self._next_id(), title=title, memo=memo)
+        task = Task(id=self._next_id(), title=title, memo=memo,
+                    remind_at=remind_at)
         self._tasks.append(task)
         self._save()
         return task
@@ -205,8 +235,16 @@ class TaskBoard:
         return None
 
     def update(self, task_id: str, memo: str | None = None,
-               status: str | None = None) -> Task | None:
-        """メモや状態を更新して保存する。対象がなければ None。"""
+               status: str | None = None,
+               remind_at: str | None = None) -> Task | None:
+        """メモや状態、通知時刻を更新して保存する。対象がなければ None。
+
+        remind_at は None なら変更せず、文字列ならその時刻に設定し、
+        空文字列なら通知時刻を取り消す。通知時刻が実際に変わったら
+        通知済みの印は消す（新しい時刻で改めて通知できるように）。
+        """
+        if remind_at is not None:
+            _check_remind_at(remind_at)
         self._tasks = self._load()  # 追加と同じく、書き込み前に読み直す
         task = self.get(task_id)
         if task is None:
@@ -217,7 +255,25 @@ class TaskBoard:
             if status not in _STATUSES:
                 raise ValueError(f"状態は {' / '.join(_STATUSES)} のいずれかです")
             task.status = status
+        if remind_at is not None and remind_at != task.remind_at:
+            task.remind_at = remind_at
+            task.reminded_at = ""
         task.updated_at = _now()
+        self._save()
+        return task
+
+    def mark_reminded(self, task_id: str) -> Task | None:
+        """通知済みの印（reminded_at）を付けて保存する。対象がなければ None。
+
+        能動発信がリマインダーを発言した直後に呼び、同じ用事を
+        二度通知しないために使う。updated_at は用事自体の進み具合を
+        表すので触らない。
+        """
+        self._tasks = self._load()
+        task = self.get(task_id)
+        if task is None:
+            return None
+        task.reminded_at = _now()
         self._save()
         return task
 

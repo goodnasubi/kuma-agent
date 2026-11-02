@@ -24,6 +24,7 @@ tasks.json に置く。
 """
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -38,8 +39,29 @@ from .memory import (
     normalize_user_name,
 )
 from .persona import load_persona
-from .tasks import TaskBoard
+from .tasks import TaskBoard, format_remind_at
 from .tools import Tool, ToolBox, activity_label
+
+# 曜日（月曜始まり、datetime.weekday() の並び）
+_WEEKDAYS_JA = ("月", "火", "水", "木", "金", "土", "日")
+
+
+def current_time_text(now: datetime | None = None) -> str:
+    """モデルへ渡す現在日時の文（サーバーのローカル時刻、曜日つき）。
+
+    「明日9時に知らせて」のような相対指定を利用者が言ったとき、
+    モデルが絶対時刻（ISO 8601）に直せるよう、発話のたびに新しい
+    時刻をシステムプロンプトへ添える。
+    """
+    now = now or datetime.now()
+    iso = now.isoformat(timespec="seconds")
+    human = (f"{now.year}年{now.month}月{now.day}日"
+             f"（{_WEEKDAYS_JA[now.weekday()]}）"
+             f"{now.hour}:{now.minute:02d}")
+    return (f"現在日時は {iso}（{human}）です。"
+            "時刻はサーバーのローカル時刻です。"
+            "「明日」「来週月曜」のような指定はこの日時を基準に"
+            "絶対時刻へ直してください。")
 
 # 圧縮後の履歴の先頭に置く要約発話の見出し
 SUMMARY_PREFIX = "（これまでの会話の要約）"
@@ -156,6 +178,8 @@ class Session:
             line = f"- {task.title}"
             if task.memo:
                 line += f": {task.memo}"
+            if task.remind_at:
+                line += f"（{format_remind_at(task.remind_at)} に通知）"
             lines.append(line)
         return "\n".join(lines)
 
@@ -198,8 +222,12 @@ class Session:
         try:
             for _ in range(self.cfg.max_tool_rounds):
                 # モデルへの問い合わせ（CLI 系バックエンドもこの経路）
+                # 現在日時は発話のたびに新しいものを添える（リマインダーの
+                # 絶対時刻への変換に使う）
                 self._notify(THINKING)
-                reply = self.model.chat(self.system_prompt, self.history, self.tools.schemas())
+                prompt = (f"{self.system_prompt}\n\n# 現在日時\n"
+                          f"{current_time_text()}")
+                reply = self.model.chat(prompt, self.history, self.tools.schemas())
                 self.history.append(reply)
                 if not reply.tool_calls:
                     self.memory.append_turn("assistant", reply.content)

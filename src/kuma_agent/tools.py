@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from .tasks import format_remind_at
+
 if TYPE_CHECKING:
     from .tasks import Task, TaskBoard
 
@@ -111,21 +113,31 @@ class ToolBox:
             {"type": "object", "properties": {}},
             self._list_tasks,
         ))
+        remind_guidance = (
+            "利用者が「○時に知らせて」のように時刻を指定したら、remind_at に"
+            "その絶対時刻を ISO 8601 形式（例: 2026-11-03T09:00:00）で入れること。"
+            "現在日時はシステムプロンプトに示される。時刻の指定が無ければ入れない。"
+        )
         self.register(Tool(
-            "create_task", f"用事を用事の一覧に登録する。{guidance}",
+            "create_task",
+            f"用事を用事の一覧に登録する。{guidance}{remind_guidance}",
             {"type": "object", "properties": {
                 "title": {"type": "string"},
-                "memo": {"type": "string"}},
+                "memo": {"type": "string"},
+                "remind_at": {"type": "string",
+                               "description": "通知時刻（ISO 8601、例: 2026-11-03T09:00:00）。知らせる時刻の指定があるときだけ入れる"}},
              "required": ["title"]},
             self._create_task,
         ))
         self.register(Tool(
             "update_task",
-            f"記録した用事を更新する（メモの付け替え、終わったら status を done にする）。{guidance}",
+            f"記録した用事を更新する（メモの付け替え、終わったら status を done にする、通知時刻の付け替えは remind_at、取り消しは remind_at に空文字列）。{guidance}{remind_guidance}",
             {"type": "object", "properties": {
                 "id": {"type": "string"},
                 "memo": {"type": "string"},
-                "status": {"type": "string", "enum": ["open", "done"]}},
+                "status": {"type": "string", "enum": ["open", "done"]},
+                "remind_at": {"type": "string",
+                               "description": "通知時刻（ISO 8601）。省略すると変更しない。空文字列で取り消し"}},
              "required": ["id"]},
             self._update_task,
         ))
@@ -139,6 +151,8 @@ class ToolBox:
             if t.memo:
                 line += f": {t.memo}"
             line += f"（状態: {t.status}）"
+            if t.remind_at:
+                line += f"（{format_remind_at(t.remind_at)} に通知）"
             lines.append(line)
         return "\n".join(lines)
 
@@ -146,15 +160,18 @@ class ToolBox:
         assert self.task_board is not None
         return self._format_tasks(self.task_board.list())
 
-    def _create_task(self, title: str, memo: str = "") -> str:
+    def _create_task(self, title: str, memo: str = "",
+                     remind_at: str = "") -> str:
         assert self.task_board is not None
-        task = self.task_board.add(title, memo)
+        task = self.task_board.add(title, memo, remind_at=remind_at)
         return f"登録しました: #{task.id} {task.title}"
 
     def _update_task(self, id: str, memo: str | None = None,
-                     status: str | None = None) -> str:
+                     status: str | None = None,
+                     remind_at: str | None = None) -> str:
         assert self.task_board is not None
-        task = self.task_board.update(id, memo=memo, status=status)
+        task = self.task_board.update(id, memo=memo, status=status,
+                                      remind_at=remind_at)
         if task is None:
             return f"error: 用事 #{id} が見つかりません"
         return f"更新しました: #{task.id} {task.title}（{task.status}）"
