@@ -33,6 +33,16 @@ notify_prefs.py）が効く:
 対象は相棒モード（ledger）の用事だけである。スレッドモード
 （wall）では用事の一覧を使わないため、結果として発言しない。
 
+定期ジョブ（jobs.json）は巡回のもう 1 つの仕事で、用事とは扱いが
+違う（詳細は jobs.py と DESIGN.md の「定期ジョブ」節）:
+- テナントの設定で能動発信が OFF ならジョブも実行しない（上記 1 と
+  同じ条件）。モードは問わず動作し、静かな時間帯も適用しない
+  （時刻指定のリマインダーと同じ扱い）
+- 期限の来たジョブは委任の仕組み（delegate の子セッション）で
+  実行し、結果を main の会話へ「定期ジョブ「{title}」の結果です。」
+  の見出し付きで投稿する。実行したら成功・失敗にかかわらず
+  last_run_at を更新し、失敗時は短い失敗の知らせを投稿する
+
 投稿先は main の会話記録で、追記は Session が使う既存の保存経路
 （Memory.append_turn）を通す。発言には能動発信の印
 （proactive: true）を付けるが、読み込み側は role / content /
@@ -48,6 +58,8 @@ from pathlib import Path
 from typing import Callable
 
 from .config import Config, normalize_mode
+from .delegate import run_delegated_task
+from .jobs import Job, JobBoard, is_due
 from .memory import (
     list_tenant_names,
     list_user_names,
@@ -189,31 +201,97 @@ class _UnusedModel:
         raise RuntimeError("能動発信ではモデルを使いません")
 
 
+# ジョブの失敗の知らせに添える理由の上限（知らせ自体は短く保つ）
+_MAX_JOB_ERROR_CHARS = 200
+
+
+def build_job_result_message(job: Job, result: str) -> str:
+    """ジョブの実行結果から投稿文を組み立てる（成功時）。"""
+    body = result.strip()
+    heading = f"定期ジョブ「{job.title}」の結果です。"
+    return f"{heading}\n{body}" if body else heading
+
+
+def build_job_failure_message(job: Job, result: str) -> str:
+    """ジョブの失敗の知らせを組み立てる（短く、理由は切り詰める）。"""
+    detail = result.removeprefix("error:").strip()
+    text = f"定期ジョブ「{job.title}」の実行に失敗しました。"
+    if detail:
+        if len(detail) > _MAX_JOB_ERROR_CHARS:
+            detail = detail[:_MAX_JOB_ERROR_CHARS] + "…"
+        text += f"\n（{detail}）"
+    return text
+
+
+def run_due_jobs(cfg: Config, now: datetime, get_session: Callable[[], Session],
+                 job_executor: Callable[[Session, str], str] | None = None,
+                 ) -> list[str]:
+    """期限の来た定期ジョブを実行し、結果を main の会話へ投稿する。
+
+    get_session は投稿先（そのユーザーの main）の Session を引く
+    ための関数で、期限の来たジョブがあるときだけ呼ばれる。実行は
+    job_executor（親 Session と指示文を受けて結果を返す関数）で、
+    既定は委任の仕組み（delegate.run_delegated_task: 子セッションが
+    仕事をして最終応答を返す）。実行したら成功・失敗にかかわらず
+    last_run_at を実行時刻に更新する。実行の例外や error の結果は
+    失敗として扱い、短い失敗の知らせを投稿する。投稿した文面の
+    一覧を返す。
+    """
+    board = JobBoard(cfg.user_data_dir)
+    due = [job for job in board.list() if is_due(job, now)]
+    if not due:
+        return []
+    executor = job_executor if job_executor is not None else run_delegated_task
+    posted: list[str] = []
+    for job in due:
+        session = get_session()
+        if isinstance(session.model, _UnusedModel):
+            # モデルなしの一時 Session（CLI の proactive など）では
+            # ジョブを実行できない。失敗として消費せず、実行できる
+            # 経路（Web の巡回など）の巡回に委ねる
+            return posted
+        try:
+            result = executor(session, job.prompt)
+        except Exception as e:  # 実行の失敗で巡回全体は落とさない
+            result = f"error: {e}"
+        if not isinstance(result, str):
+            result = str(result)
+        if result.startswith("error:"):
+            text = build_job_failure_message(job, result)
+        else:
+            text = build_job_result_message(job, result)
+        try:
+            session.post_proactive_message(text)
+        finally:
+            # 投稿まで進んだら、成否にかかわらず実行済みを記録する
+            board.mark_run(job.id, now)
+        posted.append(text)
+    return posted
+
+
 def check_and_post(cfg: Config, now: datetime | None = None,
                    session_provider: Callable[[], Session] | None = None,
+                   job_executor: Callable[[Session, str], str] | None = None,
                    ) -> str | None:
     """1 テナント×1 ユーザー分をチェックし、投稿したら文面を返す。
 
     cfg は対象のテナント・ユーザーを指した Config。投稿の条件を
     満たさなければ何もせず None を返す（モジュール冒頭の条件を
-    参照）。リマインダーと日報の両方を投稿した場合は、文面を
-    改行でつないで返す。session_provider は既存の Session を引く
-    ための関数で、投稿すると決まったときだけ呼ばれる。無ければ
-    一時的に Session を作って追記し、破棄する。
+    参照）。定期ジョブ・リマインダー・日報のうち投稿したものが
+    複数ある場合は、文面を改行でつないで返す。session_provider は
+    既存の Session を引くための関数で、投稿すると決まったときだけ
+    呼ばれる。無ければ一時的に Session を作って追記し、破棄する。
+    job_executor は定期ジョブの実行関数の差し替え（テスト用）で、
+    既定は委任の仕組み（run_due_jobs を参照）。
+
+    定期ジョブはモードを問わず実行する。用事のリマインダーと日報
+    は従来どおり相棒モード（ledger）だけが対象で、スレッドモード
+    ではジョブの分だけを返す。
     """
     now = now or datetime.now()
-    if normalize_mode(cfg.mode) != "ledger":
-        return None  # スレッドモードでは用事を使わないため発言しない
     if not proactive_enabled_for(cfg.data_dir, cfg.tenant):
-        return None  # テナント OFF ならリマインダーも含め何もしない
+        return None  # テナント OFF ならジョブ・リマインダーとも何もしない
     user_data_dir = cfg.user_data_dir
-    board = TaskBoard(user_data_dir)
-    open_tasks = board.open_tasks()
-    # 「知らせる・知らせない」の好み: ミュートされた用事は日報にも
-    # リマインダーにも出さない（日報側は絞った一覧で組み立てる）
-    prefs = load_notify_prefs(user_data_dir)
-    visible_tasks = [task for task in open_tasks
-                     if not prefs.is_muted(task.title, task.memo)]
 
     posted: list[str] = []
     session: Session | None = None
@@ -226,6 +304,22 @@ def check_and_post(cfg: Config, now: datetime | None = None,
             if session is None:
                 session = Session(cfg, _UnusedModel())
         return session
+
+    # 定期ジョブは用事とは独立の仕組みで、モードも静かな時間帯も
+    # 問わず、期限が来ていれば先に実行して結果を投稿する
+    posted.extend(run_due_jobs(cfg, now, get_session,
+                               job_executor=job_executor))
+
+    if normalize_mode(cfg.mode) != "ledger":
+        # スレッドモードでは用事を使わないため、残りは発言しない
+        return "\n".join(posted) if posted else None
+    board = TaskBoard(user_data_dir)
+    open_tasks = board.open_tasks()
+    # 「知らせる・知らせない」の好み: ミュートされた用事は日報にも
+    # リマインダーにも出さない（日報側は絞った一覧で組み立てる）
+    prefs = load_notify_prefs(user_data_dir)
+    visible_tasks = [task for task in open_tasks
+                     if not prefs.is_muted(task.title, task.memo)]
 
     # リマインダーは利用者が時刻を指定した依頼なので、日報の
     # 上限とは独立に、先に投稿する。投稿できたら通知済みを記録
@@ -259,6 +353,7 @@ def check_and_post(cfg: Config, now: datetime | None = None,
 def run_sweep(cfg: Config, tenant: str | None = None,
               user: str | None = None, now: datetime | None = None,
               session_getter: Callable[[str, str], Session | None] | None = None,
+              job_executor: Callable[[Session, str], str] | None = None,
               ) -> list[tuple[str, str, str]]:
     """テナント×ユーザーを巡回して能動発信をチェックする。
 
@@ -270,7 +365,8 @@ def run_sweep(cfg: Config, tenant: str | None = None,
     session_getter は (テナント名, ユーザー名) から既存の Session を
     引くための関数で、投稿するときだけ呼ばれる（Web サーバーが保持
     している Session を使うため）。無ければ投稿のたびに一時 Session
-    を作る。
+    を作る。job_executor は定期ジョブの実行関数の差し替え
+    （check_and_post と同じ）。
     """
     posted: list[tuple[str, str, str]] = []
     tenant_names = ([normalize_tenant_name(tenant)] if tenant is not None
@@ -285,7 +381,8 @@ def run_sweep(cfg: Config, tenant: str | None = None,
             if session_getter is not None:
                 provider = (lambda getter=session_getter, t=tenant_name,
                             u=user_name: getter(t, u))
-            text = check_and_post(scoped, now=now, session_provider=provider)
+            text = check_and_post(scoped, now=now, session_provider=provider,
+                                  job_executor=job_executor)
             if text is not None:
                 posted.append((tenant_name, user_name, text))
     return posted

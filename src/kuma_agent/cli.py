@@ -124,6 +124,29 @@ def _run_telegram(cfg: Config, client) -> int:
     return 0
 
 
+def _run_jobs(cfg: Config) -> int:
+    """定期ジョブの一覧表示（運用者向けコマンドの本体）。
+
+    対象は cfg が指すテナント×ユーザーの置き場。各ジョブの名前・
+    予定・ON/OFF・前回実行と指示文を表示する。モデルも API キーも
+    要らない（読み取り専用）。
+    """
+    from .jobs import JobBoard, format_last_run, schedule_description
+
+    board = JobBoard(cfg.user_data_dir)
+    jobs = board.list()
+    if not jobs:
+        print("定期ジョブはありません")
+        return 0
+    for job in jobs:
+        state = "ON" if job.enabled else "OFF"
+        print(f"#{job.id} {job.title}"
+              f"（{schedule_description(job.schedule)}、{state}、"
+              f"前回実行: {format_last_run(job.last_run_at)}）")
+        print(f"  指示: {job.prompt}")
+    return 0
+
+
 def _run_memory_search(cfg: Config, query: str, limit: int = 5) -> int:
     """長期記憶（MEMORY.md）のキーワード検索（コマンドの本体）。
 
@@ -228,6 +251,11 @@ def main(argv: list[str] | None = None) -> int:
                                       help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     memory_search_parser.add_argument("--limit", type=int, default=5,
                                       help="表示する最大件数（既定: 5）")
+    jobs_parser = sub.add_parser("jobs", help="定期ジョブの一覧を表示する")
+    jobs_parser.add_argument("--tenant", default=None,
+                             help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
+    jobs_parser.add_argument("--user", default=None,
+                             help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     sub.add_parser(
         "telegram",
         help="Telegram からのメッセージを受けて会話する（単独実行）")
@@ -249,6 +277,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_proactive(cfg, tenant=args.tenant, user=args.user)
     if args.command == "memory-search":  # 記憶の検索もモデルも API キーも要らない
         return _run_memory_search(cfg, args.query, limit=args.limit)
+    if args.command == "jobs":  # 一覧表示もモデルも API キーも要らない
+        return _run_jobs(cfg)
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)

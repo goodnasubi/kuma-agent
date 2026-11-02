@@ -30,6 +30,7 @@ from typing import Callable
 
 from .config import Config, normalize_mode
 from .delegate import DELEGATE_NOTICE, run_delegated_task
+from .jobs import JobBoard
 from .llm import Attachment, ChatModel, Message, quoted_content
 from .mcp_client import McpManager, get_shared_manager
 from .memory import (
@@ -144,6 +145,9 @@ class Session:
         self.memory = Memory(data_dir, self.session_id)
         # 用事の一覧はユーザーごとに 1 つ（tasks.json）だけを使う
         self.task_board = TaskBoard(data_dir)
+        # 定期ジョブもユーザーごとに 1 つ（jobs.json）だけを使う。
+        # 用事系と違い、定期ジョブの道具はモードを問わず登録する
+        self.job_board = JobBoard(data_dir)
         # スレッドモードでは用事の一覧を無効にする: 道具に用事系を登録せず、
         # 進行中の用事もプロンプトへ注入しない。長期記憶の検索道具も
         # 用事系と同じ条件（相棒モードのときだけ）で出す。
@@ -154,7 +158,8 @@ class Session:
         self.tools = ToolBox(
             Path.cwd(), task_board=board,
             memory=None if self.mode == "wall" else self.memory,
-            data_dir=None if self.mode == "wall" else cfg.data_dir)
+            data_dir=None if self.mode == "wall" else cfg.data_dir,
+            job_board=self.job_board)
         # MCP サーバーの道具を組み込み道具と並べて登録する。接続は
         # データ置き場ルート単位で共有する（Web 経路でもテナントや
         # 部屋ごとにサーバープロセスを複製しない）

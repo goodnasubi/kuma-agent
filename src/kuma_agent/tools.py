@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from .jobs import build_schedule, format_last_run, schedule_description
 from .notify_prefs import (
     add_muted_topic,
     load_notify_prefs,
@@ -23,6 +24,7 @@ from .tasks import format_remind_at
 from .webtools import fetch_page, web_search
 
 if TYPE_CHECKING:
+    from .jobs import Job, JobBoard
     from .memory import Memory
     from .tasks import Task, TaskBoard
 
@@ -52,6 +54,10 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "set_notify_mute": "知らせ方の設定を更新中",
     "clear_notify_mute": "知らせ方の設定を更新中",
     "list_notify_prefs": "知らせ方の設定を確認中",
+    "create_job": "定期ジョブを記録中",
+    "list_jobs": "定期ジョブを確認中",
+    "delete_job": "定期ジョブを記録中",
+    "set_job_enabled": "定期ジョブを記録中",
 }
 
 
@@ -135,10 +141,15 @@ class Tool:
 class ToolBox:
     def __init__(self, work_dir: Path, task_board: TaskBoard | None = None,
                  memory: Memory | None = None,
-                 data_dir: Path | None = None) -> None:
+                 data_dir: Path | None = None,
+                 job_board: JobBoard | None = None) -> None:
         self.work_dir = work_dir.resolve()
         self.task_board = task_board
         self.memory = memory
+        # 定期ジョブの置き場（ユーザーごとの jobs.json）。用事系と
+        # 違い、定期ジョブの道具はモードを問わず登録するため、
+        # Session は常にこれを渡す。None の間は登録しない
+        self.job_board = job_board
         # 手順書（スキル）の置き場を解決するためのデータ置き場
         # ルート。手順書は全テナント共通で data_dir / skills に置く
         # ため、ユーザー置き場ではなくルートを受け取る。None の
@@ -160,6 +171,8 @@ class ToolBox:
             self._register_memory_tools()
         if data_dir is not None:
             self._register_skill_tools()
+        if job_board is not None:
+            self._register_job_tools()
 
     def _register_defaults(self) -> None:
         self.register(Tool(
@@ -359,6 +372,109 @@ class ToolBox:
         else:
             lines.append("静かな時間帯: （なし）")
         return "\n".join(lines)
+
+    def _register_job_tools(self) -> None:
+        # 定期ジョブの道具はモードを問わず登録する（置き場は
+        # ユーザーごとの jobs.json）。予定の組み立てと検証は
+        # jobs.build_schedule に寄せ、不正な組み合わせは error で返す
+        self.register(Tool(
+            "create_job",
+            "定期ジョブを登録する。決まった予定で指示文（prompt）を"
+            "自動実行し、結果が会話に届く。kind は daily（毎日）/"
+            "weekly（毎週）/ interval（間隔）のいずれか。daily は "
+            "time（HH:MM）、weekly は time と weekday（月曜=0 〜 "
+            "日曜=6）、interval は hours（何時間ごと）が必要で、"
+            "種別に合わない項目を一緒に渡すとエラーになる。",
+            {"type": "object", "properties": {
+                "title": {"type": "string",
+                          "description": "定期ジョブの名前"},
+                "prompt": {"type": "string",
+                           "description": "実行する指示文"},
+                "kind": {"type": "string",
+                         "enum": ["daily", "weekly", "interval"],
+                         "description": "予定の種別"},
+                "time": {"type": "string",
+                         "description": "時刻（HH:MM、daily / weekly 用）"},
+                "weekday": {"type": "integer",
+                            "description": "曜日（月曜=0 〜 日曜=6、weekly 用）"},
+                "hours": {"type": "integer",
+                          "description": "間隔（時間、interval 用）"}},
+             "required": ["title", "prompt", "kind"]},
+            self._create_job,
+        ))
+        self.register(Tool(
+            "list_jobs",
+            "登録した定期ジョブを、予定・ON/OFF・前回実行付きですべて返す。",
+            {"type": "object", "properties": {}},
+            self._list_jobs,
+        ))
+        self.register(Tool(
+            "delete_job",
+            "定期ジョブを削除する。job には名前または ID を入れること。",
+            {"type": "object", "properties": {
+                "job": {"type": "string",
+                        "description": "削除する定期ジョブの名前または ID"}},
+             "required": ["job"]},
+            self._delete_job,
+        ))
+        self.register(Tool(
+            "set_job_enabled",
+            "定期ジョブの ON/OFF を切り替える。job には名前または "
+            "ID を、enabled には有効にするかどうかを入れること。",
+            {"type": "object", "properties": {
+                "job": {"type": "string",
+                        "description": "切り替える定期ジョブの名前または ID"},
+                "enabled": {"type": "boolean",
+                            "description": "有効にするなら true、止めるなら false"}},
+             "required": ["job", "enabled"]},
+            self._set_job_enabled,
+        ))
+
+    def _create_job(self, title: str, prompt: str, kind: str,
+                    time: str | None = None, weekday: int | None = None,
+                    hours: int | None = None) -> str:
+        assert self.job_board is not None
+        try:
+            schedule = build_schedule(kind, time, weekday, hours)
+            job = self.job_board.add(title, prompt, schedule)
+        except ValueError as e:
+            return f"error: {e}"
+        return (f"登録しました: #{job.id} {job.title}"
+                f"（{schedule_description(job.schedule)}）")
+
+    def _format_jobs(self, jobs: list[Job]) -> str:
+        if not jobs:
+            return "（定期ジョブはありません）"
+        lines = []
+        for job in jobs:
+            state = "ON" if job.enabled else "OFF"
+            lines.append(
+                f"#{job.id} {job.title}"
+                f"（{schedule_description(job.schedule)}、{state}、"
+                f"前回実行: {format_last_run(job.last_run_at)}）")
+            lines.append(f"  指示: {job.prompt}")
+        return "\n".join(lines)
+
+    def _list_jobs(self) -> str:
+        assert self.job_board is not None
+        return self._format_jobs(self.job_board.list())
+
+    def _delete_job(self, job: str) -> str:
+        assert self.job_board is not None
+        removed = self.job_board.delete(job)
+        if removed is None:
+            return f"error: 定期ジョブ「{job}」が見つかりません"
+        return f"削除しました: #{removed.id} {removed.title}"
+
+    def _set_job_enabled(self, job: str, enabled: bool) -> str:
+        assert self.job_board is not None
+        if not isinstance(enabled, bool):
+            return "error: enabled は true / false で指定してください"
+        updated = self.job_board.set_enabled(job, enabled)
+        if updated is None:
+            return f"error: 定期ジョブ「{job}」が見つかりません"
+        state = "ON" if updated.enabled else "OFF"
+        return f"更新しました: #{updated.id} {updated.title}（{state}）"
 
     def _register_memory_tools(self) -> None:
         self.register(Tool(
