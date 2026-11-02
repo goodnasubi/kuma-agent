@@ -43,6 +43,13 @@ notify_prefs.py）が効く:
   の見出し付きで投稿する。実行したら成功・失敗にかかわらず
   last_run_at を更新し、失敗時は短い失敗の知らせを投稿する
 
+巡回にはもう 1 つ、発言を伴わない仕事がある: 長期記憶の自動の
+機械的除去（memory_tidy.auto_tidy_memory）。ユーザーの
+MEMORY.md が大きい（全文注入の上限の 3 倍超）場合だけ、1 日
+1 回まで重複除去を自動適用する。モデル統合は自動では行わず、
+適用しても会話へ投稿はしない。実施日はユーザーの置き場の
+memory_tidy_state.json に記録する。
+
 投稿先は main の会話記録で、追記は Session が使う既存の保存経路
 （Memory.append_turn）を通す。発言には能動発信の印
 （proactive: true）を付けるが、読み込み側は role / content /
@@ -67,6 +74,7 @@ from .memory import (
     normalize_user_name,
     tenant_dir,
 )
+from .memory_tidy import auto_tidy_memory
 from .notify_prefs import load_notify_prefs
 from .session import Session
 from .settings import proactive_enabled_for
@@ -292,6 +300,17 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     if not proactive_enabled_for(cfg.data_dir, cfg.tenant):
         return None  # テナント OFF ならジョブ・リマインダーとも何もしない
     user_data_dir = cfg.user_data_dir
+
+    # 長期記憶の自動の機械的除去（memory_tidy）: 記憶が大きい
+    # （全文注入の上限の 3 倍超）ユーザーだけ、1 日 1 回まで重複
+    # 除去を自動適用する。モデル統合は自動では行わず、適用して
+    # も会話へは投稿しない。失敗しても巡回自体は続ける。テナント
+    # の能動発信が OFF のときは、この巡回の一部として行わない
+    try:
+        auto_tidy_memory(user_data_dir, cfg.memory_full_inject_chars,
+                         now=now)
+    except Exception:
+        pass  # 整理の失敗で巡回全体は落とさない
 
     posted: list[str] = []
     session: Session | None = None

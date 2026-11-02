@@ -159,7 +159,8 @@ class Session:
             Path.cwd(), task_board=board,
             memory=None if self.mode == "wall" else self.memory,
             data_dir=None if self.mode == "wall" else cfg.data_dir,
-            job_board=self.job_board)
+            job_board=self.job_board,
+            chat_model=model)
         # MCP サーバーの道具を組み込み道具と並べて登録する。接続は
         # データ置き場ルート単位で共有する（Web 経路でもテナントや
         # 部屋ごとにサーバープロセスを複製しない）

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from .jobs import build_schedule, format_last_run, schedule_description
+from .memory_tidy import line_count, tidy_memory_with_model
 from .notify_prefs import (
     add_muted_topic,
     load_notify_prefs,
@@ -25,6 +26,7 @@ from .webtools import fetch_page, web_search
 
 if TYPE_CHECKING:
     from .jobs import Job, JobBoard
+    from .llm import ChatModel
     from .memory import Memory
     from .tasks import Task, TaskBoard
 
@@ -48,6 +50,7 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "write_memory": "記憶に書き留め中",
     "save_memory": "記憶に書き留め中",
     "search_memory": "記憶を検索中",
+    "tidy_memory": "長期記憶を整理中",
     "read_skill": "手順書を読んでいます",
     "save_skill": "手順書を書き留め中",
     "delegate": "別のエージェントに作業を頼んでいます",
@@ -142,10 +145,15 @@ class ToolBox:
     def __init__(self, work_dir: Path, task_board: TaskBoard | None = None,
                  memory: Memory | None = None,
                  data_dir: Path | None = None,
-                 job_board: JobBoard | None = None) -> None:
+                 job_board: JobBoard | None = None,
+                 chat_model: ChatModel | None = None) -> None:
         self.work_dir = work_dir.resolve()
         self.task_board = task_board
         self.memory = memory
+        # 長期記憶の整理（tidy_memory 道具）で使う頭脳。道具なしの
+        # 単発 chat で記憶の統合をさせるため、Session が自分の
+        # モデルを渡す。None の間は tidy_memory を登録しない
+        self.chat_model = chat_model
         # 定期ジョブの置き場（ユーザーごとの jobs.json）。用事系と
         # 違い、定期ジョブの道具はモードを問わず登録するため、
         # Session は常にこれを渡す。None の間は登録しない
@@ -477,6 +485,7 @@ class ToolBox:
         return f"更新しました: #{updated.id} {updated.title}（{state}）"
 
     def _register_memory_tools(self) -> None:
+        self._register_tidy_tool()
         self.register(Tool(
             "search_memory",
             "長期記憶（MEMORY.md）をキーワードで検索する。プロンプトに"
@@ -499,6 +508,43 @@ class ToolBox:
             return "見つかりませんでした"
         return "\n".join(
             f"（MEMORY.md の {hit.line} 行目）{hit.text}" for hit in hits)
+
+    def _register_tidy_tool(self) -> None:
+        # 記憶の整理はモデル統合まで行うため、頭脳（chat_model）が
+        # 渡されている場合だけ登録する。出す条件は他の記憶系の
+        # 道具と同じ（_register_memory_tools から呼ばれる）
+        if self.chat_model is None:
+            return
+        self.register(Tool(
+            "tidy_memory",
+            "長期記憶（MEMORY.md）を整理する。重複した項目を除き、"
+            "関連する項目を統合して全文を書き直す。書き換え前に"
+            "バックアップ（MEMORY.md.bak-<日時>）を残す。長期記憶が"
+            "育って重複や古い言い回しが目立ってきたとき、または"
+            "利用者に頼まれたときに使う。",
+            {"type": "object", "properties": {}},
+            self._tidy_memory,
+        ))
+
+    def _tidy_memory(self) -> str:
+        assert self.memory is not None
+        assert self.chat_model is not None
+        try:
+            result = tidy_memory_with_model(self.memory, self.chat_model)
+        except Exception as e:  # 整理の失敗で会話は落とさない
+            return f"error: 長期記憶の整理に失敗しました: {e}"
+        if result.reason == "empty":
+            return "長期記憶がありません"
+        if result.reason == "model_failed":
+            return ("error: モデルによる統合に失敗したため、"
+                    "長期記憶は変更していません")
+        before = result.before_lines
+        after = line_count(result.final_text) if result.final_text else before
+        if not result.applied:
+            return f"{before}行→{after}行で、変更はありませんでした"
+        backup_name = result.backup_path.name if result.backup_path else ""
+        return (f"{before}行→{after}行に整理しました"
+                f"（バックアップ: {backup_name}）")
 
     def _register_skill_tools(self) -> None:
         self.register(Tool(

@@ -147,6 +147,54 @@ def _run_jobs(cfg: Config) -> int:
     return 0
 
 
+def _run_memory_tidy(cfg: Config, client, dry_run: bool = False) -> int:
+    """長期記憶（MEMORY.md）の整理（運用者向けコマンドの本体）。
+
+    対象は cfg が指すテナント×ユーザーの置き場。機械的な重複
+    除去→モデル統合の順で整理する（モデルが要るため API キー
+    必須のコマンドとして配置し、--dry-run でも同様）。
+    --dry-run では本体を変更せず、提案を MEMORY.md.proposed に
+    書き出して差分行数だけを表示する。通常実行ではバックアップ
+    先と前後の行数を表示する。記憶が無い場合は何もしない
+    （エラーにはしない）。
+    """
+    import difflib
+
+    from .memory_tidy import propose_memory_tidy, tidy_memory_with_model
+
+    memory = Memory(cfg.user_data_dir)
+    original = memory.load_long_term()
+    if not original.strip():
+        print("整理する長期記憶がありません")
+        return 0
+    if dry_run:
+        result = propose_memory_tidy(memory, client)
+        if result.reason == "model_failed":
+            print("モデルによる統合に失敗したため、提案は作りませんでした"
+                  "（MEMORY.md は変更していません）")
+            return 0
+        diff_lines = sum(
+            1 for line in difflib.unified_diff(
+                original.splitlines(), result.final_text.splitlines(),
+                lineterm="")
+            if line[:1] in "+-" and not line.startswith(("+++", "---")))
+        print(f"現在の長期記憶: {result.before_lines} 行")
+        print(f"提案: {result.after_lines} 行（差分 {diff_lines} 行）")
+        print(f"提案を書き出しました: {result.proposed_path}"
+              "（MEMORY.md 本体は変更していません）")
+        return 0
+    result = tidy_memory_with_model(memory, client)
+    if result.reason == "model_failed":
+        print("モデルによる統合に失敗したため、長期記憶は変更していません")
+        return 0
+    if not result.applied:
+        print(f"変更はありませんでした（{result.before_lines} 行）")
+        return 0
+    print(f"バックアップ: {result.backup_path}")
+    print(f"{result.before_lines} 行 → {result.after_lines} 行に整理しました")
+    return 0
+
+
 def _run_memory_search(cfg: Config, query: str, limit: int = 5) -> int:
     """長期記憶（MEMORY.md）のキーワード検索（コマンドの本体）。
 
@@ -251,6 +299,14 @@ def main(argv: list[str] | None = None) -> int:
                                       help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     memory_search_parser.add_argument("--limit", type=int, default=5,
                                       help="表示する最大件数（既定: 5）")
+    memory_tidy_parser = sub.add_parser(
+        "memory-tidy", help="長期記憶（MEMORY.md）を整理する")
+    memory_tidy_parser.add_argument("--tenant", default=None,
+                                    help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
+    memory_tidy_parser.add_argument("--user", default=None,
+                                    help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
+    memory_tidy_parser.add_argument("--dry-run", action="store_true",
+                                    help="本体を変更せず、提案を MEMORY.md.proposed に書き出す")
     jobs_parser = sub.add_parser("jobs", help="定期ジョブの一覧を表示する")
     jobs_parser.add_argument("--tenant", default=None,
                              help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
@@ -285,6 +341,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     client = create_client(cfg.provider, api_key, cfg.model)
 
+    if args.command == "memory-tidy":  # モデル統合が要るため API キー必須
+        return _run_memory_tidy(cfg, client, dry_run=args.dry_run)
     if args.command == "web":
         from .web import serve
 
