@@ -134,6 +134,20 @@ class Config:
     # __post_init__ で既定値（600）として扱う
     delegate_timeout_seconds: int = field(
         default_factory=lambda: _env_int("KUMA_DELEGATE_TIMEOUT_SECONDS", 600))
+    # Telegram 接続（telegram.py）。Bot トークンが未設定なら機能は
+    # 無効。telegram_tenant / telegram_user は、届いたメッセージを
+    # 処理するテナントとユーザー（CLI / Web の起動時指定とは別の、
+    # Telegram 経路専用の行き先）。telegram_allowed_chats は会話を
+    # 許可する chat id のカンマ区切りで、未設定・空のときは会話を
+    # 処理しない（chat id を知らせる案内だけを返す）
+    telegram_bot_token: str = field(
+        default_factory=lambda: os.environ.get("KUMA_TELEGRAM_BOT_TOKEN", ""))
+    telegram_tenant: str = field(
+        default_factory=lambda: os.environ.get("KUMA_TELEGRAM_TENANT", "default"))
+    telegram_user: str = field(
+        default_factory=lambda: os.environ.get("KUMA_TELEGRAM_USER", "default"))
+    telegram_allowed_chats: str = field(
+        default_factory=lambda: os.environ.get("KUMA_TELEGRAM_ALLOWED_CHATS", ""))
 
     @property
     def tenant_data_dir(self) -> Path:

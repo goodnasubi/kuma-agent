@@ -47,6 +47,7 @@ from .notify_prefs import (
 )
 from .proactive import run_sweep
 from .session import Session
+from .telegram import start_polling_thread as start_telegram_polling
 from .settings import (
     approvals_enabled_for,
     proactive_enabled_for,
@@ -1616,6 +1617,10 @@ def serve(session: Session, host: str = "127.0.0.1", port: int = 8765) -> None:
               f"完了した用事 {result.tasks_removed} 件")
     server = build_server(session, host, port)
     _start_proactive_loop(server.tenants, cfg)  # type: ignore[attr-defined]
+    # Telegram のトークンが設定されていれば、裏側スレッドで受信も始める
+    # （未設定なら何もしない。Telegram 用の Session は承認者なしで作る）
+    if start_telegram_polling(cfg, session.model) is not None:
+        print("Telegram の受信を開始しました")
     print(f"クマの Web UI: http://{host}:{server.server_address[1]} （終了は Ctrl-C）")
     try:
         server.serve_forever()

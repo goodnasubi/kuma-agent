@@ -106,6 +106,24 @@ def _run_proactive(cfg: Config, tenant: str | None = None,
     return 0
 
 
+def _run_telegram(cfg: Config, client) -> int:
+    """Telegram のポーリングを単独実行する（コマンドの本体）。
+
+    Web UI なしで Telegram から会話できるようにする経路。トークンが
+    未設定ならその旨を伝えて終わる（終了コード 2）。対象のテナント×
+    ユーザーは Config の telegram_tenant / telegram_user
+    （環境変数 KUMA_TELEGRAM_TENANT / KUMA_TELEGRAM_USER）で決まる。
+    """
+    if not cfg.telegram_bot_token:
+        print("Telegram の Bot トークンが未設定です"
+              "（環境変数 KUMA_TELEGRAM_BOT_TOKEN）", file=sys.stderr)
+        return 2
+    from .telegram import run_polling
+
+    run_polling(cfg, client)
+    return 0
+
+
 def _run_memory_search(cfg: Config, query: str, limit: int = 5) -> int:
     """長期記憶（MEMORY.md）のキーワード検索（コマンドの本体）。
 
@@ -210,6 +228,9 @@ def main(argv: list[str] | None = None) -> int:
                                       help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     memory_search_parser.add_argument("--limit", type=int, default=5,
                                       help="表示する最大件数（既定: 5）")
+    sub.add_parser(
+        "telegram",
+        help="Telegram からのメッセージを受けて会話する（単独実行）")
     args = parser.parse_args(argv)
 
     cfg = Config()
@@ -239,6 +260,8 @@ def main(argv: list[str] | None = None) -> int:
 
         serve(Session(cfg, client), host=args.host, port=args.port)
         return 0
+    if args.command == "telegram":
+        return _run_telegram(cfg, client)
     session = Session(cfg, client, session_id=args.session)
     if (cfg.mode == "ledger"
             and normalize_session_id(args.session) != session.session_id):
