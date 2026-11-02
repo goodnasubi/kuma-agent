@@ -205,8 +205,8 @@ def _run_export(cfg: Config, out: str | None = None) -> int:
     まとめてファイルへ書く（先頭に export-info.json が入る）。
     --out 未指定ならカレントディレクトリに既定のファイル名
     （kuma-export-<テナント>-<ユーザー>-<日付>.zip）で書く。
-    読み込み（復元）は未対応。モデルも API キーも要らない
-    （読み取り系）。
+    読み戻しは import コマンド（_run_import）。モデルも API
+    キーも要らない（読み取り系）。
     """
     from pathlib import Path
 
@@ -220,6 +220,53 @@ def _run_export(cfg: Config, out: str | None = None) -> int:
         default_export_filename(tenant, user))
     path.write_bytes(body)
     print(f"書き出しました: {path}（{format_size(len(body))}）")
+    return 0
+
+
+def _run_import(cfg: Config, archive: str, tenant: str | None = None,
+                user: str | None = None) -> int:
+    """ユーザーデータの復元（運用者向けコマンドの本体）。
+
+    書き出し ZIP（archive）の内容で、対象ユーザーの置き場を
+    置き換える。対象の既定は ZIP の export-info.json に記録
+    されたテナント／ユーザーで、--tenant / --user があれば
+    そちらを優先する（どちらも無ければ環境変数・既定の組み
+    合わせ）。復元前に現在のデータの控えが自動で取られる。
+    モデルも API キーも要らない。
+    """
+    from pathlib import Path
+
+    from .restore import read_export_info, restore_user_data
+
+    path = Path(archive)
+    if not path.is_file():
+        print(f"復元元の ZIP が見つかりません: {path}")
+        return 1
+    try:
+        zip_bytes = path.read_bytes()
+        info = read_export_info(zip_bytes)
+        source_tenant = info.get("tenant")
+        source_user = info.get("user")
+        target_tenant = tenant or (
+            source_tenant if isinstance(source_tenant, str) else None) \
+            or normalize_tenant_name(cfg.tenant)
+        target_user = user or (
+            source_user if isinstance(source_user, str) else None) \
+            or normalize_user_name(cfg.user)
+        result = restore_user_data(cfg.data_dir, target_tenant,
+                                   target_user, zip_bytes)
+    except (ValueError, OSError) as exc:
+        print(f"復元できませんでした: {exc}")
+        return 1
+    print(f"復元しました: テナント {result.tenant} / ユーザー {result.user}"
+          f"（書き出し元: テナント {result.source_tenant}"
+          f" / ユーザー {result.source_user}）")
+    print(f"復元したファイル: {result.restored_files} 件")
+    if result.skipped_files:
+        print(f"飛ばしたファイル: {result.skipped_files} 件"
+              "（他のユーザー／テナントの置き場にあたるもの）")
+    if result.backup_path is not None:
+        print(f"復元前の控え: {result.backup_path}")
     return 0
 
 
@@ -482,6 +529,14 @@ def main(argv: list[str] | None = None) -> int:
                                help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     export_parser.add_argument("--out", default=None,
                                help="書き出し先のファイルパス（既定: カレントディレクトリに既定のファイル名）")
+    import_parser = sub.add_parser(
+        "import", help="書き出した ZIP からユーザーデータを復元する")
+    import_parser.add_argument("archive",
+                               help="復元元の書き出し ZIP ファイルのパス")
+    import_parser.add_argument("--tenant", default=None,
+                               help="復元先のテナント名（既定: ZIP に記録されたテナント）")
+    import_parser.add_argument("--user", default=None,
+                               help="復元先のユーザー名（既定: ZIP に記録されたユーザー）")
     sub.add_parser(
         "telegram",
         help="Telegram からのメッセージを受けて会話する（単独実行）")
@@ -513,6 +568,9 @@ def main(argv: list[str] | None = None) -> int:
         return _run_usage(cfg)
     if args.command == "export":  # 書き出しもモデルも API キーも要らない
         return _run_export(cfg, out=args.out)
+    if args.command == "import":  # 復元もモデルも API キーも要らない
+        return _run_import(cfg, args.archive, tenant=args.tenant,
+                           user=args.user)
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)

@@ -62,6 +62,7 @@ from .notify_prefs import (
 from .outputs import OutputBoard, format_created_at, format_size
 from .proactive import combine_notifiers, run_sweep
 from .profile_files import read_profile_file, save_profile_file
+from .restore import restore_user_data
 from .session import Session
 from .telegram import build_proactive_notifier
 from .telegram import start_polling_thread as start_telegram_polling
@@ -287,6 +288,8 @@ _PAGE_TEMPLATE = """\
     <button id="profileBtn" type="button">人格・記憶</button>
     <button id="usageBtn" type="button">使用量</button>
     <button id="exportBtn" type="button">書き出し</button>
+    <button id="importBtn" type="button">復元</button>
+    <input id="importFile" type="file" accept=".zip" hidden>
     __LOGOUT_BUTTON__
   </div>
 </header>
@@ -384,6 +387,8 @@ const profileBtn = document.getElementById('profileBtn');
 const profilePanel = document.getElementById('profilePanel');
 const usageBtn = document.getElementById('usageBtn');
 const exportBtn = document.getElementById('exportBtn');
+const importBtn = document.getElementById('importBtn');
+const importFile = document.getElementById('importFile');
 const usagePanel = document.getElementById('usagePanel');
 const usageTotal = document.getElementById('usageTotal');
 const usageProviderRows = document.getElementById('usageProviderRows');
@@ -744,6 +749,44 @@ exportBtn.addEventListener('click', () => {
   document.body.appendChild(link);
   link.click();
   link.remove();
+});
+
+// 復元ボタン。書き出し ZIP を選ぶと、現在のテナント×ユーザーの
+// データをその内容で置き換える（POST /api/import。ZIP は添付と
+// 同じ流儀で base64 化して送る）。置き換えの前に確認を取り、
+// サーバー側では復元前の控えが自動で取られる。復元した内容は
+// 新しい会話から反映される（開いている会話の表示はそのまま）
+importBtn.addEventListener('click', () => importFile.click());
+
+importFile.addEventListener('change', async () => {
+  const file = importFile.files[0];
+  importFile.value = '';
+  if (!file) return;
+  if (!confirm('復元すると、現在のテナント×ユーザーのデータは ZIP の内容で置き換えられます。復元前に現在のデータの控えが自動で取られます。続けますか？')) return;
+  try {
+    const item = await readAttachment(file);
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser);
+    const res = await fetch('/api/import' + query, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({archive: item.data_base64}),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || '復元に失敗しました');
+    }
+    let msg = '復元しました（ファイル ' + data.restored_files
+      + ' 件）。新しい会話から反映されます。';
+    if (data.skipped_files) {
+      msg += '\\n他のユーザー／テナントの置き場にあたる '
+        + data.skipped_files + ' 件は飛ばしました。';
+    }
+    if (data.backup) msg += '\\n復元前の控え: ' + data.backup;
+    alert(msg);
+  } catch (e) {
+    alert(e.message || '復元に失敗しました');
+  }
 });
 
 function formatCount(value) {
@@ -1730,6 +1773,17 @@ class SessionStore:
             self._sessions.pop(session_id, None)
             self._statuses.pop(session_id, None)
 
+    def discard_all(self) -> None:
+        """開いている Session をすべて破棄する（データ復元後に使う）。
+
+        置き場の中身が置き換わった後も抱えたままにすると、古い
+        履歴のまま会話が続いてしまうため、復元の完了に合わせて
+        すべて落とす。次に開いたときに記録から作り直される。
+        """
+        with self._lock:
+            self._sessions.clear()
+            self._statuses.clear()
+
     @property
     def data_dir(self) -> Path:
         """このストアが担当するユーザー置き場（記録の削除に使う）。"""
@@ -1775,6 +1829,18 @@ class UserStore:
                 store = SessionStore(initial, approvals=self._approvals)
                 self._stores[name] = store
             return store
+
+    def discard_sessions(self, user: str | None) -> None:
+        """そのユーザーの開いている Session をすべて破棄する。
+
+        ストアがまだ作られていなければ何もしない（作り直しは
+        しない）。
+        """
+        name = normalize_user_name(user)
+        with self._lock:
+            store = self._stores.get(name)
+        if store is not None:
+            store.discard_all()
 
     def names(self) -> list[str]:
         """開いているユーザーと、保存済みユーザーの一覧。"""
@@ -1854,6 +1920,19 @@ class TenantStore:
         with self._lock:
             if name != self.default_tenant:
                 self._user_stores.pop(name, None)
+
+    def discard_user_sessions(self, tenant: str | None,
+                              user: str | None) -> None:
+        """そのテナント×ユーザーの開いている Session をすべて破棄する。
+
+        データ復元の後に使う。対象のストアがまだ作られていなければ
+        何もしない（作り直しはしない）。
+        """
+        name = normalize_tenant_name(tenant)
+        with self._lock:
+            user_store = self._user_stores.get(name)
+        if user_store is not None:
+            user_store.discard_sessions(user)
 
     def names(self) -> list[str]:
         """開いているテナントと、保存済みテナントの一覧。"""
@@ -2175,6 +2254,61 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             self._send(200, body, "application/zip",
                        {"Content-Disposition": disposition})
 
+        def _import_data(self) -> None:
+            """書き出し ZIP からの復元（POST /api/import）。
+
+            対象はクエリの tenant / user（無ければ起動時の組み
+            合わせ）で、本文の archive（書き出し ZIP の base64）
+            の内容でそのユーザー置き場を置き換える。検証エラー
+            （書き出し ZIP でない・不正なパスなど）は 400、置き
+            換え中の入出力エラーは 500。復元に成功したら、その
+            ユーザーの開いている Session をすべて破棄する（次に
+            開く会話は復元後の記録から作り直される）。ログイン
+            ゲートは do_POST 側で済んでいる。
+            """
+            query = parse_qs(urlsplit(self.path).query)
+            tenant = normalize_tenant_name(
+                _first(query.get("tenant")) or tenants.default_tenant)
+            user = normalize_user_name(
+                _first(query.get("user")) or tenants.default_user)
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            encoded = data.get("archive")
+            if not isinstance(encoded, str) or not encoded:
+                self._send_json(
+                    400, {"error": "archive（base64）を指定してください"})
+                return
+            try:
+                zip_bytes = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError):
+                self._send_json(
+                    400, {"error": "archive の base64 が不正です"})
+                return
+            try:
+                result = restore_user_data(tenants.data_dir, tenant, user,
+                                           zip_bytes)
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            except OSError as exc:
+                self._send_json(
+                    500, {"error": f"復元に失敗しました: {exc}"})
+                return
+            tenants.discard_user_sessions(tenant, user)
+            self._send_json(200, {
+                "ok": True,
+                "tenant": result.tenant,
+                "user": result.user,
+                "source_tenant": result.source_tenant,
+                "source_user": result.source_user,
+                "restored_files": result.restored_files,
+                "skipped_files": result.skipped_files,
+                "backup": (result.backup_path.name
+                           if result.backup_path is not None else None),
+            })
+
         def _read_json_body(self) -> dict | None:
             """POST の JSON 本文を辞書として読む。読めなければ None。"""
             try:
@@ -2244,6 +2378,9 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 return
             if path == "/api/profile":
                 self._save_profile()
+                return
+            if path == "/api/import":
+                self._import_data()
                 return
             if path == "/api/approvals/decide":
                 self._decide_approval()

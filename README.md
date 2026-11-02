@@ -50,7 +50,7 @@ Muse を頭脳にした、対話型の相棒エージェント。人格と記憶
 
 - **選べる頭脳**: 6 種の LLM バックエンドから選べます
 - **使用量の見える化**: 頭脳の利用量（呼び出し回数とトークン数）を記録し、Web UI の「使用量」パネルと `kuma-agent usage` で確認できます（CLI 系の頭脳は回数のみ）
-- **データの書き出し**: ユーザーごとのデータを ZIP で書き出せます（Web UI の「書き出し」ボタン、`kuma-agent export`）
+- **データの書き出しと復元**: ユーザーごとのデータを ZIP で書き出せます（Web UI の「書き出し」ボタン、`kuma-agent export`）。書き出した ZIP からデータの復元もできます（Web UI の「復元」ボタン、`kuma-agent import`。置き換え方式で、復元前に現在のデータの控えが自動で取られます）
 
 ## 使い方
 
@@ -134,7 +134,7 @@ kuma-agent web           # Web UI を http://127.0.0.1:8765 で起動する
 
 スレッドの管理は、Web UI（スレッドモード時）のほか、運用者向けに `kuma-agent threads`（一覧）と `kuma-agent threads --delete <名前>`（記録だけを削除）でもできます。
 
-そのほかの運用者向けコマンドに、`kuma-agent jobs`（定期ジョブの一覧）、`kuma-agent outputs`（成果物の一覧）、`kuma-agent usage`（使用量）、`kuma-agent export`（データの書き出し）、`kuma-agent search-history <語句>`（過去の会話の検索）、`kuma-agent memory-search <語句>`（長期記憶の検索）、`kuma-agent memory-tidy`（長期記憶の整理。`--dry-run` で提案だけ作れます）、`kuma-agent memory-extract`（会話からの記憶の抽出を手動で実行。`--dry-run` で提案だけ表示できます）があります。
+そのほかの運用者向けコマンドに、`kuma-agent jobs`（定期ジョブの一覧）、`kuma-agent outputs`（成果物の一覧）、`kuma-agent usage`（使用量）、`kuma-agent export`（データの書き出し）、`kuma-agent import`（データの復元）、`kuma-agent search-history <語句>`（過去の会話の検索）、`kuma-agent memory-search <語句>`（長期記憶の検索）、`kuma-agent memory-tidy`（長期記憶の整理。`--dry-run` で提案だけ作れます）、`kuma-agent memory-extract`（会話からの記憶の抽出を手動で実行。`--dry-run` で提案だけ表示できます）があります。
 
 ### MCP サーバー（道具の追加）
 
