@@ -7,7 +7,7 @@ from datetime import datetime
 
 from .config import Config, mode_label, normalize_mode
 from .llm import create_client
-from .memory import (cleanup_expired, delete_session_record,
+from .memory import (Memory, cleanup_expired, delete_session_record,
                      list_session_ids, normalize_session_id,
                      normalize_tenant_name, retention_days_for)
 from .session import Session
@@ -106,6 +106,22 @@ def _run_proactive(cfg: Config, tenant: str | None = None,
     return 0
 
 
+def _run_memory_search(cfg: Config, query: str, limit: int = 5) -> int:
+    """長期記憶（MEMORY.md）のキーワード検索（コマンドの本体）。
+
+    対象は cfg が指すテナント×ユーザーの置き場。ヒットした断片を
+    出どころ（MEMORY.md の行番号）つきで表示する。モデルも
+    API キーも要らない。
+    """
+    hits = Memory(cfg.user_data_dir).search_ranked(query, limit=limit)
+    if not hits:
+        print("見つかりませんでした")
+        return 0
+    for hit in hits:
+        print(f"（MEMORY.md の {hit.line} 行目）{hit.text}")
+    return 0
+
+
 def _show_status(status: str) -> None:
     """作業中表示を同じ行に上書きする（プレーンな対話ループ用）。
 
@@ -184,6 +200,16 @@ def main(argv: list[str] | None = None) -> int:
                                   help="対象のテナント名（既定: 全テナント）")
     proactive_parser.add_argument("--user", default=None,
                                   help="対象のユーザー名（既定: 対象テナントの全ユーザー）")
+    memory_search_parser = sub.add_parser(
+        "memory-search", help="長期記憶（MEMORY.md）をキーワードで検索する")
+    memory_search_parser.add_argument(
+        "query", help="検索クエリ（空白や句読点で区切って複数キーワード）")
+    memory_search_parser.add_argument("--tenant", default=None,
+                                      help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
+    memory_search_parser.add_argument("--user", default=None,
+                                      help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
+    memory_search_parser.add_argument("--limit", type=int, default=5,
+                                      help="表示する最大件数（既定: 5）")
     args = parser.parse_args(argv)
 
     cfg = Config()
@@ -200,6 +226,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_threads(cfg, delete=args.delete)
     if args.command == "proactive":  # 能動発信もモデルも API キーも要らない
         return _run_proactive(cfg, tenant=args.tenant, user=args.user)
+    if args.command == "memory-search":  # 記憶の検索もモデルも API キーも要らない
+        return _run_memory_search(cfg, args.query, limit=args.limit)
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -308,6 +309,121 @@ def cleanup_expired(data_dir: Path, retention_days: int,
     return result
 
 
+@dataclass
+class MemorySegment:
+    """長期記憶（MEMORY.md）を項目単位に割った 1 断片。
+
+    text は項目の本文（続き行を含む場合は複数行）、line は
+    MEMORY.md での開始行（1 始まり）で、出どころの表示に使う。
+    """
+    text: str
+    line: int
+
+
+# 項目の始まりとみなす行: 見出し（#）と箇条書き（- * + / 番号つき）
+_SEGMENT_START_RE = re.compile(r"^(#+\s|[-*+]\s|\d+[.)]\s)")
+
+
+def split_memory_segments(text: str) -> list[MemorySegment]:
+    """長期記憶の本文を項目単位の断片に割る。
+
+    MEMORY.md の実際の書式（remember が 1 行 1 件の箇条書きで
+    追記し、利用者が見出しを足すこともある）に合わせた分割:
+    - 見出し行と箇条書き行が新しい項目の始まり
+    - それ以外の行は直前の項目への続き行として取り込む
+    - 空行は区切り（断片には含めない）
+
+    各断片は開始行（1 始まり）を保持する。
+    """
+    segments: list[MemorySegment] = []
+    current: list[str] = []
+    current_line = 0
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            segments.append(MemorySegment("\n".join(current), current_line))
+            current = []
+
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        if not raw.strip():
+            flush()
+            continue
+        if current and _SEGMENT_START_RE.match(raw.lstrip()):
+            flush()
+        if not current:
+            current_line = lineno
+        current.append(raw)
+    flush()
+    return segments
+
+
+# クエリの語の区切り（空白と和文・欧文の句読点、括弧類）
+_QUERY_SPLIT_RE = re.compile(
+    r"[\s、。，．・:：;；/／!?！？「」『』（）()\[\]【】\"'“”‘’|｜]+")
+
+
+def _query_terms(query: str) -> list[str]:
+    """検索クエリを語に分ける（重複は除き、順序は保つ）。"""
+    terms: list[str] = []
+    for term in _QUERY_SPLIT_RE.split(query.strip()):
+        if term and term not in terms:
+            terms.append(term)
+    return terms
+
+
+def search_memory_text(text: str, query: str,
+                       limit: int = 5) -> list[MemorySegment]:
+    """長期記憶の本文をキーワードで検索し、関連の強い断片を返す。
+
+    クエリを空白・句読点で語に分け、各語の部分文字列一致で断片を
+    点数付けする（形態素解析はしない。日本語は分かち書きされない
+    ため、部分一致が前提）。点数は「一致した語の数」を主、
+    「語の出現回数」を副とし、同点は行の早い順に並べる。
+    """
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 5
+    if limit < 1:
+        limit = 1
+    terms = _query_terms(query)
+    if not terms:
+        return []
+    scored: list[tuple[int, int, int, MemorySegment]] = []
+    for seg in split_memory_segments(text):
+        matched = [t for t in terms if t in seg.text]
+        if not matched:
+            continue
+        occurrences = sum(seg.text.count(t) for t in matched)
+        scored.append((-len(matched), -occurrences, seg.line, seg))
+    scored.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [item[3] for item in scored[:limit]]
+
+
+def memory_inject_text(text: str, full_limit: int) -> tuple[str, bool]:
+    """プロンプト注入用に長期記憶を整え、(本文, 一部だけかどうか) を返す。
+
+    全文が full_limit 文字以下なら (全文, False)。超える場合は
+    新しい方（末尾側）の項目から、項目単位で full_limit に収まる
+    分だけを取り、(部分, True) を返す。項目の途中で切ることは
+    しないため、最後の 1 項目だけで制限を超える場合はその項目を
+    丸ごと返す（結果として制限を超えることがある）。
+    """
+    if len(text) <= full_limit:
+        return text, False
+    picked: list[MemorySegment] = []
+    total = 0
+    for seg in reversed(split_memory_segments(text)):
+        cost = len(seg.text) + (1 if picked else 0)  # 結合時の改行分
+        if picked and total + cost > full_limit:
+            break
+        picked.append(seg)
+        total += cost
+    picked.reverse()
+    return "\n".join(seg.text for seg in picked), True
+
+
 class Memory:
     def __init__(self, data_dir: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
         self.data_dir = data_dir
@@ -335,6 +451,15 @@ class Memory:
         """長期記憶からキーワードを含む行を返す（当面は単純一致）。"""
         text = self.load_long_term()
         return [line for line in text.splitlines() if keyword in line]
+
+    def search_ranked(self, query: str,
+                      limit: int = 5) -> list[MemorySegment]:
+        """長期記憶をキーワードで検索し、関連の強い断片を行番号つきで返す。
+
+        照合と並び順は search_memory_text の流儀（部分文字列一致、
+        一致した語の数が多い断片が上位）。
+        """
+        return search_memory_text(self.load_long_term(), query, limit=limit)
 
     def append_turn(self, role: str, content: str,
                     quote: str | None = None,

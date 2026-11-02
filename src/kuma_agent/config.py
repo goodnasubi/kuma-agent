@@ -116,6 +116,12 @@ class Config:
     # __post_init__ で既定値（300）として扱う
     approval_timeout_seconds: int = field(
         default_factory=lambda: _env_int("KUMA_APPROVAL_TIMEOUT_SECONDS", 300))
+    # 長期記憶（MEMORY.md）の全文注入の上限（文字数）。記憶が
+    # これ以下なら従来どおり全文をシステムプロンプトへ注入し、
+    # 超えたら新しい方の項目だけを注入して残りは search_memory
+    # 道具で検索させる（memory.memory_inject_text）
+    memory_full_inject_chars: int = field(
+        default_factory=lambda: _env_int("KUMA_MEMORY_FULL_INJECT_CHARS", 6000))
 
     @property
     def tenant_data_dir(self) -> Path:

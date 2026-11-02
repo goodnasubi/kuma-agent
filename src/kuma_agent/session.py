@@ -34,6 +34,7 @@ from .mcp_client import McpManager, get_shared_manager
 from .memory import (
     DEFAULT_SESSION_ID,
     Memory,
+    memory_inject_text,
     normalize_session_id,
     normalize_tenant_name,
     normalize_user_name,
@@ -136,9 +137,11 @@ class Session:
         # 用事の一覧はユーザーごとに 1 つ（tasks.json）だけを使う
         self.task_board = TaskBoard(data_dir)
         # スレッドモードでは用事の一覧を無効にする: 道具に用事系を登録せず、
-        # 進行中の用事もプロンプトへ注入しない。
+        # 進行中の用事もプロンプトへ注入しない。長期記憶の検索道具も
+        # 用事系と同じ条件（相棒モードのときだけ）で出す。
         board = None if self.mode == "wall" else self.task_board
-        self.tools = ToolBox(Path.cwd(), task_board=board)
+        self.tools = ToolBox(Path.cwd(), task_board=board,
+                             memory=None if self.mode == "wall" else self.memory)
         # MCP サーバーの道具を組み込み道具と並べて登録する。接続は
         # データ置き場ルート単位で共有する（Web 経路でもテナントや
         # 部屋ごとにサーバープロセスを複製しない）
@@ -157,7 +160,20 @@ class Session:
         memory_text = self.memory.load_long_term()
         self.system_prompt = load_persona(data_dir)
         if memory_text:
-            self.system_prompt += f"\n\n# 長期記憶\n{memory_text}"
+            # 記憶が閾値以下なら全文を、超えたら新しい方の項目だけを
+            # 注入する（項目の途中で切らない。memory_inject_text）
+            inject_text, partial = memory_inject_text(
+                memory_text, cfg.memory_full_inject_chars)
+            self.system_prompt += f"\n\n# 長期記憶\n{inject_text}"
+            if partial:
+                # スレッドモードでは検索道具自体を出さないため、
+                # 案内文は道具のことに触れない形にする
+                if self.mode == "wall":
+                    note = "（長期記憶は一部のみ表示しています）"
+                else:
+                    note = ("（長期記憶は一部のみ表示しています。"
+                            "残りは search_memory 道具で検索できます）")
+                self.system_prompt += f"\n{note}"
         if self.mode != "wall":
             tasks_text = self._open_tasks_text()
             if tasks_text:

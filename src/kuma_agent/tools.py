@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Callable
 from .tasks import format_remind_at
 
 if TYPE_CHECKING:
+    from .memory import Memory
     from .tasks import Task, TaskBoard
 
 
@@ -34,6 +35,7 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "remember": "記憶に書き留め中",
     "write_memory": "記憶に書き留め中",
     "save_memory": "記憶に書き留め中",
+    "search_memory": "記憶を検索中",
 }
 
 
@@ -115,9 +117,11 @@ class Tool:
 
 
 class ToolBox:
-    def __init__(self, work_dir: Path, task_board: TaskBoard | None = None) -> None:
+    def __init__(self, work_dir: Path, task_board: TaskBoard | None = None,
+                 memory: Memory | None = None) -> None:
         self.work_dir = work_dir.resolve()
         self.task_board = task_board
+        self.memory = memory
         self._tools: dict[str, Tool] = {}
         # 承認フック: 承認対象の道具を実行する前に呼ばれる
         # （道具名, 引数）→ 真偽 の callable。None の間は承認を
@@ -129,6 +133,8 @@ class ToolBox:
         self._register_defaults()
         if task_board is not None:
             self._register_task_tools()
+        if memory is not None:
+            self._register_memory_tools()
 
     def _register_defaults(self) -> None:
         self.register(Tool(
@@ -226,6 +232,30 @@ class ToolBox:
         if task is None:
             return f"error: 用事 #{id} が見つかりません"
         return f"更新しました: #{task.id} {task.title}（{task.status}）"
+
+    def _register_memory_tools(self) -> None:
+        self.register(Tool(
+            "search_memory",
+            "長期記憶（MEMORY.md）をキーワードで検索する。プロンプトに"
+            "載っていない古い記憶も含めて全体から探し、出どころ"
+            "（MEMORY.md の行番号）つきで返す。利用者の好み・約束・"
+            "過去の決定などを思い出す必要があるときに使う。",
+            {"type": "object", "properties": {
+                "query": {"type": "string",
+                          "description": "検索キーワード。空白や句読点で区切って複数指定できる"},
+                "limit": {"type": "integer",
+                          "description": "返す最大件数（既定 5）"}},
+             "required": ["query"]},
+            self._search_memory,
+        ))
+
+    def _search_memory(self, query: str, limit: int = 5) -> str:
+        assert self.memory is not None
+        hits = self.memory.search_ranked(query, limit=limit)
+        if not hits:
+            return "見つかりませんでした"
+        return "\n".join(
+            f"（MEMORY.md の {hit.line} 行目）{hit.text}" for hit in hits)
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
