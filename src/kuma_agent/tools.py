@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from . import imagegen
 from .jobs import build_schedule, format_last_run, schedule_description
 from .memory_tidy import line_count, tidy_memory_with_model
 from .notify_prefs import (
@@ -64,6 +66,7 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "delete_job": "定期ジョブを記録中",
     "set_job_enabled": "定期ジョブを記録中",
     "deliver_file": "成果物を用意しています",
+    "generate_image": "画像を作っています",
 }
 
 
@@ -192,6 +195,7 @@ class ToolBox:
             self._register_job_tools()
         if output_board is not None:
             self._register_output_tools()
+            self._register_image_tool()
 
     def _register_defaults(self) -> None:
         self.register(Tool(
@@ -535,6 +539,69 @@ class ToolBox:
         return (f"成果物として登録しました: {output.title}"
                 f"（{output.filename}）。"
                 "Web画面の「成果物」から開けます")
+
+    def _register_image_tool(self) -> None:
+        # 画像生成も成果物の置き場を使うため、成果物の道具と同じ
+        # 条件（output_board があるとき）で登録する。Session は
+        # 常に成果物の置き場を渡すので、両モードで使える。生成
+        # そのものは頭脳によらず Gemini が担う（imagegen）
+        self.register(Tool(
+            "generate_image",
+            "画像を生成して、成果物として利用者に渡す。絵やイラスト"
+            "などを描いてほしいと頼まれたときに、prompt へ作りたい"
+            "画像の説明を入れて呼ぶこと。生成した画像は Web 画面の"
+            "「成果物」から開ける（ダウンロードできる）。表示名を"
+            "付けたい場合は title に入れる（省略するとファイル名が"
+            "表示名になる）。",
+            {"type": "object", "properties": {
+                "prompt": {"type": "string",
+                           "description": "作りたい画像の説明"},
+                "title": {"type": "string",
+                          "description": "表示名（省略するとファイル名）"}},
+             "required": ["prompt"]},
+            self._generate_image,
+        ))
+
+    # 生成画像の mime → 拡張子。ここに無い形式は PNG として倒す
+    _IMAGE_EXTENSIONS = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+
+    def _generate_image(self, prompt: str, title: str | None = None) -> str:
+        assert self.output_board is not None
+        prompt = str(prompt or "").strip()
+        if not prompt:
+            return "error: 作りたい画像の説明が空です"
+        try:
+            generated = imagegen.generate_image(prompt)
+        except imagegen.ImageGenerationError as e:
+            return f"error: {e}"
+        except Exception as e:  # 生成の失敗で会話は落とさない
+            return f"error: 画像の生成に失敗しました: {e}"
+        extension = self._IMAGE_EXTENSIONS.get(generated.mime_type, ".png")
+        filename = f"image-{datetime.now():%Y%m%d-%H%M%S}{extension}"
+        try:
+            # OutputBoard.add はファイルからコピーする作りなので、
+            # 生成した画像を一時フォルダに希望のファイル名で置いて
+            # から登録する（一時フォルダは登録後に消える）
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                source = Path(tmp_dir) / filename
+                source.write_bytes(generated.data)
+                output = self.output_board.add(source, title=title)
+        except (OSError, ValueError) as e:
+            return f"error: 生成した画像を登録できませんでした: {e}"
+        message = (f"画像を生成して成果物に登録しました: {output.title}"
+                   f"（{output.filename}）。"
+                   "Web画面の「成果物」から開けます")
+        if generated.text:
+            note = generated.text
+            if len(note) > imagegen.MAX_MODEL_TEXT_CHARS:
+                note = note[:imagegen.MAX_MODEL_TEXT_CHARS] + "…"
+            message += f"\n（生成モデルの補足: {note}）"
+        return message
 
     def _register_memory_tools(self) -> None:
         self._register_tidy_tool()
