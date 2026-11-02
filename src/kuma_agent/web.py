@@ -25,6 +25,7 @@ from typing import Callable
 from urllib.parse import parse_qs, quote, urlsplit
 
 from .config import Config, mode_label, normalize_mode
+from .export import build_export_zip, default_export_filename
 from .llm import MAX_ATTACHMENT_BYTES, Attachment, guess_media_type
 from .memory import (
     DEFAULT_SESSION_ID,
@@ -277,6 +278,7 @@ _PAGE_TEMPLATE = """\
     <button id="outputsBtn" type="button">成果物</button>
     <button id="profileBtn" type="button">人格・記憶</button>
     <button id="usageBtn" type="button">使用量</button>
+    <button id="exportBtn" type="button">書き出し</button>
     __LOGOUT_BUTTON__
   </div>
 </header>
@@ -373,6 +375,7 @@ const outputRows = document.getElementById('outputRows');
 const profileBtn = document.getElementById('profileBtn');
 const profilePanel = document.getElementById('profilePanel');
 const usageBtn = document.getElementById('usageBtn');
+const exportBtn = document.getElementById('exportBtn');
 const usagePanel = document.getElementById('usagePanel');
 const usageTotal = document.getElementById('usageTotal');
 const usageProviderRows = document.getElementById('usageProviderRows');
@@ -720,6 +723,19 @@ profileBtn.addEventListener('click', () => {
 usageBtn.addEventListener('click', () => {
   usagePanel.hidden = !usagePanel.hidden;
   if (!usagePanel.hidden) loadUsage();
+});
+
+// 書き出しボタン。現在のテナント×ユーザーの全データを ZIP で
+// ダウンロードする（/api/export。ZIP はサーバー側でメモリ上に
+// 組み立てられ、サーバーにファイルは残らない）
+exportBtn.addEventListener('click', () => {
+  const query = '?tenant=' + encodeURIComponent(currentTenant)
+    + '&user=' + encodeURIComponent(currentUser);
+  const link = document.createElement('a');
+  link.href = '/api/export' + query;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 });
 
 function formatCount(value) {
@@ -2019,6 +2035,12 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate):
                     _first(query.get("user")) or tenants.default_user)
                 self._send_json(
                     200, _usage_payload(tenants, tenant, user))
+            elif split.path == "/api/export":
+                tenant = normalize_tenant_name(
+                    _first(query.get("tenant")) or tenants.default_tenant)
+                user = normalize_user_name(
+                    _first(query.get("user")) or tenants.default_user)
+                self._download_export(tenant, user)
             elif split.path == "/api/profile":
                 self._get_profile(query)
             elif split.path == "/api/history":
@@ -2069,6 +2091,23 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate):
             disposition = ("attachment; filename*=UTF-8''"
                            + quote(path.name))
             self._send(200, body, content_type,
+                       {"Content-Disposition": disposition})
+
+        def _download_export(self, tenant: str, user: str) -> None:
+            """ユーザーデータの書き出し ZIP を attachment として返す。
+
+            ZIP はメモリ上で組み立てて返すため、サーバー側に書き
+            出しファイルは残らない。対象は tenant / user で指した
+            組み合わせのユーザー置き場の全データ（他のテナント／
+            ユーザーの置き場の除外は export.build_export_zip 側が
+            担う）。置き場が空でも export-info.json だけの ZIP が
+            返る。
+            """
+            body = build_export_zip(tenants.data_dir, tenant, user)
+            filename = default_export_filename(tenant, user)
+            disposition = ("attachment; filename*=UTF-8''"
+                           + quote(filename))
+            self._send(200, body, "application/zip",
                        {"Content-Disposition": disposition})
 
         def _read_json_body(self) -> dict | None:

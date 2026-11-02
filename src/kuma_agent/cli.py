@@ -10,7 +10,7 @@ from .llm import create_client
 from .memory import (Memory, cleanup_expired, delete_session_record,
                      format_conversation_hit, list_session_ids,
                      normalize_session_id, normalize_tenant_name,
-                     retention_days_for)
+                     normalize_user_name, retention_days_for)
 from .session import Session
 from .tools import summarize_tool_args
 
@@ -190,6 +190,31 @@ def _run_usage(cfg: Config) -> int:
         print("使用量の記録はまだありません")
         return 0
     print(format_usage_summary(summary))
+    return 0
+
+
+def _run_export(cfg: Config, out: str | None = None) -> int:
+    """ユーザーデータの書き出し（運用者向けコマンドの本体）。
+
+    対象は cfg が指すテナント×ユーザーの置き場の全データで、ZIP に
+    まとめてファイルへ書く（先頭に export-info.json が入る）。
+    --out 未指定ならカレントディレクトリに既定のファイル名
+    （kuma-export-<テナント>-<ユーザー>-<日付>.zip）で書く。
+    読み込み（復元）は未対応。モデルも API キーも要らない
+    （読み取り系）。
+    """
+    from pathlib import Path
+
+    from .export import build_export_zip, default_export_filename
+    from .outputs import format_size
+
+    tenant = normalize_tenant_name(cfg.tenant)
+    user = normalize_user_name(cfg.user)
+    body = build_export_zip(cfg.data_dir, tenant, user)
+    path = Path(out) if out else Path(
+        default_export_filename(tenant, user))
+    path.write_bytes(body)
+    print(f"書き出しました: {path}（{format_size(len(body))}）")
     return 0
 
 
@@ -395,6 +420,14 @@ def main(argv: list[str] | None = None) -> int:
                               help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
     usage_parser.add_argument("--user", default=None,
                               help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
+    export_parser = sub.add_parser(
+        "export", help="ユーザーデータを ZIP に書き出す（バックアップ）")
+    export_parser.add_argument("--tenant", default=None,
+                               help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
+    export_parser.add_argument("--user", default=None,
+                               help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
+    export_parser.add_argument("--out", default=None,
+                               help="書き出し先のファイルパス（既定: カレントディレクトリに既定のファイル名）")
     sub.add_parser(
         "telegram",
         help="Telegram からのメッセージを受けて会話する（単独実行）")
@@ -424,6 +457,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_outputs(cfg)
     if args.command == "usage":  # 使用量の表示もモデルも API キーも要らない
         return _run_usage(cfg)
+    if args.command == "export":  # 書き出しもモデルも API キーも要らない
+        return _run_export(cfg, out=args.out)
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)
