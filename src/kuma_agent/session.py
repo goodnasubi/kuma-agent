@@ -29,6 +29,7 @@ from typing import Callable
 
 from .config import Config, normalize_mode
 from .llm import Attachment, ChatModel, Message, quoted_content
+from .mcp_client import McpManager, get_shared_manager
 from .memory import (
     DEFAULT_SESSION_ID,
     Memory,
@@ -38,7 +39,7 @@ from .memory import (
 )
 from .persona import load_persona
 from .tasks import TaskBoard
-from .tools import ToolBox, activity_label
+from .tools import Tool, ToolBox, activity_label
 
 # 圧縮後の履歴の先頭に置く要約発話の見出し
 SUMMARY_PREFIX = "（これまでの会話の要約）"
@@ -74,7 +75,8 @@ def _message_text(msg: Message, include_quote: bool = False) -> str:
 class Session:
     def __init__(self, cfg: Config, model: ChatModel,
                  session_id: str = "main",
-                 on_status: Callable[[str], None] | None = None) -> None:
+                 on_status: Callable[[str], None] | None = None,
+                 mcp_manager: McpManager | None = None) -> None:
         self.cfg = cfg
         self.model = model
         # 作業中表示のコールバック。対話ループの各段階で「今なにを
@@ -98,6 +100,14 @@ class Session:
         # 進行中の用事もプロンプトへ注入しない。
         board = None if self.mode == "wall" else self.task_board
         self.tools = ToolBox(Path.cwd(), task_board=board)
+        # MCP サーバーの道具を組み込み道具と並べて登録する。接続は
+        # データ置き場ルート単位で共有する（Web 経路でもテナントや
+        # 部屋ごとにサーバープロセスを複製しない）
+        self.mcp_manager = mcp_manager
+        if self.mcp_manager is None and not cfg.is_cli_provider:
+            self.mcp_manager = get_shared_manager(
+                cfg.data_dir, cfg.mcp_timeout_seconds)
+        self._register_mcp_tools()
         self.history: list[Message] = self._restore_history()
         memory_text = self.memory.load_long_term()
         self.system_prompt = load_persona(data_dir)
@@ -107,6 +117,33 @@ class Session:
             tasks_text = self._open_tasks_text()
             if tasks_text:
                 self.system_prompt += f"\n\n# 進行中の用事\n{tasks_text}"
+
+    def _register_mcp_tools(self) -> None:
+        """MCP サーバーの道具を組み込み道具と並べて登録する。
+
+        CLI 系の頭脳は道具ループを自前で持つため、組み込み道具と
+        同じく MCP 道具も出さない（マネージャ自体を持たない）。
+        サーバーに接続できない場合は、その道具が出ないだけにして
+        対話自体は落とさない。道具名は <サーバー名>__<道具名> の
+        前置名で、説明文と入力スキーマはサーバーのものをそのまま
+        使う（mcp_client.McpManager.tool_schemas が組み立てる）。
+        """
+        manager = self.mcp_manager
+        if manager is None:
+            return
+        try:
+            schemas = manager.tool_schemas()
+        except Exception:
+            return  # 発見の失敗で対話を落とさない
+        for schema in schemas:
+            prefixed = schema["name"]
+
+            def call_mcp(_name: str = prefixed, **args: object) -> str:
+                return manager.call(_name, dict(args))
+
+            self.tools.register(Tool(
+                prefixed, schema["description"], schema["parameters"],
+                call_mcp))
 
     def _open_tasks_text(self) -> str:
         """進行中の用事をシステムプロンプト用の箇条書きにする。

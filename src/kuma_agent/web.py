@@ -34,6 +34,7 @@ from .memory import (
     save_retention_override,
     tenant_dir,
 )
+from .mcp_client import close_shared_managers
 from .proactive import run_sweep
 from .session import Session
 from .settings import proactive_enabled_for, set_proactive_enabled
@@ -1209,3 +1210,4 @@ def serve(session: Session, host: str = "127.0.0.1", port: int = 8765) -> None:
         print()
     finally:
         server.server_close()
+        close_shared_managers()  # MCP サーバーの子プロセスを残さない

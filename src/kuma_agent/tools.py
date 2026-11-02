@@ -39,10 +39,15 @@ def activity_label(name: str, args: dict | None = None) -> str:
 
     対応表にある道具は専用の文言を返し、ファイル名や用事の題名など
     安全な手がかりが引数にあれば括弧で添える。対応表にない道具は
-    名前を含む汎用表示にする。
+    名前を含む汎用表示にし、MCP 道具（<サーバー名>__<道具名>）は
+    サーバー名を添えた汎用表示にする。
     """
     label = _ACTIVITY_LABELS.get(name)
     if label is None:
+        if "__" in name:
+            # MCP 道具は <サーバー名>__<道具名> の形で登録される。
+            # 汎用の表示としてサーバー名を添える
+            return f"道具を使っています（{name.split('__', 1)[0]}）"
         return f"道具を実行中（{name}）"
     hint: object = None
     if args:
