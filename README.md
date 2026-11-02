@@ -18,7 +18,7 @@ Muse を頭脳にした、対話型の相棒エージェント。人格と記憶
 
 - **2 つの進め方**: 会話はひとつで用事を覚える「相棒モード」と、
   会話をスレッドごとに分ける「スレッドモード」から選べます
-- **長期記憶**: 事実・好み・約束を長期記憶（MEMORY.md）に持ち、長い会話は自動で要約に圧縮されます。記憶が大きくなると、必要な分を検索して思い出します（何行目に書いてあるかまで分かります）。重なった内容は自動で整理され、手動で全体をまとめ直すこともできます（書き換え前には必ず控えが残ります）
+- **長期記憶**: 事実・好み・約束を長期記憶（MEMORY.md）に持ち、長い会話は自動で要約に圧縮されます。記憶が大きくなると、必要な分を検索して思い出します（何行目に書いてあるかまで分かります）。重なった内容は自動で整理され、手動で全体をまとめ直すこともできます（書き換え前には必ず控えが残ります）。さらに、1 日 1 回、会話の中から覚えるべきことを自動で抜き出して長期記憶に足します（`KUMA_MEMORY_EXTRACT=0` で止められます）
 - **人格と記憶の編集**: Web UI の「人格・記憶」パネルから、人格ファイル（SOUL.md など）と長期記憶（MEMORY.md）を直接編集できます（反映は新しい会話から）
 - **過去の会話の検索**: 「前に話したあの件」を全セッションの会話記録から探せます
 - **引用返信**: 過去の発話を指定して返信できます
@@ -134,7 +134,7 @@ kuma-agent web           # Web UI を http://127.0.0.1:8765 で起動する
 
 スレッドの管理は、Web UI（スレッドモード時）のほか、運用者向けに `kuma-agent threads`（一覧）と `kuma-agent threads --delete <名前>`（記録だけを削除）でもできます。
 
-そのほかの運用者向けコマンドに、`kuma-agent jobs`（定期ジョブの一覧）、`kuma-agent outputs`（成果物の一覧）、`kuma-agent usage`（使用量）、`kuma-agent export`（データの書き出し）、`kuma-agent search-history <語句>`（過去の会話の検索）、`kuma-agent memory-search <語句>`（長期記憶の検索）、`kuma-agent memory-tidy`（長期記憶の整理。`--dry-run` で提案だけ作れます）があります。
+そのほかの運用者向けコマンドに、`kuma-agent jobs`（定期ジョブの一覧）、`kuma-agent outputs`（成果物の一覧）、`kuma-agent usage`（使用量）、`kuma-agent export`（データの書き出し）、`kuma-agent search-history <語句>`（過去の会話の検索）、`kuma-agent memory-search <語句>`（長期記憶の検索）、`kuma-agent memory-tidy`（長期記憶の整理。`--dry-run` で提案だけ作れます）、`kuma-agent memory-extract`（会話からの記憶の抽出を手動で実行。`--dry-run` で提案だけ表示できます）があります。
 
 ### MCP サーバー（道具の追加）
 
@@ -205,6 +205,7 @@ Telegram の Bot（@BotFather で発行）を通じて会話できます。環�
 | `KUMA_TELEGRAM_TENANT` / `KUMA_TELEGRAM_USER` | Telegram の会話の行き先 | `default` / `default` |
 | `KUMA_TELEGRAM_PROACTIVE` | 能動発信を Telegram にも届けるか（`0` で止める） | （届ける） |
 | `KUMA_BRIEFING_TIME` | 朝のまとめの時刻（`off` で無効） | `07:30` |
+| `KUMA_MEMORY_EXTRACT` | 会話から長期記憶への自動抽出（`0` で止める） | （する） |
 | `KUMA_WEB_PASSWORD` | Web UI のログインパスワード | （未設定＝ログインなし） |
 | `KUMA_WEB_SECURE_COOKIE` | ログイン Cookie に Secure を付けるか（`1` で有効） | （無効） |
 | `KUMA_IMAGE_MODEL` | 画像生成に使うモデル | `gemini-3.8-flash-image` |

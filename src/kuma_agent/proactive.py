@@ -60,12 +60,18 @@ KUMA_BRIEFING_TIME、既定 07:30、"off" で無効）:
   の見出し付きで投稿する。実行したら成功・失敗にかかわらず
   last_run_at を更新し、失敗時は短い失敗の知らせを投稿する
 
-巡回にはもう 1 つ、発言を伴わない仕事がある: 長期記憶の自動の
-機械的除去（memory_tidy.auto_tidy_memory）。ユーザーの
-MEMORY.md が大きい（全文注入の上限の 3 倍超）場合だけ、1 日
-1 回まで重複除去を自動適用する。モデル統合は自動では行わず、
-適用しても会話へ投稿はしない。実施日はユーザーの置き場の
-memory_tidy_state.json に記録する。
+巡回には発言を伴わない仕事も 2 つある: 長期記憶の自動の
+機械的除去（memory_tidy.auto_tidy_memory）と、長期記憶の
+自動抽出（memory_extract.auto_extract_memory）。機械的除去は
+ユーザーの MEMORY.md が大きい（全文注入の上限の 3 倍超）
+場合だけ、1 日 1 回まで重複除去を自動適用する。モデル統合は
+自動では行わず、適用しても会話へ投稿はしない。実施日は
+ユーザーの置き場の memory_tidy_state.json に記録する。
+自動抽出は、前回の抽出以降に増えた会話があれば 1 日 1 回まで、
+実モデルに「長期記憶に残すべきこと」を抽出させて MEMORY.md
+へ足す（KUMA_MEMORY_EXTRACT=0 で無効化）。モデルなしの一時
+Session の巡回では実行せず、試行の記録も残さない。こちらも
+会話へは投稿しない。
 
 投稿先は main の会話記録で、追記は Session が使う既存の保存経路
 （Memory.append_turn）を通す。発言には能動発信の印
@@ -90,6 +96,7 @@ from typing import Callable
 from .config import Config, normalize_mode
 from .delegate import run_delegated_task
 from .jobs import Job, JobBoard, is_due
+from .llm import ChatModel
 from .memory import (
     list_tenant_names,
     list_user_names,
@@ -97,6 +104,7 @@ from .memory import (
     normalize_user_name,
     tenant_dir,
 )
+from .memory_extract import auto_extract_memory
 from .memory_tidy import auto_tidy_memory
 from .notify_prefs import load_notify_prefs, parse_hhmm
 from .session import Session
@@ -525,6 +533,21 @@ def check_and_post(cfg: Config, now: datetime | None = None,
             if session is None:
                 session = Session(cfg, _UnusedModel())
         return session
+
+    # 長期記憶の自動抽出（memory_extract）: 前回の抽出以降に増えた
+    # 会話があれば、1 日 1 回まで実モデルに抽出させて MEMORY.md
+    # へ足す。会話への投稿はしない。モデルなしの一時 Session の
+    # 経路（CLI の proactive）では実行せず、試行の記録も残さない
+    # （定期ジョブのモデルなしガードと同じ考え方）。モデルは、
+    # 新しい材料があるときだけセッションから引く
+    def extract_model() -> ChatModel | None:
+        model = get_session().model
+        return None if isinstance(model, _UnusedModel) else model
+
+    try:
+        auto_extract_memory(user_data_dir, extract_model, now=now)
+    except Exception:
+        pass  # 抽出の失敗で巡回全体は落とさない
 
     # 定期ジョブは用事とは独立の仕組みで、モードも静かな時間帯も
     # 問わず、期限が来ていれば先に実行して結果を投稿する

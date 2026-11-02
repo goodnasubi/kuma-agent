@@ -268,6 +268,47 @@ def _run_memory_tidy(cfg: Config, client, dry_run: bool = False) -> int:
     return 0
 
 
+def _run_memory_extract(cfg: Config, client, dry_run: bool = False) -> int:
+    """会話から長期記憶（MEMORY.md）を抽出する（運用者向けコマンドの本体）。
+
+    対象は cfg が指すテナント×ユーザーの置き場。前回の抽出以降に
+    増えた会話の発話から、モデルに「長期記憶に残すべきこと」を
+    箇条書きで抽出させ、控えを取って MEMORY.md の末尾へ足す
+    （モデルが要るため API キー必須のコマンドとして配置する）。
+    --dry-run では本体も状態も変更せず、提案される箇条書きだけを
+    表示する。抽出は明示的な実行なので、自動抽出の無効化
+    （KUMA_MEMORY_EXTRACT=0）や 1 日 1 回の上限は適用しない
+    （朝のまとめの手動実行と同じ考え方）。
+    """
+    from .memory_extract import extract_memory
+
+    memory = Memory(cfg.user_data_dir)
+    result = extract_memory(memory, client, dry_run=dry_run)
+    if result.reason == "no_new_turns":
+        print("新しい会話がありませんでした")
+        return 0
+    if result.reason == "model_failed":
+        print("抽出に失敗したため、長期記憶は変更していません")
+        return 0
+    if result.reason == "nothing":
+        print("新しく覚えることはありませんでした")
+        return 0
+    if dry_run:
+        print("提案される項目:")
+        for bullet in result.bullets:
+            print(bullet)
+        print("（dry-run のため、MEMORY.md は変更していません）")
+        return 0
+    if not result.applied:
+        print("抽出された項目はすべて長期記憶にありました"
+              "（変更はありませんでした）")
+        return 0
+    if result.backup_path is not None:
+        print(f"バックアップ: {result.backup_path}")
+    print(f"{result.added_count} 件の項目を長期記憶に足しました")
+    return 0
+
+
 def _run_memory_search(cfg: Config, query: str, limit: int = 5) -> int:
     """長期記憶（MEMORY.md）のキーワード検索（コマンドの本体）。
 
@@ -407,6 +448,14 @@ def main(argv: list[str] | None = None) -> int:
                                     help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     memory_tidy_parser.add_argument("--dry-run", action="store_true",
                                     help="本体を変更せず、提案を MEMORY.md.proposed に書き出す")
+    memory_extract_parser = sub.add_parser(
+        "memory-extract", help="新しい会話から長期記憶（MEMORY.md）を抽出する")
+    memory_extract_parser.add_argument("--tenant", default=None,
+                                       help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
+    memory_extract_parser.add_argument("--user", default=None,
+                                       help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
+    memory_extract_parser.add_argument("--dry-run", action="store_true",
+                                       help="本体を変更せず、提案される箇条書きだけを表示する")
     jobs_parser = sub.add_parser("jobs", help="定期ジョブの一覧を表示する")
     jobs_parser.add_argument("--tenant", default=None,
                              help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
@@ -469,6 +518,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "memory-tidy":  # モデル統合が要るため API キー必須
         return _run_memory_tidy(cfg, client, dry_run=args.dry_run)
+    if args.command == "memory-extract":  # 抽出にモデルが要るため API キー必須
+        return _run_memory_extract(cfg, client, dry_run=args.dry_run)
     if args.command == "web":
         from .web import serve
 
