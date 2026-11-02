@@ -72,6 +72,9 @@ class Config:
         # 同じ流儀）。フィールドの既定値が組み立てられた後に直す
         if self.approval_timeout_seconds <= 0:
             self.approval_timeout_seconds = 300
+        # 委任の時間切れも同じ流儀で、0 以下は既定値として扱う
+        if self.delegate_timeout_seconds <= 0:
+            self.delegate_timeout_seconds = 600
 
     @property
     def is_cli_provider(self) -> bool:
@@ -122,6 +125,15 @@ class Config:
     # 道具で検索させる（memory.memory_inject_text）
     memory_full_inject_chars: int = field(
         default_factory=lambda: _env_int("KUMA_MEMORY_FULL_INJECT_CHARS", 6000))
+    # 委任（delegate 道具）で作る子エージェントのモデル名。未指定
+    # （None）なら親と同じモデルを使う。プロバイダは常に親と同じ
+    delegate_model: str | None = field(
+        default_factory=lambda: os.environ.get("KUMA_DELEGATE_MODEL") or None)
+    # 委任した仕事の時間切れ（秒）。子がこの時間に最終応答を返さ
+    # なければ、親には時間切れを道具の失敗として返す。0 以下は
+    # __post_init__ で既定値（600）として扱う
+    delegate_timeout_seconds: int = field(
+        default_factory=lambda: _env_int("KUMA_DELEGATE_TIMEOUT_SECONDS", 600))
 
     @property
     def tenant_data_dir(self) -> Path:

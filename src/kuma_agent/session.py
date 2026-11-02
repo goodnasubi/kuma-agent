@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import Config, normalize_mode
+from .delegate import DELEGATE_NOTICE, run_delegated_task
 from .llm import Attachment, ChatModel, Message, quoted_content
 from .mcp_client import McpManager, get_shared_manager
 from .memory import (
@@ -110,7 +111,8 @@ class Session:
                  session_id: str = "main",
                  on_status: Callable[[str], None] | None = None,
                  mcp_manager: McpManager | None = None,
-                 approver: Callable[[str, dict], bool] | None = None) -> None:
+                 approver: Callable[[str, dict], bool] | None = None,
+                 delegate_child: bool = False) -> None:
         self.cfg = cfg
         self.model = model
         # 作業中表示のコールバック。対話ループの各段階で「今なにを
@@ -124,11 +126,16 @@ class Session:
         # して常に却下になる（_check_approval）。属性として差し
         # 替えも可。
         self.approver = approver
+        # 委任で作られた子セッションかどうか。子は会話を親と混ぜ
+        # ないため、相棒モードでも部屋の固定（main）の対象にせず、
+        # delegate- で始まる自分のセッション ID をそのまま使う。
+        # また子には delegate 道具自体を登録しない（委任は1段まで）
+        self.delegate_child = delegate_child
         self.tenant = normalize_tenant_name(cfg.tenant)
         self.user = normalize_user_name(cfg.user)
         self.mode = normalize_mode(cfg.mode)
         # 相棒モードでは部屋は実質 1 つに固定する（指定は無視する）
-        if self.mode == "ledger":
+        if self.mode == "ledger" and not delegate_child:
             self.session_id = DEFAULT_SESSION_ID
         else:
             self.session_id = normalize_session_id(session_id)
@@ -162,6 +169,11 @@ class Session:
         self.approvals_enabled = approvals_enabled_for(cfg.data_dir, self.tenant)
         if self.approvals_enabled:
             self.tools.approval_check = self._check_approval
+        # 委任（delegate）の道具は、委任で作られた子には登録
+        # しない（委任は1段まで。それ以上は子の仕事の範囲を
+        # 際限なく広げてしまうため）
+        if not delegate_child:
+            self._register_delegate_tool()
         self.history: list[Message] = self._restore_history()
         memory_text = self.memory.load_long_term()
         self.system_prompt = load_persona(data_dir)
@@ -187,6 +199,10 @@ class Session:
             skills_text = self._skills_catalog_text()
             if skills_text:
                 self.system_prompt += f"\n\n# 使える手順書\n{skills_text}"
+        if delegate_child:
+            # 子には「委ねられた仕事の担当である」ことを伝え、
+            # 最後の応答が依頼元への報告になるようにする
+            self.system_prompt += f"\n\n# 委任された作業\n{DELEGATE_NOTICE}"
 
     def _skills_catalog_text(self) -> str:
         """使える手順書の目次をシステムプロンプト用に組み立てる。
@@ -237,6 +253,31 @@ class Session:
             self.tools.register(Tool(
                 prefixed, schema["description"], schema["parameters"],
                 call_mcp))
+
+    def _register_delegate_tool(self) -> None:
+        """委任（delegate）の道具を登録する。
+
+        実体は delegate.run_delegated_task で、新しい Session を
+        子として作って仕事を渡し、子の最終応答を結果として返す。
+        子には道具一式（ファイル・用事・記憶・MCP・手順書など親と
+        同じ構成）を使わせるが、delegate 自体は登録しない
+        （__init__ で delegate_child の場合はここを通らない）。
+        """
+        self.tools.register(Tool(
+            "delegate",
+            "別のエージェントに仕事を委ねる。独立して進められる仕事を、"
+            "前提や期待する成果物まで含めて自己完結した文章で task に"
+            "書いて渡すこと。委ねた先のエージェントは同じ道具（ファイル・"
+            "用事・記憶・手順書など）を使え、作業が終わると最終報告が"
+            "この道具の結果として返る。",
+            {"type": "object", "properties": {
+                "task": {"type": "string",
+                         "description": "委ねる仕事の内容（自己完結した文章）"}},
+             "required": ["task"]},
+            self._run_delegate))
+
+    def _run_delegate(self, task: str) -> str:
+        return run_delegated_task(self, task)
 
     def _open_tasks_text(self) -> str:
         """進行中の用事をシステムプロンプト用の箇条書きにする。
