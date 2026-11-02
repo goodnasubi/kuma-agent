@@ -36,6 +36,7 @@ from .mcp_client import McpManager, get_shared_manager
 from .memory import (
     DEFAULT_SESSION_ID,
     Memory,
+    format_conversation_hit,
     memory_inject_text,
     normalize_session_id,
     normalize_tenant_name,
@@ -180,6 +181,9 @@ class Session:
         # 際限なく広げてしまうため）
         if not delegate_child:
             self._register_delegate_tool()
+        # 会話記録の横断検索は、用事や長期記憶の仕組みとは独立
+        # （対象は会話記録そのもの）なため、モードを問わず登録する
+        self._register_history_search_tool()
         self.history: list[Message] = self._restore_history()
         memory_text = self.memory.load_long_term()
         self.system_prompt = load_persona(data_dir)
@@ -284,6 +288,36 @@ class Session:
 
     def _run_delegate(self, task: str) -> str:
         return run_delegated_task(self, task)
+
+    def _register_history_search_tool(self) -> None:
+        """会話記録の横断検索（search_conversations）の道具を登録する。
+
+        対象はこのユーザーの置き場にある全セッションの会話記録で、
+        長期記憶（MEMORY.md）の検索とは別物。用事や長期記憶の
+        道具と違いモードによる出し分けはしない（スレッドモード
+        でも過去の会話は探せる方が自然なため）。
+        """
+        self.tools.register(Tool(
+            "search_conversations",
+            "過去の会話記録をキーワードで検索する。全セッション"
+            "（部屋）を横断して発話単位で探し、セッション名・日時・"
+            "話者つきで返す。利用者が「前に話した」「以前決めた」"
+            "ことなど、会話そのものの内容を思い出す必要があるときに"
+            "使う。長期記憶に書かれた事実を探す search_memory とは"
+            "別物で、こちらは実際の発言を探す。",
+            {"type": "object", "properties": {
+                "query": {"type": "string",
+                          "description": "検索キーワード。空白や句読点で区切って複数指定できる"},
+                "limit": {"type": "integer",
+                          "description": "返す最大件数（既定 5）"}},
+             "required": ["query"]},
+            self._search_conversations))
+
+    def _search_conversations(self, query: str, limit: int = 5) -> str:
+        hits = self.memory.search_conversations(query, limit=limit)
+        if not hits:
+            return "見つかりませんでした"
+        return "\n".join(format_conversation_hit(hit) for hit in hits)
 
     def _open_tasks_text(self) -> str:
         """進行中の用事をシステムプロンプト用の箇条書きにする。

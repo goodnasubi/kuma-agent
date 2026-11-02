@@ -8,8 +8,9 @@ from datetime import datetime
 from .config import Config, mode_label, normalize_mode
 from .llm import create_client
 from .memory import (Memory, cleanup_expired, delete_session_record,
-                     list_session_ids, normalize_session_id,
-                     normalize_tenant_name, retention_days_for)
+                     format_conversation_hit, list_session_ids,
+                     normalize_session_id, normalize_tenant_name,
+                     retention_days_for)
 from .session import Session
 from .tools import summarize_tool_args
 
@@ -211,6 +212,23 @@ def _run_memory_search(cfg: Config, query: str, limit: int = 5) -> int:
     return 0
 
 
+def _run_search_history(cfg: Config, query: str, limit: int = 5) -> int:
+    """過去の会話記録の横断検索（コマンドの本体）。
+
+    対象は cfg が指すテナント×ユーザーの置き場にある全セッション
+    の会話記録。ヒットした発話をセッション名・日時・話者つきで
+    表示する。モデルも API キーも要らない。
+    """
+    hits = Memory(cfg.user_data_dir).search_conversations(query,
+                                                          limit=limit)
+    if not hits:
+        print("見つかりませんでした")
+        return 0
+    for hit in hits:
+        print(format_conversation_hit(hit))
+    return 0
+
+
 def _show_status(status: str) -> None:
     """作業中表示を同じ行に上書きする（プレーンな対話ループ用）。
 
@@ -299,6 +317,16 @@ def main(argv: list[str] | None = None) -> int:
                                       help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     memory_search_parser.add_argument("--limit", type=int, default=5,
                                       help="表示する最大件数（既定: 5）")
+    search_history_parser = sub.add_parser(
+        "search-history", help="過去の会話記録をキーワードで横断検索する")
+    search_history_parser.add_argument(
+        "query", help="検索クエリ（空白や句読点で区切って複数キーワード）")
+    search_history_parser.add_argument("--tenant", default=None,
+                                       help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
+    search_history_parser.add_argument("--user", default=None,
+                                       help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
+    search_history_parser.add_argument("--limit", type=int, default=5,
+                                       help="表示する最大件数（既定: 5）")
     memory_tidy_parser = sub.add_parser(
         "memory-tidy", help="長期記憶（MEMORY.md）を整理する")
     memory_tidy_parser.add_argument("--tenant", default=None,
@@ -333,6 +361,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_proactive(cfg, tenant=args.tenant, user=args.user)
     if args.command == "memory-search":  # 記憶の検索もモデルも API キーも要らない
         return _run_memory_search(cfg, args.query, limit=args.limit)
+    if args.command == "search-history":  # 会話の検索もモデルも API キーも要らない
+        return _run_search_history(cfg, args.query, limit=args.limit)
     if args.command == "jobs":  # 一覧表示もモデルも API キーも要らない
         return _run_jobs(cfg)
     api_key = cfg.resolve_api_key()

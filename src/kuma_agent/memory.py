@@ -461,6 +461,16 @@ class Memory:
         """
         return search_memory_text(self.load_long_term(), query, limit=limit)
 
+    def search_conversations(self, query: str,
+                             limit: int = 5) -> list[ConversationHit]:
+        """このユーザーの全セッションの会話記録を横断検索する。
+
+        対象は自分の置き場の conversations/*.jsonl すべて（現在の
+        セッションに限らない）。照合と並び順は
+        search_conversation_records の流儀。
+        """
+        return search_conversation_records(self.data_dir, query, limit=limit)
+
     def append_turn(self, role: str, content: str,
                     quote: str | None = None,
                     proactive: bool = False) -> None:
@@ -507,3 +517,158 @@ class Memory:
             if isinstance(record, dict) and "role" in record:
                 records.append(record)
         return records
+
+
+@dataclass
+class ConversationHit:
+    """会話記録の横断検索のヒット 1 件（発話単位）。
+
+    session はセッション名（記録ファイルの名前）、ts は記録に
+    残っている発話の日時（ISO 文字列。無い記録では空文字列）、
+    role は記録上の話者（"user" / "assistant" / "summary" など）、
+    excerpt は一致箇所の前後を切り出した本文の抜粋。
+    """
+    session: str
+    ts: str
+    role: str
+    excerpt: str
+
+
+# 記録上の role → 利用者に分かる話者の表記
+_ROLE_LABELS: dict[str, str] = {
+    "user": "利用者",
+    "assistant": "クマ",
+    "summary": "要約",
+    "tool": "道具の結果",
+}
+
+
+def role_label(role: str) -> str:
+    """記録上の role を利用者に分かる話者の表記にする。"""
+    return _ROLE_LABELS.get(role, role)
+
+
+# 抜粋の目安の長さ（これを超える発話は一致箇所の前後で切り出す）
+_EXCERPT_CHARS = 200
+
+
+def _conversation_excerpt(content: str, terms: list[str]) -> str:
+    """発話本文を表示用の抜粋にする。
+
+    改行や連続する空白は 1 つの空白に潰す。目安の長さ以下なら
+    そのまま返し、超える場合は最初に一致した語の前後を中心に
+    切り出し、切り捨てた側に「…」を付ける。
+    """
+    flat = " ".join(content.split())
+    if len(flat) <= _EXCERPT_CHARS:
+        return flat
+    positions = [flat.find(t) for t in terms if t in flat]
+    pos = min(positions) if positions else 0
+    start = max(0, pos - _EXCERPT_CHARS // 2)
+    end = min(len(flat), start + _EXCERPT_CHARS)
+    if end - start < _EXCERPT_CHARS:  # 末尾に寄った分は前へ広げる
+        start = max(0, end - _EXCERPT_CHARS)
+    excerpt = flat[start:end]
+    if start > 0:
+        excerpt = "…" + excerpt
+    if end < len(flat):
+        excerpt += "…"
+    return excerpt
+
+
+def _ts_sort_value(ts: str) -> float | None:
+    """ISO 日時文字列を並び替え用の時刻値にする（解釈できなければ None）。"""
+    try:
+        return datetime.fromisoformat(ts).timestamp()
+    except ValueError:
+        return None
+
+
+def search_conversation_records(data_dir: Path, query: str,
+                                limit: int = 5) -> list[ConversationHit]:
+    """ユーザーの置き場の全会話記録を発話単位でキーワード検索する。
+
+    対象は data_dir / conversations / *.jsonl のすべて（委任の子の
+    記録 delegate-* も含む）。クエリの語への分割と点数付けは
+    長期記憶の検索（search_memory_text）と同じ流儀で、各語の
+    部分文字列一致により「一致した語の数」を主、「語の出現回数」
+    を副として点数付けし、同点は新しい発話を優先する。新しさは
+    記録の日時（ts）で判定し、日時が無い・解釈できない記録は
+    ファイルの更新時刻で代用する（読み進めた順序も同点の
+    判定に使う）。壊れた行や読めないファイルは読み飛ばし、
+    検索全体は落とさない。
+    """
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 5
+    if limit < 1:
+        limit = 1
+    terms = _query_terms(query)
+    if not terms:
+        return []
+    conv = data_dir / "conversations"
+    if not conv.is_dir():
+        return []
+    paths = []
+    for path in conv.glob("*.jsonl"):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        paths.append((mtime, path.name, path))
+    # 古いファイルから読む（読み進めた順序＝新しさの代用に使うため）
+    paths.sort()
+    scored: list[tuple[int, int, float, int, ConversationHit]] = []
+    ordinal = 0
+    for mtime, _name, path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue  # 読めないファイルは飛ばす
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # 壊れた行は飛ばす
+            if not isinstance(record, dict):
+                continue
+            content = record.get("content")
+            role = record.get("role")
+            if not isinstance(content, str) or not content:
+                continue
+            if not isinstance(role, str) or not role:
+                continue
+            ordinal += 1
+            matched = [t for t in terms if t in content]
+            if not matched:
+                continue
+            occurrences = sum(content.count(t) for t in matched)
+            ts = record.get("ts")
+            ts_text = ts if isinstance(ts, str) else ""
+            recency = _ts_sort_value(ts_text)
+            if recency is None:
+                recency = mtime  # 日時が無い記録はファイルの新しさで代用
+            hit = ConversationHit(
+                session=path.stem, ts=ts_text, role=role,
+                excerpt=_conversation_excerpt(content, matched))
+            scored.append((-len(matched), -occurrences, -recency,
+                           -ordinal, hit))
+    scored.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    return [item[4] for item in scored[:limit]]
+
+
+def format_conversation_hit(hit: ConversationHit) -> str:
+    """会話検索のヒット 1 件を表示用の 1 行にする。
+
+    「（セッション名、日時、話者）抜粋」の形。日時が記録に無い
+    発話では日時の部分を省く。
+    """
+    meta = hit.session
+    if hit.ts:
+        meta += f"、{hit.ts.replace('T', ' ')}"
+    meta += f"、{role_label(hit.role)}"
+    return f"（{meta}）{hit.excerpt}"

@@ -50,6 +50,7 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "write_memory": "記憶に書き留め中",
     "save_memory": "記憶に書き留め中",
     "search_memory": "記憶を検索中",
+    "search_conversations": "過去の会話を検索中",
     "tidy_memory": "長期記憶を整理中",
     "read_skill": "手順書を読んでいます",
     "save_skill": "手順書を書き留め中",
