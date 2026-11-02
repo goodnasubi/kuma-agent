@@ -64,6 +64,10 @@ class Attachment:
     name: str
     media_type: str
     data: bytes
+    # 音声の文字起こし（transcribe で Gemini が書き起こした文章）。
+    # 音声をそのまま聞けない頭脳へ内容を渡すために Session が
+    # 発話の合流点で用意する。未実施・失敗時は None
+    transcript: str | None = None
 
     @property
     def is_image(self) -> bool:
@@ -103,15 +107,28 @@ class Attachment:
         """テキスト文書を本文として埋め込むときの表現。"""
         return f"[添付文書: {self.name}]\n{self.text_content()}"
 
+    def model_note(self) -> str:
+        """添付をそのまま渡せない場合にモデルへ渡す文。
+
+        プレースホルダに、音声の文字起こしがあればその文章を
+        添える（モデルが音声の内容として読める形）。会話ログの
+        要約にもこの形を使い、文字起こしが記録に残るようにする。
+        """
+        note = self.placeholder()
+        if self.is_audio and self.transcript:
+            return f"{note}\n（文字起こし）{self.transcript}"
+        return note
+
 
 def fallback_text(attachment: Attachment) -> str:
     """プロバイダに直接渡せない添付の共通の落とし先。
 
-    テキスト文書は本文を埋め込み、それ以外はプレースホルダ文にする。
+    テキスト文書は本文を埋め込み、それ以外はプレースホルダ文に
+    する（音声は文字起こしがあれば文章も添える）。
     """
     if attachment.is_text:
         return attachment.embedded_text()
-    return attachment.placeholder()
+    return attachment.model_note()
 
 
 @dataclass

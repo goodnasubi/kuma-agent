@@ -28,10 +28,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from . import transcribe
 from .config import Config, normalize_mode
 from .delegate import DELEGATE_NOTICE, run_delegated_task
 from .jobs import JobBoard
-from .llm import Attachment, ChatModel, Message, quoted_content
+from .llm import Attachment, ChatModel, GeminiClient, Message, quoted_content
 from .mcp_client import McpManager, get_shared_manager
 from .memory import (
     DEFAULT_SESSION_ID,
@@ -79,6 +80,7 @@ SUMMARY_PREFIX = "（これまでの会話の要約）"
 # 通知して「表示なし」に戻す。
 THINKING = "考え中"
 SUMMARIZING = "会話を要約中"
+TRANSCRIBING = "音声を文字にしています"
 # 承認待ちと、その結果の文言。結果は次の状態通知ですぐ上書き
 # されるが、ポーリング間隔によっては画面に残ることもある
 APPROVAL_DENIED = "承認されませんでした"
@@ -113,11 +115,13 @@ def _message_text(msg: Message, include_quote: bool = False) -> str:
 
     記録では引用を別フィールドに持つため、通常は本文だけを使う。
     要約向けでは引用ブロックも含め、どの発話への返信か分かるようにする。
+    音声の文字起こしがある場合は、添付の要約として文章も残す
+    （バイト列は残さないという既存の流儀は変えない）。
     """
     text = quoted_content(msg) if include_quote else msg.content
     if msg.attachments:
         text = (text + " " if text else "") + " ".join(
-            att.placeholder() for att in msg.attachments)
+            att.model_note() for att in msg.attachments)
     return text
 
 
@@ -384,6 +388,9 @@ class Session:
         """
         atts = list(attachments or [])
         quote_text = quote if quote and quote.strip() else None
+        # 音声添付は、頭脳へ渡す前に必要なら文字起こししておく
+        # （履歴と記録の両方に文章が流れるよう、この合流点で行う）
+        self._transcribe_audio_attachments(atts)
         self.history.append(Message(
             "user", user_text, attachments=atts, quote=quote_text))
         self.memory.append_turn(
@@ -410,6 +417,31 @@ class Session:
             return "（道具の呼び出しが上限に達しました）"
         finally:
             self._notify("")  # 応答が終わったら作業中表示を消す
+
+    def _transcribe_audio_attachments(self, atts: list[Attachment]) -> None:
+        """音声添付を、頭脳へ渡す前に Gemini で文字起こしする。
+
+        今の頭脳が Gemini（音声データをそのまま聞ける）のときは
+        従来どおりデータを渡すため文字起こしはしない。文字起こし
+        が無効なとき（KUMA_TRANSCRIBE=0）・Gemini のキーが無い
+        ときも何もしない。失敗した場合はその添付だけ従来の扱い
+        （注記・ファイルのみ）に戻し、会話は壊さない。結果は
+        Attachment.transcript に載り、頭脳への渡し方（API 系の
+        注記・CLI 系の指示）と会話ログの要約の両方に流れる。
+        """
+        targets = [a for a in atts if a.is_audio and not a.transcript]
+        if not targets:
+            return
+        if self.cfg.provider == "gemini" or isinstance(self.model, GeminiClient):
+            return  # Gemini は音声データ自体を聞ける
+        if not transcribe.available():
+            return
+        self._notify(TRANSCRIBING)
+        for att in targets:
+            try:
+                att.transcript = transcribe.transcribe_audio(att)
+            except Exception:
+                att.transcript = None  # 失敗は従来の扱いに戻す
 
     def post_proactive_message(self, content: str) -> None:
         """能動発信の発言を履歴と記録に足す（モデルの応答とは別の経路）。

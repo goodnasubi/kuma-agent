@@ -35,6 +35,10 @@ def _render_prompt(system_prompt: str, messages: list[Message],
                     lines.append(f"[添付ファイル: {path}]")
                 else:
                     lines.append(att.placeholder())
+                # 音声の文字起こしがあれば、ファイルに加えて文章も
+                # 渡す（相手が聞き取れなくても内容が伝わるよう）
+                if att.is_audio and att.transcript:
+                    lines.append(f"（文字起こし）{att.transcript}")
         elif msg.role == "assistant" and (msg.content or msg.quote):
             lines.append(f"クマ: {quoted_content(msg)}")
         elif msg.role == "tool":
