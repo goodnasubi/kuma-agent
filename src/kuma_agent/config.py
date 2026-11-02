@@ -97,6 +97,11 @@ class Config:
     # この日数を過ぎたら自動で掃除される（cleanup_expired）。0 で無期限
     retention_days: int = field(
         default_factory=lambda: _env_int("KUMA_RETENTION_DAYS", 90))
+    # 能動発信の巡回間隔（秒）。Web サーバーの裏側で定期的に全テナント×
+    # 全ユーザーを巡回し、言うべきことがあるユーザーにだけ発言する
+    # （proactive）。0 以下で巡回しない
+    proactive_interval_seconds: int = field(
+        default_factory=lambda: _env_int("KUMA_PROACTIVE_INTERVAL_SECONDS", 300))
 
     @property
     def tenant_data_dir(self) -> Path:

@@ -84,6 +84,27 @@ def _run_threads(cfg: Config, delete: str | None = None) -> int:
     return 0
 
 
+def _run_proactive(cfg: Config, tenant: str | None = None,
+                   user: str | None = None) -> int:
+    """能動発信のチェックを 1 回だけ実行する（運用者向けコマンドの本体）。
+
+    tenant を指定するとそのテナント（配下の全ユーザー）だけ、user も
+    指定するとその 1 ユーザーだけを対象にする。投稿した場合は対象と
+    文面を表示し、投稿が無ければその旨を表示する。モデルも API キー
+    も要らない（発言文は用事の一覧から組み立てる）。
+    """
+    from .proactive import run_sweep
+
+    posted = run_sweep(cfg, tenant=tenant, user=user)
+    if not posted:
+        print("投稿する内容はありませんでした")
+        return 0
+    for tenant_name, user_name, text in posted:
+        print(f"投稿しました（テナント: {tenant_name}、ユーザー: {user_name}）")
+        print(text)
+    return 0
+
+
 def _show_status(status: str) -> None:
     """作業中表示を同じ行に上書きする（プレーンな対話ループ用）。
 
@@ -137,6 +158,12 @@ def main(argv: list[str] | None = None) -> int:
                                 help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     threads_parser.add_argument("--delete", default=None, metavar="名前",
                                 help="指定した名前のスレッドの記録を削除する")
+    proactive_parser = sub.add_parser(
+        "proactive", help="能動発信のチェックを 1 回実行する")
+    proactive_parser.add_argument("--tenant", default=None,
+                                  help="対象のテナント名（既定: 全テナント）")
+    proactive_parser.add_argument("--user", default=None,
+                                  help="対象のユーザー名（既定: 対象テナントの全ユーザー）")
     args = parser.parse_args(argv)
 
     cfg = Config()
@@ -151,6 +178,8 @@ def main(argv: list[str] | None = None) -> int:
                             days=args.days)
     if args.command == "threads":  # 一覧・削除もモデルも API キーも要らない
         return _run_threads(cfg, delete=args.delete)
+    if args.command == "proactive":  # 能動発信もモデルも API キーも要らない
+        return _run_proactive(cfg, tenant=args.tenant, user=args.user)
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)

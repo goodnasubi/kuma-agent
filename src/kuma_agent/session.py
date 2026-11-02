@@ -177,6 +177,16 @@ class Session:
         finally:
             self._notify("")  # 応答が終わったら作業中表示を消す
 
+    def post_proactive_message(self, content: str) -> None:
+        """能動発信の発言を履歴と記録に足す（モデルの応答とは別の経路）。
+
+        エージェントから先に送る発言（proactive）専用で、道具の循環は
+        回さない。記録には能動発信の印（proactive: true）を付けるが、
+        復元時は通常の assistant 発言として戻る。
+        """
+        self.history.append(Message("assistant", content))
+        self.memory.append_turn("assistant", content, proactive=True)
+
     def _notify(self, status: str) -> None:
         """作業中表示のコールバックへ現在の作業を通知する。
 

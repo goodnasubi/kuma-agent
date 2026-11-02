@@ -182,6 +182,39 @@ def retention_days_for(data_dir: Path, tenant: str | None,
     return overrides.get(normalize_tenant_name(tenant), default_days)
 
 
+def save_retention_override(data_dir: Path, tenant: str | None,
+                            days: int | None) -> None:
+    """テナントごとの保持期間の上書きを retention.json に保存する。
+
+    days に日数を渡すとそのテナントの指定として書き、None を渡すと
+    そのテナントの指定を取り除く（全体の既定に戻る）。他のテナントの
+    指定はそのまま残す。既存ファイルが壊れている場合は、引き継げる
+    指定が無いため、この変更だけを持つ内容として書き直す。
+    """
+    name = normalize_tenant_name(tenant)
+    try:
+        raw = json.loads(
+            (data_dir / RETENTION_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    tenants = raw.get("tenants")
+    if not isinstance(tenants, dict):
+        tenants = {}
+    # 既存のキーも正規化して引き継ぐ（読み込み側の照合にそろえる）
+    merged: dict[str, object] = {
+        normalize_tenant_name(key): value for key, value in tenants.items()}
+    if days is None:
+        merged.pop(name, None)
+    else:
+        merged[name] = days
+    raw["tenants"] = merged
+    data_dir.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(raw, ensure_ascii=False, indent=2)
+    (data_dir / RETENTION_FILENAME).write_text(text + "\n", encoding="utf-8")
+
+
 def iter_tasks_files(data_dir: Path) -> list[Path]:
     """掃除対象の用事ファイルを列挙する。
 
@@ -304,17 +337,24 @@ class Memory:
         return [line for line in text.splitlines() if keyword in line]
 
     def append_turn(self, role: str, content: str,
-                    quote: str | None = None) -> None:
+                    quote: str | None = None,
+                    proactive: bool = False) -> None:
         """会話履歴に 1 発話を追記する（セッションごとの JSONL）。
 
         quote は引用返信の引用元の本文。無い発話ではキー自体を
-        付けない（旧来の記録形式と互換に保つ）。
+        付けない（旧来の記録形式と互換に保つ）。proactive は能動発信
+        （エージェントから先に送った発言）の印で、True のときだけ
+        キーを付ける。読み込み側は role / content / quote 以外の
+        キーを無視するので、印があっても復元は通常の発話として
+        扱われる。
         """
         self.conversations_dir.mkdir(parents=True, exist_ok=True)
         record = {"ts": datetime.now().isoformat(timespec="seconds"),
                   "session": self.session_id, "role": role, "content": content}
         if quote:
             record["quote"] = quote
+        if proactive:
+            record["proactive"] = True
         with self.conversation_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 

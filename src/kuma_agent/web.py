@@ -16,20 +16,27 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlsplit
 
-from .config import mode_label, normalize_mode
+from .config import Config, mode_label, normalize_mode
 from .llm import MAX_ATTACHMENT_BYTES, Attachment, guess_media_type
 from .memory import (
     DEFAULT_SESSION_ID,
+    DEFAULT_TENANT,
     cleanup_expired,
     delete_session_record,
     list_session_ids,
     list_tenant_names,
     list_user_names,
+    load_retention_overrides,
     normalize_session_id,
     normalize_tenant_name,
     normalize_user_name,
+    retention_days_for,
+    save_retention_override,
+    tenant_dir,
 )
+from .proactive import run_sweep
 from .session import Session
+from .settings import proactive_enabled_for, set_proactive_enabled
 
 # ブランド色（README のイメージカラー）
 HONEY = "#E79A3C"
@@ -76,6 +83,21 @@ _PAGE_TEMPLATE = """\
   .sessions button { padding: 6px 12px; font-size: 13px; background: #fff;
            color: __COCOA__; border: 1px solid __COCOA__; }
   .sessions[hidden] { display: none; }
+  #tenantPanel { background: #fff; border-bottom: 1px solid __HONEY__;
+                 padding: 12px 16px; }
+  #tenantPanel[hidden] { display: none; }
+  #tenantPanel h2 { font-size: 15px; margin: 0 0 8px; }
+  .tenantRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+               padding: 8px 0; border-top: 1px dashed __HONEY__; font-size: 14px; }
+  .tenantRow .tname { font-weight: bold; min-width: 8em; }
+  .tenantRow input[type="number"] { width: 5em; padding: 4px; font-size: 13px;
+               border-radius: 6px; border: 1px solid __COCOA__; }
+  .tenantRow button, .adminNew button { padding: 4px 12px; font-size: 13px;
+               background: #fff; color: __COCOA__; border: 1px solid __COCOA__; }
+  .adminNew { display: flex; gap: 8px; align-items: center; margin-top: 10px;
+              font-size: 14px; }
+  .adminNew input { padding: 6px; font-size: 13px; border-radius: 6px;
+               border: 1px solid __COCOA__; }
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex;
          flex-direction: column; gap: 10px; }
   .msg { max-width: 80%; padding: 10px 14px; border-radius: 14px;
@@ -147,7 +169,18 @@ _PAGE_TEMPLATE = """\
     <button id="createSession" type="button">作成</button>
     <button id="deleteSession" type="button">削除</button>
   </div>
+  <div class="sessions">
+    <button id="tenantAdminBtn" type="button">テナント管理</button>
+  </div>
 </header>
+<section id="tenantPanel" hidden>
+  <h2>テナント管理</h2>
+  <div id="tenantRows"></div>
+  <div class="adminNew">
+    <input id="adminNewTenant" placeholder="新しいテナント名" size="14">
+    <button id="adminCreateTenant" type="button">テナントを作成</button>
+  </div>
+</section>
 <div id="log"></div>
 <div id="dropHint">ファイルを離すと添付します</div>
 <form id="form">
@@ -182,6 +215,11 @@ const sessionSelect = document.getElementById('sessionSelect');
 const newSessionInput = document.getElementById('newSession');
 const createSessionBtn = document.getElementById('createSession');
 const deleteSessionBtn = document.getElementById('deleteSession');
+const tenantAdminBtn = document.getElementById('tenantAdminBtn');
+const tenantPanel = document.getElementById('tenantPanel');
+const tenantRows = document.getElementById('tenantRows');
+const adminNewTenant = document.getElementById('adminNewTenant');
+const adminCreateTenant = document.getElementById('adminCreateTenant');
 const quoteBox = document.getElementById('quoteBox');
 const quoteText = document.getElementById('quoteText');
 const clearQuoteBtn = document.getElementById('clearQuote');
@@ -421,6 +459,106 @@ deleteSessionBtn.addEventListener('click', async () => {
   if (wasCurrent) currentSession = 'main';
   await loadSessions();
   if (wasCurrent) applySession('main');
+});
+
+// テナント管理パネル。テナントごとに能動発信の ON/OFF と保持期限
+// （日数）を編集でき、新しいテナントの作成もできる。設定の保存は
+// /api/tenant_settings、作成は /api/tenants/create を使う
+tenantAdminBtn.addEventListener('click', () => {
+  tenantPanel.hidden = !tenantPanel.hidden;
+  if (!tenantPanel.hidden) loadTenantAdmin();
+});
+
+async function loadTenantAdmin() {
+  try {
+    const res = await fetch('/api/tenants');
+    const data = await res.json();
+    tenantRows.innerHTML = '';
+    for (const name of data.tenants) {
+      tenantRows.appendChild(await buildTenantRow(name));
+    }
+  } catch (e) { /* 一覧が取れなければパネルは空のままにする */ }
+}
+
+async function buildTenantRow(name) {
+  const row = document.createElement('div');
+  row.className = 'tenantRow';
+  const label = document.createElement('span');
+  label.className = 'tname';
+  label.textContent = name;
+  row.appendChild(label);
+  let settings = {};
+  try {
+    const res = await fetch(
+      '/api/tenant_settings?tenant=' + encodeURIComponent(name));
+    settings = await res.json();
+  } catch (e) { /* 設定が取れなければ既定の表示で続ける */ }
+  const proactiveLabel = document.createElement('label');
+  const toggle = document.createElement('input');
+  toggle.type = 'checkbox';
+  toggle.checked = settings.proactive_enabled !== false;
+  proactiveLabel.appendChild(toggle);
+  proactiveLabel.appendChild(document.createTextNode(' 能動発信'));
+  row.appendChild(proactiveLabel);
+  const retentionLabel = document.createElement('label');
+  retentionLabel.appendChild(document.createTextNode('保持期限（日）: '));
+  const days = document.createElement('input');
+  days.type = 'number';
+  days.min = '0';
+  if (settings.retention_days != null) days.value = settings.retention_days;
+  if (settings.retention_effective_days != null) {
+    days.placeholder = '既定 ' + settings.retention_effective_days;
+  }
+  retentionLabel.appendChild(days);
+  row.appendChild(retentionLabel);
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.textContent = '保存';
+  saveBtn.addEventListener('click', async () => {
+    const body = {tenant: name, proactive_enabled: toggle.checked,
+                  retention_days: days.value === '' ? null : Number(days.value)};
+    try {
+      const res = await fetch('/api/tenant_settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error('save failed');
+      window.alert('「' + name + '」の設定を保存しました');
+      loadTenantAdmin();
+    } catch (e) {
+      window.alert('保存に失敗しました');
+    }
+  });
+  row.appendChild(saveBtn);
+  const switchBtn = document.createElement('button');
+  switchBtn.type = 'button';
+  switchBtn.textContent = '切り替え';
+  switchBtn.addEventListener('click', () => applyTenant(name));
+  row.appendChild(switchBtn);
+  return row;
+}
+
+adminCreateTenant.addEventListener('click', async () => {
+  const name = adminNewTenant.value.trim();
+  if (!name) return;
+  let data = {};
+  try {
+    const res = await fetch('/api/tenants/create', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name}),
+    });
+    data = await res.json();
+    if (!res.ok) throw new Error(data.error || '作成に失敗しました');
+  } catch (e) {
+    window.alert('テナントを作成できませんでした: ' + (e.message || e));
+    return;
+  }
+  adminNewTenant.value = '';
+  await loadTenants();
+  await loadTenantAdmin();
+  applyTenant(data.tenant || name);
 });
 
 function setPending(files) {
@@ -764,6 +902,31 @@ class TenantStore:
             loaded = list(self._user_stores)
         return sorted(set(loaded) | set(list_tenant_names(self._cfg.data_dir)))
 
+    @property
+    def data_dir(self) -> Path:
+        """データ置き場のルート（settings.json / retention.json の置き場）。"""
+        return self._cfg.data_dir
+
+    @property
+    def retention_days(self) -> int:
+        """全体の既定の保持期間（テナント別指定が無い場合の実効値）。"""
+        return self._cfg.retention_days
+
+
+def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
+    """テナント設定 API の応答（GET / POST で共通の形）。
+
+    retention_days はそのテナントの指定値（未設定なら None）で、
+    retention_effective_days は全体の既定まで含めて解決した実効値。
+    """
+    return {
+        "tenant": name,
+        "proactive_enabled": proactive_enabled_for(tenants.data_dir, name),
+        "retention_days": load_retention_overrides(tenants.data_dir).get(name),
+        "retention_effective_days": retention_days_for(
+            tenants.data_dir, name, tenants.retention_days),
+    }
+
 
 def make_handler(tenants: TenantStore, page: str):
     """TenantStore を受け取るリクエストハンドラクラスを作る。"""
@@ -797,6 +960,9 @@ def make_handler(tenants: TenantStore, page: str):
             elif split.path == "/api/tenants":
                 self._send_json(200, {"tenants": tenants.names(),
                                       "current": tenants.default_tenant})
+            elif split.path == "/api/tenant_settings":
+                name = normalize_tenant_name(_first(query.get("tenant")))
+                self._send_json(200, _tenant_settings_payload(tenants, name))
             elif split.path == "/api/users":
                 users = tenants.users(_first(query.get("tenant")))
                 self._send_json(200, {"users": users.names(),
@@ -826,10 +992,25 @@ def make_handler(tenants: TenantStore, page: str):
             else:
                 self._send_json(404, {"error": "not found"})
 
+        def _read_json_body(self) -> dict | None:
+            """POST の JSON 本文を辞書として読む。読めなければ None。"""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                data = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                return None
+            return data if isinstance(data, dict) else None
+
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
             if path == "/api/sessions/delete":
                 self._delete_session()
+                return
+            if path == "/api/tenant_settings":
+                self._save_tenant_settings()
+                return
+            if path == "/api/tenants/create":
+                self._create_tenant()
                 return
             if path != "/api/chat":
                 self._send_json(404, {"error": "not found"})
@@ -874,6 +1055,72 @@ def make_handler(tenants: TenantStore, page: str):
             store.discard(session_id)
             self._send_json(200, {"deleted": deleted, "session": session_id})
 
+        def _save_tenant_settings(self) -> None:
+            """テナント設定（能動発信の ON/OFF と保持期間）を保存する。
+
+            能動発信は settings.json、保持期間は retention.json に書く
+            （どちらも既存の仕組み）。retention_days に null を渡すと
+            そのテナントの指定を取り除いて全体の既定に戻す。渡されて
+            いない項目は変更しない。保存後の最新の設定を返す。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            name = normalize_tenant_name(
+                data.get("tenant") or tenants.default_tenant)
+            if "proactive_enabled" in data:
+                enabled = data["proactive_enabled"]
+                if not isinstance(enabled, bool):
+                    self._send_json(400, {
+                        "error": "proactive_enabled は true / false で指定してください"})
+                    return
+                set_proactive_enabled(tenants.data_dir, name, enabled)
+            if "retention_days" in data:
+                days = data["retention_days"]
+                if days is not None and (isinstance(days, bool)
+                                         or not isinstance(days, int)
+                                         or days < 0):
+                    self._send_json(400, {
+                        "error": "retention_days は 0 以上の整数か null で指定してください"})
+                    return
+                save_retention_override(tenants.data_dir, name, days)
+            self._send_json(200, _tenant_settings_payload(tenants, name))
+
+        def _create_tenant(self) -> None:
+            """テナントの置き場を新規作成する。
+
+            名前は既存の正規化（normalize_tenant_name）を通して検証
+            する。既定テナント（default）は作成済みとして扱い、すでに
+            置き場がある名前も 400 で理由を返す。テナントの削除は
+            データを消す操作のため、この API では扱わない。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            raw = data.get("name")
+            if not isinstance(raw, str) or not raw.strip():
+                self._send_json(400, {"error": "テナント名を入力してください"})
+                return
+            name = normalize_tenant_name(raw)
+            if name == DEFAULT_TENANT:
+                self._send_json(400, {
+                    "error": "既定のテナント（default）はすでにあります"})
+                return
+            if name in list_tenant_names(tenants.data_dir):
+                self._send_json(400, {
+                    "error": f"テナント「{name}」はすでに存在します"})
+                return
+            try:
+                tenant_dir(tenants.data_dir, name).mkdir(
+                    parents=True, exist_ok=True)
+            except OSError:
+                self._send_json(500, {
+                    "error": "テナントの置き場を作れませんでした"})
+                return
+            self._send_json(200, {"tenant": name, "created": True})
+
         def _chat(self, session: Session, message: str,
                   attachments: list[Attachment], quote: str | None) -> None:
             try:
@@ -904,7 +1151,38 @@ def build_server(session: Session, host: str = "127.0.0.1",
     """
     page = render_page(session.cfg.provider)
     tenants = TenantStore(session, session_factory)
-    return ThreadingHTTPServer((host, port), make_handler(tenants, page))
+    server = ThreadingHTTPServer((host, port), make_handler(tenants, page))
+    # 能動発信の巡回が保持中の Session を引けるよう、サーバーに
+    # TenantStore をぶら下げておく（serve が使う）
+    server.tenants = tenants  # type: ignore[attr-defined]
+    return server
+
+
+def _start_proactive_loop(tenants: TenantStore, cfg: Config) -> None:
+    """能動発信の巡回を裏側のスレッドで始める。
+
+    起動後まもなく 1 回、その後は Config.proactive_interval_seconds
+    （環境変数 KUMA_PROACTIVE_INTERVAL_SECONDS、既定 300 秒）ごとに
+    全テナント×全ユーザーを巡回し、言うべきことがあるユーザーに
+    だけ main の会話へ発言する。投稿はサーバーが保持している
+    Session を通す。間隔が 0 以下なら巡回しない。1 回の巡回の
+    失敗で Web サーバー自体は落とさない。
+    """
+    interval = cfg.proactive_interval_seconds
+    if interval <= 0:
+        return
+    stopped = threading.Event()
+
+    def loop() -> None:
+        while not stopped.is_set():
+            try:
+                run_sweep(cfg, session_getter=lambda t, u: tenants.store(
+                    t, u).get(DEFAULT_SESSION_ID))
+            except Exception:
+                pass  # 巡回の失敗は次回に回す
+            stopped.wait(interval)
+
+    threading.Thread(target=loop, daemon=True, name="kuma-proactive").start()
 
 
 def serve(session: Session, host: str = "127.0.0.1", port: int = 8765) -> None:
@@ -923,6 +1201,7 @@ def serve(session: Session, host: str = "127.0.0.1", port: int = 8765) -> None:
               f"部屋の記録 {result.sessions_removed} 件、"
               f"完了した用事 {result.tasks_removed} 件")
     server = build_server(session, host, port)
+    _start_proactive_loop(server.tenants, cfg)  # type: ignore[attr-defined]
     print(f"クマの Web UI: http://{host}:{server.server_address[1]} （終了は Ctrl-C）")
     try:
         server.serve_forever()
