@@ -53,6 +53,7 @@ from .notify_prefs import (
 )
 from .outputs import OutputBoard, format_created_at, format_size
 from .proactive import run_sweep
+from .profile_files import read_profile_file, save_profile_file
 from .session import Session
 from .telegram import build_proactive_notifier
 from .telegram import start_polling_thread as start_telegram_polling
@@ -152,6 +153,23 @@ _PAGE_TEMPLATE = """\
   .outputRow a { padding: 4px 12px; font-size: 13px; background: #fff;
                color: __COCOA__; border: 1px solid __COCOA__;
                border-radius: 8px; text-decoration: none; }
+  #profilePanel { background: #fff; border-bottom: 1px solid __HONEY__;
+                 padding: 12px 16px; }
+  #profilePanel[hidden] { display: none; }
+  #profilePanel h2 { font-size: 15px; margin: 0 0 8px; }
+  #profilePanel .profileNote { font-size: 13px; margin: 0 0 8px; }
+  #profileTabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  #profileTabs button { padding: 4px 12px; font-size: 13px; background: #fff;
+               color: __COCOA__; border: 1px solid __COCOA__; }
+  #profileTabs button.active { background: __HONEY__; color: #fff;
+               border-color: __HONEY__; }
+  #profileText { width: 100%; padding: 10px; font-size: 14px; line-height: 1.5;
+               border: 1px solid __COCOA__; border-radius: 8px;
+               font-family: monospace; }
+  .profileActions { display: flex; gap: 10px; align-items: center;
+               margin-top: 8px; }
+  .profileActions button { padding: 6px 16px; font-size: 14px; }
+  #profileStatus { font-size: 13px; }
   .notifyRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
                padding: 6px 0; font-size: 14px; }
   .notifyRow .tname { min-width: 8em; }
@@ -245,12 +263,23 @@ _PAGE_TEMPLATE = """\
   <div class="sessions">
     <button id="tenantAdminBtn" type="button">テナント管理</button>
     <button id="outputsBtn" type="button">成果物</button>
+    <button id="profileBtn" type="button">人格・記憶</button>
     __LOGOUT_BUTTON__
   </div>
 </header>
 <section id="outputsPanel" hidden>
   <h2>成果物</h2>
   <div id="outputRows"></div>
+</section>
+<section id="profilePanel" hidden>
+  <h2>人格・記憶</h2>
+  <p class="profileNote">クマの性格や長期記憶を編集できます。保存した内容は、新しい会話から反映されます（今開いている会話には影響しません）。</p>
+  <div id="profileTabs"></div>
+  <textarea id="profileText" rows="14" spellcheck="false"></textarea>
+  <div class="profileActions">
+    <button id="profileSave" type="button">保存</button>
+    <span id="profileStatus"></span>
+  </div>
 </section>
 <section id="tenantPanel" hidden>
   <h2>テナント管理</h2>
@@ -320,6 +349,19 @@ const tenantPanel = document.getElementById('tenantPanel');
 const outputsBtn = document.getElementById('outputsBtn');
 const outputsPanel = document.getElementById('outputsPanel');
 const outputRows = document.getElementById('outputRows');
+const profileBtn = document.getElementById('profileBtn');
+const profilePanel = document.getElementById('profilePanel');
+const profileTabs = document.getElementById('profileTabs');
+const profileText = document.getElementById('profileText');
+const profileSaveBtn = document.getElementById('profileSave');
+const profileStatus = document.getElementById('profileStatus');
+const profileFiles = [
+  {name: 'SOUL.md', label: '性格（SOUL.md）'},
+  {name: 'IDENTITY.md', label: '自己紹介（IDENTITY.md）'},
+  {name: 'USER.md', label: 'あなたについて（USER.md）'},
+  {name: 'MEMORY.md', label: '長期記憶（MEMORY.md）'},
+];
+let currentProfileFile = 'SOUL.md';
 const tenantRows = document.getElementById('tenantRows');
 const approvalPanel = document.getElementById('approvalPanel');
 const approvalRows = document.getElementById('approvalRows');
@@ -634,6 +676,61 @@ tenantAdminBtn.addEventListener('click', () => {
 outputsBtn.addEventListener('click', () => {
   outputsPanel.hidden = !outputsPanel.hidden;
   if (!outputsPanel.hidden) loadOutputs();
+});
+
+// 人格・記憶パネル。現在のテナント×ユーザーの人格ファイル
+// （SOUL / IDENTITY / USER）と長期記憶（MEMORY）を切り替えて
+// 編集する。読み書きは /api/profile を使い、保存した内容は
+// 新しい会話から反映される（パネル内の案内文のとおり）
+profileBtn.addEventListener('click', () => {
+  profilePanel.hidden = !profilePanel.hidden;
+  if (!profilePanel.hidden) loadProfileFile(currentProfileFile);
+});
+
+function renderProfileTabs() {
+  profileTabs.innerHTML = '';
+  for (const file of profileFiles) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = file.label;
+    if (file.name === currentProfileFile) btn.className = 'active';
+    btn.addEventListener('click', () => loadProfileFile(file.name));
+    profileTabs.appendChild(btn);
+  }
+}
+
+async function loadProfileFile(name) {
+  currentProfileFile = name;
+  renderProfileTabs();
+  profileStatus.textContent = '';
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser)
+      + '&name=' + encodeURIComponent(name);
+    const res = await fetch('/api/profile' + query);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '読み込めませんでした');
+    profileText.value = data.content || '';
+  } catch (e) {
+    profileStatus.textContent = '読み込めませんでした: ' + (e.message || e);
+  }
+}
+
+profileSaveBtn.addEventListener('click', async () => {
+  try {
+    const res = await fetch('/api/profile', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: currentProfileFile,
+                            content: profileText.value,
+                            tenant: currentTenant, user: currentUser}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '保存に失敗しました');
+    profileStatus.textContent = '保存しました（新しい会話から反映されます）';
+  } catch (e) {
+    profileStatus.textContent = '保存に失敗しました: ' + (e.message || e);
+  }
 });
 
 function formatOutputSize(size) {
@@ -1800,6 +1897,8 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate):
                     200, _outputs_payload(tenants, tenant, user))
             elif split.path == "/api/outputs/download":
                 self._download_output(query)
+            elif split.path == "/api/profile":
+                self._get_profile(query)
             elif split.path == "/api/history":
                 store = tenants.store(_first(query.get("tenant")),
                                       _first(query.get("user")))
@@ -1882,6 +1981,9 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate):
             if path == "/api/tenants/create":
                 self._create_tenant()
                 return
+            if path == "/api/profile":
+                self._save_profile()
+                return
             if path == "/api/approvals/decide":
                 self._decide_approval()
                 return
@@ -1906,6 +2008,66 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate):
             session = tenants.store(
                 data.get("tenant"), data.get("user")).get(data.get("session"))
             self._chat(session, message, attachments, quote)
+
+        def _get_profile(self, query: dict) -> None:
+            """人格・記憶ファイルの本文を返す。
+
+            対象は query の tenant / user（無ければ起動時の組み
+            合わせ）の置き場にある、編集できる 4 ファイル
+            （SOUL.md / IDENTITY.md / USER.md / MEMORY.md）の
+            どれか。ファイルが無ければ空の本文を返す。対象外の
+            名前は 400。
+            """
+            tenant = normalize_tenant_name(
+                _first(query.get("tenant")) or tenants.default_tenant)
+            user = normalize_user_name(
+                _first(query.get("user")) or tenants.default_user)
+            name = _first(query.get("name"))
+            if not name:
+                self._send_json(400, {"error": "name を指定してください"})
+                return
+            target_dir = user_dir(tenant_dir(tenants.data_dir, tenant), user)
+            try:
+                content = read_profile_file(target_dir, name)
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            self._send_json(200, {"tenant": tenant, "user": user,
+                                  "name": name, "content": content})
+
+        def _save_profile(self) -> None:
+            """人格・記憶ファイルへ本文を保存する。
+
+            対象は本文の tenant / user（無ければ起動時の組み合わせ）
+            の置き場にある、編集できる 4 ファイルのどれか。保存は
+            profile_files.save_profile_file が担い、既存の内容の
+            控え（.bak-<日時>）を取ってから原子的に置き換える。
+            対象外の名前とサイズ上限の超過は 400。保存後の本文を
+            そのまま返す。反映は新しく作られるセッションから
+            （すでに開いているセッションには影響しない）。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            tenant = normalize_tenant_name(
+                data.get("tenant") or tenants.default_tenant)
+            user = normalize_user_name(data.get("user") or tenants.default_user)
+            name = data.get("name")
+            content = data.get("content")
+            if not isinstance(name, str) or not isinstance(content, str):
+                self._send_json(400, {
+                    "error": "name と content（文字列）を指定してください"})
+                return
+            target_dir = user_dir(tenant_dir(tenants.data_dir, tenant), user)
+            try:
+                save_profile_file(target_dir, name, content)
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            self._send_json(200, {"tenant": tenant, "user": user,
+                                  "name": name, "content": content,
+                                  "saved": True})
 
         def _delete_session(self) -> None:
             """スレッド（セッション）の記録を削除する。
