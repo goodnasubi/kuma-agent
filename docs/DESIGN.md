@@ -28,6 +28,7 @@ src/kuma_agent/
   jobs.py      定期ジョブ（ユーザーごとに jobs.json へ保存、巡回で実行）
   outputs.py   成果物（ユーザーごとの outputs/ と index.json）
   telegram.py  Telegram 接続（Bot API のロングポーリングで会話する）
+  line_api.py  LINE 接続（Messaging API の Webhook で受け、Reply / Push で返す）
   notify_prefs.py 知らせる・知らせないの好み（notify_prefs.json）
   session.py   1 回の対話セッション（履歴管理、道具呼び出しの循環）
 data/（実行時に作る、リポジトリには入れない）
@@ -280,7 +281,8 @@ kuma-agent は将来、コンテナでサービスとして動かす想定であ
   `check_and_post` / `run_due_jobs`）は、会話へ投稿するたびに
   任意の通知コールバック（`notify`、テナント名・ユーザー名・
   文面を受け取る）へも文面を渡す。Telegram への配信
-  （「Telegram 接続」節）はこの口を使う。通知は投稿が済んだ後に
+  （「Telegram 接続」節）と LINE への配信（「LINE 接続」節）は
+  この口を使う（両方ある場合はまとめて渡す）。通知は投稿が済んだ後に
   行い、通知側の失敗で投稿や巡回を落とすことはしない。Web の
   巡回スレッドと CLI の `kuma-agent proactive` の両方が、設定が
   あれば通知を結線する。
@@ -1132,6 +1134,112 @@ httpx で叩き、`getUpdates` のロングポーリングでメッセージを�
   ファイル等）には「今はテキストだけ対応しています」と返す。
   Telegram の添付を Session の添付として渡す対応は将来課題とする。
 
+## LINE 接続
+
+LINE の公式アカウントから会話できる接続（`line_api.py`）。Telegram
+のロングポーリングと違い、LINE は **Webhook** 方式で、LINE の
+サーバーが運用者の公開 HTTPS URL へイベントを POST してくる。
+受け口は Web UI のサーバーが持つ `POST /line/webhook` で、送信は
+Messaging API（`https://api.line.me/v2/bot/message/reply` と
+`/push`、認証は `Authorization: Bearer <チャネルアクセストークン>`）
+を httpx で叩く。送信 API の呼び出しは差し替え可能な形（`LineApi`）
+にしてあり、テストはネットワークに出ない。
+
+- **署名検証（守りの中核）**: ヘッダー `X-Line-Signature` は、
+  リクエストボディに対する HMAC-SHA256（チャネルシークレット）を
+  Base64 化したもの。検証は `hmac.compare_digest` で行い、合わない
+  リクエストは 400 で断る。Webhook の URL は公開されるため、この
+  検証が唯一の守りになる。
+- **ログインゲートとの関係**: `/line/webhook` は Web UI の
+  ログイン（`KUMA_WEB_PASSWORD`）の対象外にする。LINE のサーバー
+  は Cookie を持たないためで、ログイン必須の設定でも Webhook は
+  署名検証だけで通す。その他の経路は従来どおり守られる。
+- **即時応答と裏側処理**: 署名が合えば即座に 200 を返し、会話の
+  処理（モデルの呼び出しと返信）は裏側のスレッドで行う。モデルが
+  遅くても LINE 側の Webhook を待たせない（タイムアウトによる
+  再送を避ける）。
+- **対象イベント**: 1 対 1（`source.type == "user"`）の message
+  イベントだけを処理する。グループ・ルーム宛てのイベントと、
+  follow 等の他種イベントは何もせず無視する（グループ対応は
+  未対応）。
+- **設定（環境変数）**:
+  - `KUMA_LINE_CHANNEL_SECRET`: チャネルシークレット（署名検証用）。
+  - `KUMA_LINE_CHANNEL_ACCESS_TOKEN`: チャネルアクセストークン
+    （送信 API の認証用）。
+  - この 2 つが両方そろったときだけ受け口が有効になる。片方でも
+    未設定なら `/line/webhook` は 404 で、LINE 機能は無効（Web /
+    CLI の通常動作には影響しない）。トークン・シークレットは
+    ログや例外の文面には出さない。
+  - `KUMA_LINE_TENANT`（既定 `default`）と `KUMA_LINE_USER`
+    （既定 `default`）: 届いたメッセージを処理するテナントと
+    ユーザー。LINE 経路専用の行き先である。
+  - `KUMA_LINE_ALLOWED_USERS`: 会話を許可する user id のカンマ
+    区切り。
+  - `KUMA_LINE_PROACTIVE`（既定は有効、`0` で無効化）: 能動発信の
+    LINE 配信の ON/OFF（後述）。
+- **許可リストの意味**: 未設定・空のときは会話を処理しない。届いた
+  メッセージには「このユーザーはまだ登録されていません。あなたの
+  user id は XXX です」という趣旨の案内だけを返し、運用者がその
+  id を知って許可リストへ設定できるようにする（Telegram の chat id
+  案内と同じ流儀）。許可された user id 以外からのメッセージも
+  同様に案内だけを返す（会話の内容はモデルへ渡らない）。
+- **会話の行き先**: 相棒モードではそのユーザーの `main` の会話で、
+  Web UI と履歴（記録ファイル）を共有する。スレッドモードでは
+  `line-<user id>` という名前の会話になる。
+- **返信の送り方**: まず Reply API（Webhook イベントの
+  `replyToken` を使う。無料で月間の通数に数えない）で送る。
+  replyToken の有効期間は短い（おおむね 1 分）ため、Reply が
+  失敗したら Push API に切り替えて全通を送り直す。テキストは
+  1 通 5000 字までなので、長い返信は 5000 字で分割する（なるべく
+  改行で切る。分割は telegram のものを共用）。Reply は最大 5 通
+  まで同時に送れるため、先頭の 5 通を Reply で送り、超える分は
+  Push API で送る（Push も 1 回最大 5 通で分ける）。
+- **能動発信の配信**: 巡回が main の会話へ投稿する内容（日報・
+  時刻指定リマインダー・定期ジョブの結果と失敗の知らせ）は、
+  LINE にも送られる（`line_api.build_proactive_notifier` が作る
+  通知コールバックを、Telegram の分と `combine_notifiers` で
+  まとめて巡回へ渡す）。
+  - **届け先**: 対象は `KUMA_LINE_TENANT` / `KUMA_LINE_USER` が
+    指すテナント／ユーザーへの投稿だけで、送り先は許可リスト
+    （`KUMA_LINE_ALLOWED_USERS`）の全ユーザー。送信は Push API
+    で、文面は 5000 字に分割して送る。
+  - **通数の注意**: Push API の送信は月間の無料通数（プランごと
+    の上限）に数える。日報などの能動発信も 1 投稿 = 届け先
+    1 人につき 1 通以上を消費するため、通数を抑えたい場合は
+    `KUMA_LINE_PROACTIVE=0` で配信だけを止められる（会話への
+    投稿と LINE での会話は従来どおり）。Reply API の返信は
+    通数に数えない。
+  - **無効化と未設定**: チャネルアクセストークン未設定・許可
+    リスト空の場合は、どちらにせよ何も送らない。
+  - **失敗時の扱い**: Telegram の配信と同じく、送信に失敗しても
+    会話への投稿は成立させる（通知側で例外を飲み、標準エラーへ
+    短く出す）。再送・リトライはしない（二重送信を避けるため）。
+- **承認の扱い**: LINE 経路の Session には承認者を付けない。
+  そのため承認が必要な道具（`run_shell` と MCP 道具）は既存の
+  仕組みで安全側に倒れ、LINE からの会話では常に却下される
+  （Telegram と同じ）。
+- **添付は未対応**: テキスト以外のメッセージ（画像・音声・
+  スタンプ等）には「今はテキストだけ対応しています」と返す。
+- **運用者側の準備手順**:
+  1. LINE Developers コンソールでプロバイダーを作り、Messaging
+     API チャネルを作成する。チャネル基本設定にある「チャネル
+     シークレット」と、Messaging API 設定で発行する「チャネル
+     アクセストークン（長期）」を控える。
+  2. kuma-agent 側に `KUMA_LINE_CHANNEL_SECRET` と
+     `KUMA_LINE_CHANNEL_ACCESS_TOKEN` を設定して Web UI を起動
+     する（公開 HTTPS で到達できる必要がある。コンテナで公開
+     する場合は前段のリバースプロキシ等で HTTPS 化する）。
+  3. チャネルの Messaging API 設定で、Webhook URL に
+     `https://<公開ホスト>/line/webhook` を登録し、検証が通る
+     ことを確認する。
+  4. LINE Official Account Manager 側で「Webhook」を有効化し、
+     あいさつメッセージや応答メッセージ等の自動応答は切って
+     おく（自動応答が残っていると、Bot の返信と二重に届く）。
+  5. 公式アカウントを友だち追加して話しかける。最初は許可
+     リストが空のため user id の案内が返るので、その id を
+     `KUMA_LINE_ALLOWED_USERS` に設定して再起動すると会話が
+     始まる。
+
 ## 音声（添付・録音・読み上げ）
 
 音声の入出力は、既存の添付の仕組みとブラウザの機能に乗せる。
@@ -1506,6 +1614,7 @@ Opus 5.5、Gemini 3.8 Flash / 4 Argon）。モデルは移り変わりが速い�
 
 ## 未決事項
 
-- 他のメッセージングアプリ（WhatsApp 等）への接続
-  （Telegram は「Telegram 接続」節、音声は「音声（添付・録音・
-  読み上げ）」節のとおり実装済み）
+現在、未決事項はない（他のメッセージングアプリへの接続は、
+Telegram は「Telegram 接続」節、LINE は「LINE 接続」節のとおり
+実装済み。WhatsApp への接続は未着手で、必要になったら改めて
+検討する）

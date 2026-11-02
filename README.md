@@ -44,7 +44,7 @@ Muse を頭脳にした、対話型の相棒エージェント。人格と記憶
 
 - **ファイル添付**: 画像（png / jpg / gif / webp）と文書（PDF・テキスト系）、音声（mp3 / wav / m4a など）を発話に添付できます
 - **音声入出力**: Web UI ではマイクで録音してそのまま送れます。返事には「読み上げ」ボタンがあり、ブラウザが声で読み上げます（音声をそのまま聞き取れるのは Gemini の頭脳だけですが、Gemini のキーがあれば、ほかの頭脳でも先に文字起こししてから渡せます）
-- **Telegram 接続**: Telegram からも話しかけられます（運用者が Bot を用意した場合）
+- **Telegram / LINE 接続**: Telegram や LINE からも話しかけられます（運用者が Bot / 公式アカウントを用意した場合）
 
 ### 運用と管理
 
@@ -164,6 +164,21 @@ Telegram の Bot（@BotFather で発行）を通じて会話できます。環�
 
 また、能動発信（日報・リマインダー・定期ジョブの結果）は、対象ユーザーの分が許可リストのチャットにも届きます（`KUMA_TELEGRAM_PROACTIVE=0` で止められます）。
 
+### LINE からの接続
+
+LINE 公式アカウント（Messaging API）を通じて会話できます。Telegram と違い、LINE のサーバーから届く Webhook で受け取る方式なので、**`kuma-agent web` を公開 HTTPS で外から届く場所に置く必要があります**。
+
+運用者の準備は次のとおりです:
+
+1. [LINE Developers](https://developers.line.biz/) で Messaging API チャネルを作り、チャネルシークレットとチャネルアクセストークン（長期）を発行する
+2. 環境変数 `KUMA_LINE_CHANNEL_SECRET` と `KUMA_LINE_CHANNEL_ACCESS_TOKEN` に設定する
+3. LINE Developers の Webhook URL に `https://<公開先>/line/webhook` を登録する
+4. LINE Official Account Manager で Webhook を有効にし、応答メッセージなどの自動応答を切る
+
+安全のため、会話を処理するのは `KUMA_LINE_ALLOWED_USERS` に登録したユーザーだけです。未登録のユーザーには、登録に必要な user id の案内だけが返ります。対象のテナント・ユーザーは `KUMA_LINE_TENANT` / `KUMA_LINE_USER` で指定します。今はテキストと 1 対 1 の会話のみ対応です（グループ・ルームは未対応）。
+
+能動発信も許可リストのユーザーに届きます（`KUMA_LINE_PROACTIVE=0` で止められます）。能動発信は Push 送信で、月間の送信通数に数えられます。
+
 ### 添付の渡し方
 
 添付できるのは画像（png / jpg / gif / webp）と文書（PDF、.txt /
@@ -204,6 +219,10 @@ Telegram の Bot（@BotFather で発行）を通じて会話できます。環�
 | `KUMA_TELEGRAM_ALLOWED_CHATS` | 会話を許可する chat id（カンマ区切り） | （無し＝処理しない） |
 | `KUMA_TELEGRAM_TENANT` / `KUMA_TELEGRAM_USER` | Telegram の会話の行き先 | `default` / `default` |
 | `KUMA_TELEGRAM_PROACTIVE` | 能動発信を Telegram にも届けるか（`0` で止める） | （届ける） |
+| `KUMA_LINE_CHANNEL_SECRET` / `KUMA_LINE_CHANNEL_ACCESS_TOKEN` | LINE のチャネルシークレットとアクセストークン | （未設定＝無効） |
+| `KUMA_LINE_ALLOWED_USERS` | 会話を許可する user id（カンマ区切り） | （無し＝処理しない） |
+| `KUMA_LINE_TENANT` / `KUMA_LINE_USER` | LINE の会話の行き先 | `default` / `default` |
+| `KUMA_LINE_PROACTIVE` | 能動発信を LINE にも届けるか（`0` で止める） | （届ける） |
 | `KUMA_BRIEFING_TIME` | 朝のまとめの時刻（`off` で無効） | `07:30` |
 | `KUMA_MEMORY_EXTRACT` | 会話から長期記憶への自動抽出（`0` で止める） | （する） |
 | `KUMA_WEB_PASSWORD` | Web UI のログインパスワード | （未設定＝ログインなし） |

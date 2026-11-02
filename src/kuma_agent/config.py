@@ -162,6 +162,31 @@ class Config:
     # 含む）は有効。トークン未設定・許可リスト空なら有効でも送らない
     telegram_proactive: bool = field(
         default_factory=lambda: os.environ.get("KUMA_TELEGRAM_PROACTIVE", "") != "0")
+    # LINE 接続（line_api.py）。Telegram と違い Webhook 方式で、受け口は
+    # Web UI の POST /line/webhook。チャネルシークレットとチャネル
+    # アクセストークンの両方が設定されているときだけ受け口が有効に
+    # なる。line_tenant / line_user は、届いたメッセージを処理する
+    # テナントとユーザー（LINE 経路専用の行き先）。line_allowed_users
+    # は会話を許可する user id のカンマ区切りで、未設定・空のときは
+    # 会話を処理しない（user id を知らせる案内だけを返す）
+    line_channel_secret: str = field(
+        default_factory=lambda: os.environ.get("KUMA_LINE_CHANNEL_SECRET", ""))
+    line_channel_access_token: str = field(
+        default_factory=lambda: os.environ.get(
+            "KUMA_LINE_CHANNEL_ACCESS_TOKEN", ""))
+    line_tenant: str = field(
+        default_factory=lambda: os.environ.get("KUMA_LINE_TENANT", "default"))
+    line_user: str = field(
+        default_factory=lambda: os.environ.get("KUMA_LINE_USER", "default"))
+    line_allowed_users: str = field(
+        default_factory=lambda: os.environ.get("KUMA_LINE_ALLOWED_USERS", ""))
+    # 能動発信の LINE 配信（line_api.build_proactive_notifier）。巡回が
+    # line_tenant / line_user の main の会話へ投稿した内容を、許可
+    # リストのユーザーへ Push API でも送るかどうか。Push は月間の
+    # 通数に数えるため、止めたい場合は "0" で無効化する（それ以外、
+    # 未設定を含む、は有効）
+    line_proactive: bool = field(
+        default_factory=lambda: os.environ.get("KUMA_LINE_PROACTIVE", "") != "0")
     # Web UI のログイン（アクセス制御）。パスワードが未設定（空）なら
     # ログインは無効で、従来どおり認証なしで開く。設定したときだけ
     # Web UI 全体がパスワードで守られる（CLI / TUI は対象外）。

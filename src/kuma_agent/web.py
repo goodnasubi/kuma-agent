@@ -31,6 +31,8 @@ from .export import (
     default_export_filename,
     save_tenant_backup,
 )
+from .line_api import HttpxLineApi, LineBot, line_enabled
+from .line_api import build_proactive_notifier as build_line_proactive_notifier
 from .llm import MAX_ATTACHMENT_BYTES, Attachment, guess_media_type
 from .memory import (
     DEFAULT_SESSION_ID,
@@ -58,7 +60,7 @@ from .notify_prefs import (
     set_quiet_hours,
 )
 from .outputs import OutputBoard, format_created_at, format_size
-from .proactive import run_sweep
+from .proactive import combine_notifiers, run_sweep
 from .profile_files import read_profile_file, save_profile_file
 from .session import Session
 from .telegram import build_proactive_notifier
@@ -1937,12 +1939,16 @@ def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     }
 
 
-def make_handler(tenants: TenantStore, page: str, auth: AuthGate):
+def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
+                 line_bot: LineBot | None = None):
     """TenantStore を受け取るリクエストハンドラクラスを作る。
 
     auth（AuthGate）が有効なときは、ログイン画面（/login）以外の
     全経路でログインを求める: 画面はログイン画面へリダイレクトし、
-    API は 401 を返す。無効なときは従来どおり素通しする。
+    API は 401 を返す。無効なときは従来どおり素通しする。ただし
+    LINE の Webhook（/line/webhook）だけは例外で、ログインゲートを
+    通さない（LINE のサーバーは Cookie を持たないため。守りは
+    line_bot 側の署名検証が担う）。
     """
     lock = threading.Lock()
     login_page = render_login_page()
@@ -2178,10 +2184,42 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate):
                 return None
             return data if isinstance(data, dict) else None
 
+        def _line_webhook(self) -> None:
+            """LINE の Webhook（POST /line/webhook）を受ける。
+
+            ログインゲートは通さない（LINE のサーバーは Cookie を
+            持たないため）。守りは署名検証で、チャネルシークレット
+            とアクセストークンが未設定（line_bot が無い）なら 404、
+            署名が合わなければ 400 を返す。署名が合えば即座に 200
+            を返し、会話の処理（モデルの呼び出しと返信）は裏側の
+            スレッドで行う（Webhook を待たせないため）。本文は
+            署名の対象なので、JSON として解釈する前に生のバイト列
+            のまま読む。
+            """
+            if line_bot is None:
+                self._send_json(404, {"error": "not found"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            body = self.rfile.read(length) if length > 0 else b""
+            signature = self.headers.get("X-Line-Signature")
+            if not line_bot.verify(body, signature):
+                self._send_json(400, {"error": "署名が不正です"})
+                return
+            self._send_json(200, {})
+            threading.Thread(
+                target=line_bot.process_body, args=(body,),
+                daemon=True, name="kuma-line-webhook").start()
+
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
             if path == "/login":
                 self._login()
+                return
+            if path == "/line/webhook":
+                self._line_webhook()
                 return
             if not self._authenticated():
                 self._send_json(401, {"error": "ログインが必要です"})
@@ -2551,11 +2589,21 @@ def build_server(session: Session, host: str = "127.0.0.1",
                     session.cfg.web_secure_cookie)
     page = render_page(session.cfg.provider, web_auth=auth.enabled)
     tenants = TenantStore(session, session_factory)
-    server = ThreadingHTTPServer((host, port),
-                                 make_handler(tenants, page, auth))
+    # LINE の設定（チャネルシークレットとアクセストークン）が
+    # そろっていれば、Webhook の処理役を用意する（LINE 用の
+    # Session は承認者なしで作る。telegram の経路と同じ流儀）
+    line_bot = None
+    if line_enabled(session.cfg):
+        line_bot = LineBot(
+            session.cfg,
+            HttpxLineApi(session.cfg.line_channel_access_token),
+            model=session.model)
+    server = ThreadingHTTPServer(
+        (host, port), make_handler(tenants, page, auth, line_bot))
     # 能動発信の巡回が保持中の Session を引けるよう、サーバーに
     # TenantStore をぶら下げておく（serve が使う）
     server.tenants = tenants  # type: ignore[attr-defined]
+    server.line_bot = line_bot  # type: ignore[attr-defined]
     return server
 
 
@@ -2566,8 +2614,9 @@ def _start_proactive_loop(tenants: TenantStore, cfg: Config) -> None:
     （環境変数 KUMA_PROACTIVE_INTERVAL_SECONDS、既定 300 秒）ごとに
     全テナント×全ユーザーを巡回し、言うべきことがあるユーザーに
     だけ main の会話へ発言する。投稿はサーバーが保持している
-    Session を通す。Telegram が設定されていれば、対象ユーザーの
-    投稿は Telegram へも届ける（telegram.build_proactive_notifier）。
+    Session を通す。Telegram / LINE が設定されていれば、対象
+    ユーザーの投稿はそちらへも届ける（それぞれのモジュールの
+    build_proactive_notifier を combine_notifiers でまとめる）。
     間隔が 0 以下なら巡回しない。1 回の巡回の失敗で Web サーバー
     自体は落とさない。
     """
@@ -2575,9 +2624,11 @@ def _start_proactive_loop(tenants: TenantStore, cfg: Config) -> None:
     if interval <= 0:
         return
     stopped = threading.Event()
-    # Telegram が設定されていれば、投稿を Telegram へも届ける通知を
-    # 用意する（未設定・無効化・許可リスト空なら None で従来どおり）
-    notify = build_proactive_notifier(cfg)
+    # Telegram / LINE が設定されていれば、投稿をそちらへも届ける
+    # 通知を用意する（どちらも未設定・無効化・許可リスト空なら
+    # None で従来どおり会話への投稿だけになる）
+    notify = combine_notifiers(build_proactive_notifier(cfg),
+                               build_line_proactive_notifier(cfg))
 
     def loop() -> None:
         while not stopped.is_set():
@@ -2614,6 +2665,10 @@ def serve(session: Session, host: str = "127.0.0.1", port: int = 8765) -> None:
     # （未設定なら何もしない。Telegram 用の Session は承認者なしで作る）
     if start_telegram_polling(cfg, session.model) is not None:
         print("Telegram の受信を開始しました")
+    # LINE は Webhook 方式のため、受信はこのサーバーの
+    # /line/webhook が担う（公開 HTTPS で LINE 側へ登録が必要）
+    if line_enabled(cfg):
+        print("LINE の Webhook を /line/webhook で受け付けています")
     print(f"クマの Web UI: http://{host}:{server.server_address[1]} （終了は Ctrl-C）")
     try:
         server.serve_forever()

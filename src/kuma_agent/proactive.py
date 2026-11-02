@@ -81,9 +81,10 @@ quote 以外のキーを無視するため、復元は通常の assistant 発言
 
 投稿した内容は、呼び出し側が通知コールバック（notify: テナント名・
 ユーザー名・文面を受け取る）を渡していれば、それにも渡す。
-Telegram への配信（telegram.build_proactive_notifier）はこの口を
-使う。通知は投稿が済んだ後に行い、通知側の失敗で投稿や巡回を
-落とすことはしない。
+Telegram への配信（telegram.build_proactive_notifier）と LINE
+への配信（line_api.build_proactive_notifier）はこの口を使う
+（複数ある場合は combine_notifiers でまとめる）。通知は投稿が
+済んだ後に行い、通知側の失敗で投稿や巡回を落とすことはしない。
 """
 from __future__ import annotations
 
@@ -395,6 +396,28 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
 
 # 通知コールバックの型: (テナント名, ユーザー名, 投稿文) を受け取る
 NotifyCallback = Callable[[str, str, str], None]
+
+
+def combine_notifiers(
+        *notifiers: NotifyCallback | None) -> NotifyCallback | None:
+    """複数の通知コールバックを 1 つにまとめる。
+
+    Telegram と LINE のように配信先が複数ある場合に使う。有効な
+    ものが 1 つも無ければ None（通知なし）、1 つだけならそれ自体を
+    返す。まとめたコールバックは、投稿のたびに対象の全部へ順に
+    渡す（個々の失敗の扱いは _notify 側と各コールバック側に任せる）。
+    """
+    active = [n for n in notifiers if n is not None]
+    if not active:
+        return None
+    if len(active) == 1:
+        return active[0]
+
+    def notify(tenant: str, user: str, text: str) -> None:
+        for callback in active:
+            callback(tenant, user, text)
+
+    return notify
 
 
 def _notify(notify: NotifyCallback | None, tenant: str, user: str,
