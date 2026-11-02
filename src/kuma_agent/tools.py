@@ -17,6 +17,8 @@ from .notify_prefs import (
     load_notify_prefs,
     remove_muted_topic,
 )
+from .skills import is_valid_skill_name, load_skill
+from .skills import save_skill as save_skill_file
 from .tasks import format_remind_at
 
 if TYPE_CHECKING:
@@ -41,6 +43,8 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "write_memory": "記憶に書き留め中",
     "save_memory": "記憶に書き留め中",
     "search_memory": "記憶を検索中",
+    "read_skill": "手順書を読んでいます",
+    "save_skill": "手順書を書き留め中",
     "set_notify_mute": "知らせ方の設定を更新中",
     "clear_notify_mute": "知らせ方の設定を更新中",
     "list_notify_prefs": "知らせ方の設定を確認中",
@@ -126,10 +130,16 @@ class Tool:
 
 class ToolBox:
     def __init__(self, work_dir: Path, task_board: TaskBoard | None = None,
-                 memory: Memory | None = None) -> None:
+                 memory: Memory | None = None,
+                 data_dir: Path | None = None) -> None:
         self.work_dir = work_dir.resolve()
         self.task_board = task_board
         self.memory = memory
+        # 手順書（スキル）の置き場を解決するためのデータ置き場
+        # ルート。手順書は全テナント共通で data_dir / skills に置く
+        # ため、ユーザー置き場ではなくルートを受け取る。None の
+        # 間は手順書系の道具を登録しない
+        self.data_dir = data_dir
         self._tools: dict[str, Tool] = {}
         # 承認フック: 承認対象の道具を実行する前に呼ばれる
         # （道具名, 引数）→ 真偽 の callable。None の間は承認を
@@ -144,6 +154,8 @@ class ToolBox:
             self._register_notify_tools()
         if memory is not None:
             self._register_memory_tools()
+        if data_dir is not None:
+            self._register_skill_tools()
 
     def _register_defaults(self) -> None:
         self.register(Tool(
@@ -337,6 +349,50 @@ class ToolBox:
             return "見つかりませんでした"
         return "\n".join(
             f"（MEMORY.md の {hit.line} 行目）{hit.text}" for hit in hits)
+
+    def _register_skill_tools(self) -> None:
+        self.register(Tool(
+            "read_skill",
+            "手順書（スキル）の本文を読む。システムプロンプトの目次に"
+            "ある手順書のうち、目の前の仕事に関係するものがあれば、"
+            "作業の前にこの道具で本文を読んで、その手順に従うこと。",
+            {"type": "object", "properties": {
+                "name": {"type": "string",
+                         "description": "手順書の名前（目次にある名前）"}},
+             "required": ["name"]},
+            self._read_skill,
+        ))
+        self.register(Tool(
+            "save_skill",
+            "手順書（スキル）を保存する。利用者から手順や決まりごとを"
+            "教わったら、後から使い回せるよう手順書として書き留める"
+            "ときに使う。同名の手順書があれば上書きする。",
+            {"type": "object", "properties": {
+                "name": {"type": "string",
+                         "description": "手順書の名前（英数・ハイフン・アンダースコア・日本語のみ）"},
+                "description": {"type": "string",
+                                "description": "手順書の短い説明（目次に載る）"},
+                "body": {"type": "string",
+                         "description": "手順書の本文（Markdown）"}},
+             "required": ["name", "description", "body"]},
+            self._save_skill,
+        ))
+
+    def _read_skill(self, name: str) -> str:
+        assert self.data_dir is not None
+        skill = load_skill(self.data_dir, name.strip())
+        if skill is None:
+            return f"error: 手順書「{name}」が見つかりません"
+        return skill.body
+
+    def _save_skill(self, name: str, description: str, body: str) -> str:
+        assert self.data_dir is not None
+        name = name.strip()
+        if not is_valid_skill_name(name):
+            return ("error: 手順書の名前が不正です（使えるのは英数・"
+                    "ハイフン・アンダースコア・日本語だけです）")
+        save_skill_file(self.data_dir, name, description, body)
+        return f"保存しました: 手順書「{name}」"
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool

@@ -41,6 +41,7 @@ from .memory import (
 )
 from .persona import load_persona
 from .settings import approvals_enabled_for
+from .skills import load_skills
 from .tasks import TaskBoard, format_remind_at
 from .tools import Tool, ToolBox, activity_label
 
@@ -140,8 +141,13 @@ class Session:
         # 進行中の用事もプロンプトへ注入しない。長期記憶の検索道具も
         # 用事系と同じ条件（相棒モードのときだけ）で出す。
         board = None if self.mode == "wall" else self.task_board
-        self.tools = ToolBox(Path.cwd(), task_board=board,
-                             memory=None if self.mode == "wall" else self.memory)
+        # 手順書（スキル）の置き場はデータ置き場ルート（全テナント
+        # 共通）なので cfg.data_dir を渡す。道具を出す条件は用事系と
+        # 同じ（相棒モードのときだけ）
+        self.tools = ToolBox(
+            Path.cwd(), task_board=board,
+            memory=None if self.mode == "wall" else self.memory,
+            data_dir=None if self.mode == "wall" else cfg.data_dir)
         # MCP サーバーの道具を組み込み道具と並べて登録する。接続は
         # データ置き場ルート単位で共有する（Web 経路でもテナントや
         # 部屋ごとにサーバープロセスを複製しない）
@@ -178,6 +184,32 @@ class Session:
             tasks_text = self._open_tasks_text()
             if tasks_text:
                 self.system_prompt += f"\n\n# 進行中の用事\n{tasks_text}"
+            skills_text = self._skills_catalog_text()
+            if skills_text:
+                self.system_prompt += f"\n\n# 使える手順書\n{skills_text}"
+
+    def _skills_catalog_text(self) -> str:
+        """使える手順書の目次をシステムプロンプト用に組み立てる。
+
+        載せるのは名前と説明だけで、本文は載せない（必要な手順書
+        だけ read_skill で読む方が文脈を節約できる）。手順書が
+        1 件も無い・走査に失敗した場合は空文字列（節自体を足さない）。
+        手順書はデータ置き場ルートの skills/ にあり、全テナント共通。
+        """
+        try:
+            found = load_skills(self.cfg.data_dir)
+        except Exception:
+            return ""  # 走査の失敗で対話を落とさない
+        if not found:
+            return ""
+        lines = ["関係する仕事のときは、read_skill 道具で本文を"
+                 "読んでから、その手順に従うこと。"]
+        for skill in found:
+            line = f"- {skill.name}"
+            if skill.description:
+                line += f": {skill.description}"
+            lines.append(line)
+        return "\n".join(lines)
 
     def _register_mcp_tools(self) -> None:
         """MCP サーバーの道具を組み込み道具と並べて登録する。
