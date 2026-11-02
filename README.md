@@ -206,6 +206,8 @@ docker compose up -d --build
 
 ブラウザで http://127.0.0.1:8765 を開きます。データは名前付きボリューム（`kuma-data`）の `/data` に保存されるので、コンテナを作り直しても長期記憶や用事は残ります。API キーが未設定だと起動直後に終了するので、`.env` を先に用意してください。頭脳は API 系（muse / claude / gemini）から選んでください（CLI 系の頭脳はコンテナ内では使えません）。
 
+コンテナでも、ブラウザ操作と Google カレンダーの MCP サーバーが使えます（イメージに Node.js と Chromium が入っています）。設定は `/data/mcp.json` に書き、コマンド名は `playwright-mcp` / `google-calendar-mcp` を使います。詳しくは DESIGN.md の「ブラウザ操作」「実サービスの接続例」のコンテナ向け設定例を見てください。
+
 ### Web UI の注意
 
 Web UI は `--host` / `--port` で待ち受け先を変えられます。既定は

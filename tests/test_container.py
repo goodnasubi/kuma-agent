@@ -29,6 +29,21 @@ def test_dockerfile_points() -> None:
     # root 以外の専用ユーザーで実行する
     assert "USER kuma" in text
     assert "USER root" not in text
+    # Node.js は公式イメージから /usr/local をコピーして入れる
+    assert "FROM node:22-slim AS node" in text
+    assert "COPY --from=node /usr/local /usr/local" in text
+    # ブラウザ操作用の Chromium と日本語フォントを apt で入れる
+    assert "apt-get install" in text
+    assert "chromium" in text
+    assert "fonts-noto-cjk" in text
+    # MCP サーバー 2 つをグローバル導入し、コマンド名で起動できる
+    assert "npm install -g" in text
+    assert "@playwright/mcp" in text
+    assert "@cocal/google-calendar-mcp" in text
+    # HOME は /data/home（トークン等の状態がボリュームに残る）
+    assert "HOME=/data/home" in text
+    assert "mkdir -p /data/home" in text
+    assert "chown -R kuma:kuma /data" in text
 
 
 def test_compose_points() -> None:

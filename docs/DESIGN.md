@@ -588,10 +588,20 @@ Microsoft の Playwright MCP サーバーを `mcp.json` に登録する
   含まれるため、承認は有効にしておくのが望ましい。
 - **頭脳の範囲**: 道具が出るのは API 系の頭脳だけ（MCP の
   既存仕様どおり）。
-- **コンテナでの利用は範囲外**: kuma-agent の Docker
-  イメージには Node.js と Chromium が入っていないため、
-  コンテナで使う場合はそれらを用意した環境が別途要る
-  （将来課題）。
+- **コンテナでの利用**: Docker イメージには Node.js と
+  Chromium、Playwright MCP サーバーが導入済みのため、
+  コンテナでもそのまま使える（0.39.0 から。「コンテナで
+  動かす」節も参照）。コンテナでは npx の初回取得を待たず
+  コマンド名で直接起動し、同梱ブラウザではなくシステムの
+  Chromium を使う。`mcp.json` はデータ置き場ルート
+  （コンテナでは `/data/mcp.json`）に置く。設定例:
+
+```json
+{"servers": [{"name": "browser", "command": "playwright-mcp",
+  "args": ["--headless", "--no-sandbox",
+           "--executable-path", "/usr/bin/chromium"],
+  "env": {}}]}
+```
 
 ### 実サービスの接続例（Google カレンダー）
 
@@ -637,15 +647,36 @@ nspady の google-calendar-mcp の現在の npm 名）を `mcp.json`
 - **秘密情報の置き場所**: `gcp-oauth.keys.json` とトークン
   （サーバー側の既定で
   `~/.config/google-calendar-mcp/tokens.json`）は認証情報
-  そのものである。運用者の管理下に置き、リポジトリや
-  データ置き場の共有範囲には含めない。
+  そのものである。運用者の管理下に置き、リポジトリには
+  含めない。コンテナでは後述のとおり両方ともデータ
+  ボリューム（`/data`）に置く形になるため、その場合は
+  ボリューム自体を秘密情報として扱う。
 - **承認**: MCP の道具なので、危険な操作の承認の仕組みが
   そのまま効く。予定の作成・変更・削除も承認の対象になる
   （実データを書き換える操作なので、安全上むしろ望ましい）。
 - **頭脳の範囲とコンテナ**: 道具が出るのは API 系の頭脳
-  だけ（MCP の既存仕様どおり）。kuma-agent の Docker
-  イメージには Node.js が入っていないため、コンテナでは
-  そのまま使えない（ブラウザ操作と同じ将来課題）。
+  だけ（MCP の既存仕様どおり）。Docker イメージには
+  Node.js とこのサーバーが導入済みのため、コンテナでも
+  そのまま使える（0.39.0 から）。コンテナではコマンド名で
+  直接起動し、認証まわりのファイルはすべてデータ
+  ボリューム（`/data`）配下に置く。設定例（`mcp.json` は
+  `/data/mcp.json`）:
+
+```json
+{"servers": [{"name": "gcal", "command": "google-calendar-mcp",
+  "args": [],
+  "env": {"GOOGLE_OAUTH_CREDENTIALS": "/data/gcp-oauth.keys.json"}}]}
+```
+
+  コンテナの `HOME` は `/data/home` にしてあるため、トークン
+  は `/data/home/.config/google-calendar-mcp/tokens.json` に
+  保存され、コンテナを作り直しても認証は消えない。初回認証
+  （ブラウザでの Google サインイン）はホスト側で
+  `npx @cocal/google-calendar-mcp auth` を実行して済ませ、
+  できた `~/.config/google-calendar-mcp/tokens.json` を
+  ボリューム内の `/data/home/.config/google-calendar-mcp/`
+  に置くのが実用的な経路である（`gcp-oauth.keys.json` は
+  `/data` 直下に置く）。
 
 ## 承認（危険な操作の確認）
 
@@ -1238,6 +1269,28 @@ Web UI のヘッダー「人格・記憶」ボタンから開く編集パネル�
   で起動し、`http://localhost:8765` で Web UI を開く。生存確認
   （HEALTHCHECK）は slim に curl が無いため、Python 標準の
   urllib でトップページを確認する。
+- **MCP サーバーの同梱（0.39.0 から）**: ブラウザ操作と
+  Google カレンダーの MCP サーバーをコンテナでも使えるよう、
+  Node.js（公式 `node:22-slim` イメージから `/usr/local` を
+  コピー）と Chromium（apt の `chromium`、日本語表示のため
+  `fonts-noto-cjk` も）を入れ、2 つの MCP サーバー
+  （`@playwright/mcp` / `@cocal/google-calendar-mcp`）を
+  グローバル導入してある。そのためコンテナでは npx の初回
+  取得を待たず、コマンド名（`playwright-mcp` /
+  `google-calendar-mcp`）で直接起動できる。Playwright MCP
+  には同梱ブラウザでなくシステムの Chromium を
+  `--executable-path /usr/bin/chromium` で使わせる（設定例は
+  「ブラウザ操作」「実サービスの接続例」の各小節）。Node.js
+  と Chromium の分、イメージは大きくなる。
+- **HOME と認証の永続化**: コンテナの `HOME` は `/data/home`
+  にしてある。これにより Google カレンダーのトークン
+  （`~/.config/google-calendar-mcp/tokens.json`）のような
+  ホーム配下の状態もデータボリュームに残り、コンテナを
+  作り直しても消えない。`GOOGLE_OAUTH_CREDENTIALS` は
+  `/data` に置いたファイル（例 `/data/gcp-oauth.keys.json`）
+  を指す。認証まわりの手順は「実サービスの接続例」の小節を
+  参照。なおカレンダーの認証情報はボリュームに置かれる
+  ため、ボリューム自体を秘密情報として扱うこと。
 - **データはボリュームに置く**: データ置き場は `KUMA_DATA_DIR=/data`
   とし、compose の名前付きボリュームを `/data` に割り当てる。
   会話・長期記憶・用事・成果物などの状態はすべてここに集まる
