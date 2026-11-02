@@ -70,13 +70,28 @@ _FALLBACK_AVATAR = """\
 </svg>"""
 
 
+def _avatar_svg_candidates() -> list[Path]:
+    """アバター画像（assets/avatar.svg）の候補パスを優先順に返す。
+
+    1つ目はリポジトリ配置（src の2つ上）で、ソースから動かす場合の
+    従来の場所。pip で導入した環境ではそこに assets が無いため、
+    2つ目にカレントディレクトリの assets/ も候補にする（コンテナ
+    では WORKDIR に assets をコピーしてある前提）。
+    """
+    return [
+        Path(__file__).resolve().parents[2] / "assets" / "avatar.svg",
+        Path.cwd() / "assets" / "avatar.svg",
+    ]
+
+
 def load_avatar_svg() -> str:
-    """リポジトリの assets/avatar.svg を読む。無ければ簡易表示で代替する。"""
-    path = Path(__file__).resolve().parents[2] / "assets" / "avatar.svg"
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError:
-        return _FALLBACK_AVATAR
+    """assets/avatar.svg を候補の順に探して読む。無ければ簡易表示で代替する。"""
+    for path in _avatar_svg_candidates():
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return _FALLBACK_AVATAR
 
 
 _PAGE_TEMPLATE = """\

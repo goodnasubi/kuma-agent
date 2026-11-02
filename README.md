@@ -174,6 +174,17 @@ Telegram の Bot（@BotFather で発行）を通じて会話できます。環�
 | `KUMA_TELEGRAM_ALLOWED_CHATS` | 会話を許可する chat id（カンマ区切り） | （無し＝処理しない） |
 | `KUMA_TELEGRAM_TENANT` / `KUMA_TELEGRAM_USER` | Telegram の会話の行き先 | `default` / `default` |
 
+### コンテナで動かす
+
+Docker でサービスとして動かせます。リポジトリの `Dockerfile` と `docker-compose.yml` を使う場合:
+
+```bash
+cp .env.example .env   # .env に頭脳と API キーを書く
+docker compose up -d --build
+```
+
+ブラウザで http://127.0.0.1:8765 を開きます。データは名前付きボリューム（`kuma-data`）の `/data` に保存されるので、コンテナを作り直しても長期記憶や用事は残ります。API キーが未設定だと起動直後に終了するので、`.env` を先に用意してください。頭脳は API 系（muse / claude / gemini）から選んでください（CLI 系の頭脳はコンテナ内では使えません）。
+
 ### Web UI の注意
 
 Web UI は `--host` / `--port` で待ち受け先を変えられますが、認証を

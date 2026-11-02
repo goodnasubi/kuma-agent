@@ -1,0 +1,25 @@
+# kuma-agent をコンテナで動かすための設定。
+#
+# 使い方:
+#   1. .env.example を .env にコピーして、使う頭脳の API キーを書く
+#   2. docker compose up -d --build
+#   3. ブラウザで http://localhost:8765 を開く
+#
+# 注意: Web UI には認証がありません。ポートを外のネットワークに
+# 開けると、誰でも会話できてしまいます。外から使いたい場合は、
+# そのまま公開せず、認証付きの逆プロキシを前に置くなどして
+# ください。
+
+services:
+  kuma-agent:
+    build: .
+    ports:
+      - "8765:8765"
+    env_file:
+      - .env
+    volumes:
+      - kuma-data:/data
+    restart: unless-stopped
+
+volumes:
+  kuma-data:

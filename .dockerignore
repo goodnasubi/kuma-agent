@@ -1,0 +1,18 @@
+# イメージのビルドに不要なもの（実行に必要なのは pyproject.toml、
+# README.md、src/、assets/ だけ）。特に .env は秘密のキーを含むため
+# 絶対にイメージへ入れない。
+.git
+.gitignore
+.venv
+.env
+data
+work
+dist
+*.egg-info
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+tests
+docs
+AGENTS.md
