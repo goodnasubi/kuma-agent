@@ -148,7 +148,7 @@ _PAGE_TEMPLATE = """\
   header { background: var(--surface); color: var(--ink); display: flex; align-items: center;
            flex-wrap: wrap; gap: 12px; padding: 10px 16px;
            border-bottom: 1px solid var(--line); }
-  header .avatar { width: 40px; height: 40px; flex: none; }
+  header .avatar { width: 40px; height: 40px; flex: none; cursor: pointer; }
   header .avatar svg { width: 100%; height: 100%; display: block; }
   header h1 { font-size: 17px; margin: 0; }
   header .provider { font-size: 12px; color: var(--muted); }
@@ -244,6 +244,40 @@ _PAGE_TEMPLATE = """\
                  border-radius: 16px; padding: 16px 20px;
                  width: min(880px, calc(100% - 24px)); align-self: center;
                  margin-top: 12px; }
+  #statusPanel { background: var(--surface); border: 1px solid var(--line);
+                 border-radius: 16px; padding: 16px 20px;
+                 width: min(880px, calc(100% - 24px)); align-self: center;
+                 margin-top: 12px; }
+  #statusPanel[hidden] { display: none; }
+  #statusPanel h2 { font-size: 15px; margin: 0 0 8px; }
+  #statusPanel .statusLine { font-size: 14px; margin: 0 0 6px; }
+  #statusFacts { margin: 6px 0 0; padding-left: 1.4em; font-size: 14px; }
+  #tabBar { display: flex; gap: 6px; flex-wrap: nowrap; overflow-x: auto;
+            width: min(880px, calc(100% - 24px)); align-self: center;
+            padding: 10px 2px 2px; }
+  #tabBar button { padding: 6px 16px; font-size: 14px; white-space: nowrap;
+            background: var(--surface); color: var(--ink);
+            border: 1px solid var(--line); border-radius: 999px; }
+  #tabBar button.active { background: __HONEY__; color: #fff;
+            border-color: __HONEY__; }
+  #log[hidden], #form[hidden], #dropHint[hidden] { display: none; }
+  .tabNote { background: var(--surface); border: 1px solid var(--line);
+            border-radius: 16px; padding: 28px 20px; text-align: center;
+            width: min(880px, calc(100% - 24px)); align-self: center;
+            margin-top: 12px; color: var(--muted); font-size: 14px; }
+  .tabNote[hidden] { display: none; }
+  .tabNote h2 { font-size: 15px; color: var(--ink); margin: 0 0 8px; }
+  .tabNote p { margin: 0; }
+  #adminMenu { background: var(--surface); border: 1px solid var(--line);
+            border-radius: 16px; padding: 16px 20px;
+            width: min(880px, calc(100% - 24px)); align-self: center;
+            margin-top: 12px; }
+  #adminMenu[hidden] { display: none; }
+  #adminMenu h2 { font-size: 15px; margin: 0 0 8px; }
+  .adminBtns { display: flex; flex-wrap: wrap; gap: 6px; }
+  .adminBtns button { padding: 6px 14px; font-size: 13px;
+            background: var(--surface); color: var(--ink);
+            border: 1px solid var(--line); border-radius: 999px; }
   #approvalPanel[hidden] { display: none; }
   #approvalPanel h2 { font-size: 15px; margin: 0 0 8px; }
   .approvalRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
@@ -309,7 +343,8 @@ _PAGE_TEMPLATE = """\
 </head>
 <body>
 <header>
-  <div class="avatar">__AVATAR__</div>
+  <div class="avatar" id="avatarBtn" role="button" tabindex="0"
+       title="いまの状況を見る">__AVATAR__</div>
   <div>
     <h1>クマ</h1>
     <div class="provider">provider: __PROVIDER__</div>
@@ -342,7 +377,18 @@ _PAGE_TEMPLATE = """\
       <option value="system">システム</option>
     </select>
   </div>
-  <div class="sessions">
+</header>
+<nav id="tabBar">
+  <button type="button" data-tab="chat" class="active">会話</button>
+  <button type="button" data-tab="feed">フィード</button>
+  <button type="button" data-tab="ideas">アイデア</button>
+  <button type="button" data-tab="goals">目標</button>
+  <button type="button" data-tab="explore">探す</button>
+  <button type="button" data-tab="admin">管理</button>
+</nav>
+<section id="adminMenu" hidden>
+  <h2>管理</h2>
+  <div class="adminBtns">
     <button id="tenantAdminBtn" type="button">テナント管理</button>
     <button id="outputsBtn" type="button">成果物</button>
     <button id="profileBtn" type="button">人格・記憶</button>
@@ -352,7 +398,7 @@ _PAGE_TEMPLATE = """\
     <input id="importFile" type="file" accept=".zip" hidden>
     __LOGOUT_BUTTON__
   </div>
-</header>
+</section>
 <section id="outputsPanel" hidden>
   <h2>成果物</h2>
   <div id="outputRows"></div>
@@ -375,6 +421,11 @@ _PAGE_TEMPLATE = """\
   <h3>日別（直近30日）</h3>
   <div id="usageDayRows"></div>
 </section>
+<section id="statusPanel" hidden>
+  <h2>いまの状況</h2>
+  <p class="statusLine">状態: <span id="statusNowText">待機中</span></p>
+  <ul id="statusFacts"></ul>
+</section>
 <section id="tenantPanel" hidden>
   <h2>テナント管理</h2>
   <div id="tenantRows"></div>
@@ -396,6 +447,18 @@ _PAGE_TEMPLATE = """\
     <button id="notifySaveQuiet" type="button">時間帯を保存</button>
     <button id="notifyClearQuiet" type="button">時間帯を解除</button>
   </div>
+</section>
+<section id="feedPanel" class="tabNote" hidden>
+  <h2>フィード</h2>
+  <p>準備中です。これから、朝のまとめや声かけ、用事の進み具合をここに並べます。</p>
+</section>
+<section id="ideasPanel" class="tabNote" hidden>
+  <h2>アイデア</h2>
+  <p>準備中です。これから、クマからの提案をカードで並べます。</p>
+</section>
+<section id="goalsPanel" class="tabNote" hidden>
+  <h2>目標</h2>
+  <p>準備中です。これから、長期の目標と進捗をここに残せるようにします。</p>
 </section>
 <section id="approvalPanel" hidden>
   <h2>承認の確認</h2>
@@ -467,6 +530,52 @@ const profileFiles = [
 let currentProfileFile = 'SOUL.md';
 const tenantRows = document.getElementById('tenantRows');
 const approvalPanel = document.getElementById('approvalPanel');
+const avatarBtn = document.getElementById('avatarBtn');
+const statusPanel = document.getElementById('statusPanel');
+const statusNowText = document.getElementById('statusNowText');
+const statusFacts = document.getElementById('statusFacts');
+const tabBar = document.getElementById('tabBar');
+const dropHint = document.getElementById('dropHint');
+const adminMenu = document.getElementById('adminMenu');
+const feedPanel = document.getElementById('feedPanel');
+const ideasPanel = document.getElementById('ideasPanel');
+const goalsPanel = document.getElementById('goalsPanel');
+let activeTab = 'chat';
+let lastApprovals = [];
+
+// タブの切り替え。会話タブだけが会話ログと入力欄を持ち、探すタブは
+// 成果物、管理タブは管理メニューとその配下のパネルを出す。
+// フィード／アイデア／目標は器だけで、中身はこれから入れる
+function showTab(name) {
+  activeTab = name;
+  for (const btn of tabBar.querySelectorAll('button')) {
+    btn.classList.toggle('active', btn.dataset.tab === name);
+  }
+  const chat = name === 'chat';
+  log.hidden = !chat;
+  dropHint.hidden = !chat;
+  form.hidden = !chat;
+  if (chat) {
+    renderApprovals(lastApprovals);
+  } else {
+    approvalPanel.hidden = true;
+  }
+  feedPanel.hidden = name !== 'feed';
+  ideasPanel.hidden = name !== 'ideas';
+  goalsPanel.hidden = name !== 'goals';
+  outputsPanel.hidden = name !== 'explore';
+  if (name === 'explore') loadOutputs();
+  adminMenu.hidden = name !== 'admin';
+  if (name !== 'admin') {
+    tenantPanel.hidden = true;
+    profilePanel.hidden = true;
+    usagePanel.hidden = true;
+  }
+}
+
+for (const btn of tabBar.querySelectorAll('button')) {
+  btn.addEventListener('click', () => showTab(btn.dataset.tab));
+}
 const approvalRows = document.getElementById('approvalRows');
 const adminNewTenant = document.getElementById('adminNewTenant');
 const adminCreateTenant = document.getElementById('adminCreateTenant');
@@ -765,6 +874,74 @@ deleteSessionBtn.addEventListener('click', async () => {
   if (wasCurrent) applySession('main');
 });
 
+// いまの状況パネル。アバターを押すと開き、開いている間は数秒ごとに
+// 状態を取り直す。状態は /api/status（用事の件数つき）、承認待ちは
+// /api/approvals、使用量は /api/usage から集める
+let statusPanelTimer = null;
+
+async function refreshStatusPanel() {
+  const q = '?tenant=' + encodeURIComponent(currentTenant)
+    + '&user=' + encodeURIComponent(currentUser);
+  try {
+    const res = await fetch('/api/status' + q
+      + '&session=' + encodeURIComponent(currentSession));
+    const data = await res.json();
+    statusNowText.textContent = data.status || '待機中';
+    const facts = [];
+    if (data.tasks) {
+      facts.push('用事の一覧: ' + data.tasks.total
+        + ' 件（うち未完了 ' + data.tasks.open + ' 件）');
+    }
+    try {
+      const aRes = await fetch('/api/approvals' + q);
+      const aData = await aRes.json();
+      const n = (aData.approvals || []).length;
+      facts.push(n ? '承認待ち: ' + n + ' 件あります'
+                   : '承認待ち: ありません');
+    } catch (e) { /* 承認待ちが取れなくても他の項目は出す */ }
+    try {
+      const uRes = await fetch('/api/usage' + q);
+      const uData = await uRes.json();
+      if (uData.calls) {
+        facts.push('頭脳の使用量（累計）: 呼び出し '
+          + formatCount(uData.calls) + ' 回'
+          + (uData.has_tokens
+            ? '、合計 ' + formatCount(uData.total_tokens) + ' トークン'
+            : ''));
+      }
+    } catch (e) { /* 使用量が取れなくても他の項目は出す */ }
+    const room = sessionSelect.selectedOptions.length
+      ? sessionSelect.selectedOptions[0].textContent : currentSession;
+    facts.push('いまの場所: テナント ' + currentTenant
+      + ' ／ ユーザー ' + currentUser + ' ／ 部屋 ' + room);
+    statusFacts.innerHTML = '';
+    for (const fact of facts) {
+      const li = document.createElement('li');
+      li.textContent = fact;
+      statusFacts.appendChild(li);
+    }
+  } catch (e) { /* 状態が取れなければ前回の表示のままにする */ }
+}
+
+function toggleStatusPanel() {
+  statusPanel.hidden = !statusPanel.hidden;
+  if (!statusPanel.hidden) {
+    refreshStatusPanel();
+    statusPanelTimer = setInterval(refreshStatusPanel, 3000);
+  } else if (statusPanelTimer) {
+    clearInterval(statusPanelTimer);
+    statusPanelTimer = null;
+  }
+}
+
+avatarBtn.addEventListener('click', toggleStatusPanel);
+avatarBtn.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    toggleStatusPanel();
+  }
+});
+
 // テナント管理パネル。テナントごとに能動発信の ON/OFF と保持期限
 // （日数）を編集でき、新しいテナントの作成もできる。設定の保存は
 // /api/tenant_settings、作成は /api/tenants/create を使う
@@ -777,8 +954,7 @@ tenantAdminBtn.addEventListener('click', () => {
 // ダウンロードできる。パネルを開くたびに /api/outputs で一覧を
 // 取り直す（会話中に新しい成果物が登録されるため）
 outputsBtn.addEventListener('click', () => {
-  outputsPanel.hidden = !outputsPanel.hidden;
-  if (!outputsPanel.hidden) loadOutputs();
+  showTab('explore');
 });
 
 // 人格・記憶パネル。現在のテナント×ユーザーの人格ファイル
@@ -1478,8 +1654,9 @@ async function pollApprovals() {
 }
 
 function renderApprovals(list) {
+  lastApprovals = list;
   approvalRows.innerHTML = '';
-  approvalPanel.hidden = !list.length;
+  approvalPanel.hidden = !(list.length && activeTab === 'chat');
   for (const item of list) {
     const row = document.createElement('div');
     row.className = 'approvalRow';
@@ -2411,10 +2588,16 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                                       _first(query.get("user")))
                 self._send_json(200, {"sessions": store.names()})
             elif split.path == "/api/status":
-                store = tenants.store(_first(query.get("tenant")),
-                                      _first(query.get("user")))
-                self._send_json(200, {"status": store.status(
-                    _first(query.get("session")))})
+                tenant = normalize_tenant_name(
+                    _first(query.get("tenant")) or tenants.default_tenant)
+                user = normalize_user_name(
+                    _first(query.get("user")) or tenants.default_user)
+                store = tenants.store(tenant, user)
+                t_all, t_open = _count_tasks_file(
+                    user_dir(tenant_dir(tenants.data_dir, tenant), user))
+                self._send_json(200, {
+                    "status": store.status(_first(query.get("session"))),
+                    "tasks": {"total": t_all, "open": t_open}})
             elif split.path == "/api/approvals":
                 tenant = normalize_tenant_name(_first(query.get("tenant")))
                 user = normalize_user_name(_first(query.get("user")))
