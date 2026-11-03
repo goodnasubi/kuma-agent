@@ -343,6 +343,8 @@ _PAGE_TEMPLATE = """\
          margin: 8px 0 14px;
          box-shadow: 0 4px 18px rgba(58, 51, 44, .06); }
   form:focus-within { border-color: __HONEY__; }
+  form > button { flex-shrink: 0; }
+  #send { margin-left: auto; }
   #quoteBox { flex-basis: 100%; display: flex; gap: 8px; align-items: center;
               font-size: 13px; background: var(--quote-bg); padding: 6px 8px;
               border-left: 4px solid __HONEY__; border-radius: 6px; }
@@ -359,8 +361,8 @@ _PAGE_TEMPLATE = """\
   @keyframes statusBlink { 0%, 60%, 100% { opacity: .15; } 30% { opacity: 1; } }
   #files { flex-basis: 100%; font-size: 13px; min-height: 1em; }
   #files:empty { display: none; }
-  #input { flex: 1; padding: 8px 6px; font-size: 16px; border: none;
-           background: transparent; outline: none; }
+  #input { flex: 1; min-width: 0; padding: 8px 6px; font-size: 16px;
+           border: none; background: transparent; outline: none; }
   button { padding: 10px 18px; font-size: 16px; border: none; border-radius: 8px;
            background: __HONEY__; color: #fff; cursor: pointer; }
   button:disabled { opacity: .5; }
@@ -504,7 +506,7 @@ _PAGE_TEMPLATE = """\
   <span id="recordStatus" hidden></span>
   <input id="file" type="file" multiple hidden>
   <input id="input" autocomplete="off" placeholder="話しかけてください">
-  <button id="send" type="submit" class="iconBtn go" title="送信" aria-label="送信"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/></svg></button>
+  <button id="send" type="submit" class="iconBtn go" title="送信" aria-label="送信"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V4M5 11l7-7 7 7"/></svg></button>
 </form>
 <script>
 const log = document.getElementById('log');
