@@ -87,6 +87,19 @@ def test_render_page_has_tab_bar():
     assert 'id="adminMenu"' in page
 
 
+def test_render_page_uses_icon_buttons():
+    page = render_page("muse")
+    # 文字のボタンではなくアイコンのボタンにする（意味は title で伝える）
+    assert '<button id="send" type="submit" class="iconBtn go"' in page
+    assert '<button id="tenantAdminBtn" type="button" class="iconBtn"' in page
+    assert '>送信</button>' not in page
+    assert '>テナント管理</button>' not in page
+    # スマホではタブバーを下部に固定し、角は控えめにする
+    assert "@media (max-width: 720px)" in page
+    assert "position: fixed; left: 0; right: 0; bottom: 0" in page
+    assert "border-radius: 999px" not in page
+
+
 def test_status_endpoint_includes_task_counts(server: str):
     status, body = _get(server + "/api/status")
     assert status == 200

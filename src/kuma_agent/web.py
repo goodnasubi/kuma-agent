@@ -157,10 +157,10 @@ _PAGE_TEMPLATE = """\
   .sessions select, .sessions input { padding: 6px; font-size: 13px;
            border-radius: 8px; border: 1px solid var(--line); background: var(--surface); }
   .sessions button { padding: 6px 14px; font-size: 13px; background: var(--surface);
-           color: var(--ink); border: 1px solid var(--line); border-radius: 999px; }
+           color: var(--ink); border: 1px solid var(--line); border-radius: 8px; }
   .sessions[hidden] { display: none; }
   #tenantPanel { background: var(--surface); border: 1px solid var(--line);
-                 border-radius: 16px; padding: 16px 20px;
+                 border-radius: 6px; padding: 16px 20px;
                  width: min(880px, calc(100% - 24px)); align-self: center;
                  margin-top: 12px; }
   #tenantPanel[hidden] { display: none; }
@@ -172,7 +172,7 @@ _PAGE_TEMPLATE = """\
                border-radius: 6px; border: 1px solid var(--line); }
   .tenantRow button, .adminNew button { padding: 4px 14px; font-size: 13px;
                background: var(--surface); color: var(--ink); border: 1px solid var(--line);
-               border-radius: 999px; }
+               border-radius: 8px; }
   .adminNew { display: flex; gap: 8px; align-items: center; margin-top: 10px;
               font-size: 14px; }
   .adminNew input { padding: 6px; font-size: 13px; border-radius: 6px;
@@ -186,11 +186,12 @@ _PAGE_TEMPLATE = """\
   #tenantDeleteConfirm .warn { color: #b3261e; font-weight: bold; }
   #tenantDeleteConfirm .buttons { display: flex; gap: 10px; margin-top: 10px; }
   #tenantDeleteConfirm .deleteDo { background: #b3261e; color: #fff;
-               border: 1px solid #b3261e; padding: 6px 14px; border-radius: 6px; }
+               border: 1px solid #b3261e; padding: 0; border-radius: 6px;
+               width: 32px; height: 32px; display: grid; place-items: center; }
   #tenantPanel h3 { font-size: 14px; margin: 16px 0 4px;
                border-top: 1px solid var(--line); padding-top: 12px; }
   #outputsPanel { background: var(--surface); border: 1px solid var(--line);
-                 border-radius: 16px; padding: 16px 20px;
+                 border-radius: 6px; padding: 16px 20px;
                  width: min(880px, calc(100% - 24px)); align-self: center;
                  margin-top: 12px; }
   #outputsPanel[hidden] { display: none; }
@@ -201,9 +202,9 @@ _PAGE_TEMPLATE = """\
   .outputRow .oname, .outputRow .ometa { opacity: .85; }
   .outputRow a { padding: 4px 14px; font-size: 13px; background: var(--surface);
                color: var(--ink); border: 1px solid var(--line);
-               border-radius: 999px; text-decoration: none; }
+               border-radius: 8px; text-decoration: none; }
   #profilePanel { background: var(--surface); border: 1px solid var(--line);
-                 border-radius: 16px; padding: 16px 20px;
+                 border-radius: 6px; padding: 16px 20px;
                  width: min(880px, calc(100% - 24px)); align-self: center;
                  margin-top: 12px; }
   #profilePanel[hidden] { display: none; }
@@ -211,7 +212,7 @@ _PAGE_TEMPLATE = """\
   #profilePanel .profileNote { font-size: 13px; margin: 0 0 8px; }
   #profileTabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
   #profileTabs button { padding: 4px 14px; font-size: 13px; background: var(--surface);
-               color: var(--ink); border: 1px solid var(--line); border-radius: 999px; }
+               color: var(--ink); border: 1px solid var(--line); border-radius: 8px; }
   #profileTabs button.active { background: __HONEY__; color: #fff;
                border-color: __HONEY__; }
   #profileText { width: 100%; padding: 10px; font-size: 14px; line-height: 1.5;
@@ -222,7 +223,7 @@ _PAGE_TEMPLATE = """\
   .profileActions button { padding: 6px 16px; font-size: 14px; }
   #profileStatus { font-size: 13px; }
   #usagePanel { background: var(--surface); border: 1px solid var(--line);
-                 border-radius: 16px; padding: 16px 20px;
+                 border-radius: 6px; padding: 16px 20px;
                  width: min(880px, calc(100% - 24px)); align-self: center;
                  margin-top: 12px; }
   #usagePanel[hidden] { display: none; }
@@ -238,14 +239,14 @@ _PAGE_TEMPLATE = """\
   .notifyRow .tname { min-width: 8em; }
   .notifyRow button { padding: 4px 14px; font-size: 13px;
                background: var(--surface); color: var(--ink); border: 1px solid var(--line);
-               border-radius: 999px; }
+               border-radius: 8px; }
   .adminNew input[type="time"] { padding: 4px; }
   #approvalPanel { background: var(--surface); border: 1px solid var(--line);
-                 border-radius: 16px; padding: 16px 20px;
+                 border-radius: 6px; padding: 16px 20px;
                  width: min(880px, calc(100% - 24px)); align-self: center;
                  margin-top: 12px; }
   #statusPanel { background: var(--surface); border: 1px solid var(--line);
-                 border-radius: 16px; padding: 16px 20px;
+                 border-radius: 6px; padding: 16px 20px;
                  width: min(880px, calc(100% - 24px)); align-self: center;
                  margin-top: 12px; }
   #statusPanel[hidden] { display: none; }
@@ -255,26 +256,50 @@ _PAGE_TEMPLATE = """\
   .iconBtn { width: 38px; height: 38px; padding: 0; display: grid;
              place-items: center; background: var(--surface);
              color: var(--ink); border: 1px solid var(--line);
-             border-radius: 999px; cursor: pointer; }
+             border-radius: 8px; cursor: pointer; }
   .iconBtn svg { width: 20px; height: 20px; display: block; }
+  .iconBtn.sm { width: 32px; height: 32px; }
+  .iconBtn.sm svg { width: 17px; height: 17px; }
+  .iconBtn.go { background: __HONEY__; color: #fff; border-color: __HONEY__; }
+  #tabBar button { display: inline-flex; align-items: center; gap: 6px; }
+  #tabBar button svg { width: 18px; height: 18px; display: block; }
+  @media (max-width: 720px) {
+    body { padding-bottom: 78px; }
+    header { gap: 6px; padding: 8px 10px; }
+    header .sessions input { width: 6em; }
+    #tabBar { position: fixed; left: 0; right: 0; bottom: 0; width: 100%;
+              background: var(--surface); border-top: 1px solid var(--line);
+              padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
+              justify-content: space-around; z-index: 40; }
+    #tabBar button { flex-direction: column; gap: 2px; font-size: 10px;
+              flex: 1 1 0; min-width: 0;
+              padding: 5px 8px; border: none; background: transparent;
+              color: var(--ink); }
+    #tabBar button.active { background: transparent; color: __HONEY__;
+              border: none; }
+    #tabBar button svg { width: 21px; height: 21px; }
+    #outputsPanel, #profilePanel, #usagePanel, #tenantPanel,
+    #approvalPanel, #statusPanel, .tabNote, #adminMenu, #form, #quoteBar {
+      width: calc(100% - 16px); }
+  }
   #tabBar { display: flex; gap: 6px; flex-wrap: nowrap; overflow-x: auto;
             width: min(880px, calc(100% - 24px)); align-self: center;
             padding: 10px 2px 2px; }
   #tabBar button { padding: 6px 16px; font-size: 14px; white-space: nowrap;
             background: var(--surface); color: var(--ink);
-            border: 1px solid var(--line); border-radius: 999px; }
+            border: 1px solid var(--line); border-radius: 8px; }
   #tabBar button.active { background: __HONEY__; color: #fff;
             border-color: __HONEY__; }
   #log[hidden], #form[hidden], #dropHint[hidden] { display: none; }
   .tabNote { background: var(--surface); border: 1px solid var(--line);
-            border-radius: 16px; padding: 28px 20px; text-align: center;
+            border-radius: 6px; padding: 28px 20px; text-align: center;
             width: min(880px, calc(100% - 24px)); align-self: center;
             margin-top: 12px; color: var(--muted); font-size: 14px; }
   .tabNote[hidden] { display: none; }
   .tabNote h2 { font-size: 15px; color: var(--ink); margin: 0 0 8px; }
   .tabNote p { margin: 0; }
   #adminMenu { background: var(--surface); border: 1px solid var(--line);
-            border-radius: 16px; padding: 16px 20px;
+            border-radius: 6px; padding: 16px 20px;
             width: min(880px, calc(100% - 24px)); align-self: center;
             margin-top: 12px; }
   #adminMenu[hidden] { display: none; }
@@ -282,7 +307,7 @@ _PAGE_TEMPLATE = """\
   .adminBtns { display: flex; flex-wrap: wrap; gap: 6px; }
   .adminBtns button { padding: 6px 14px; font-size: 13px;
             background: var(--surface); color: var(--ink);
-            border: 1px solid var(--line); border-radius: 999px; }
+            border: 1px solid var(--line); border-radius: 8px; }
   #approvalPanel[hidden] { display: none; }
   #approvalPanel h2 { font-size: 15px; margin: 0 0 8px; }
   .approvalRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
@@ -294,7 +319,7 @@ _PAGE_TEMPLATE = """\
   #log { flex: 1; overflow-y: auto; padding: 20px 16px 8px; display: flex;
          flex-direction: column; gap: 20px;
          width: min(880px, 100%); align-self: center; }
-  .msg { max-width: 78%; padding: 10px 14px; border-radius: 18px;
+  .msg { max-width: 78%; padding: 10px 14px; border-radius: 6px;
          white-space: pre-wrap; word-break: break-word; line-height: 1.65;
          font-size: 15px; }
   .msg.user { align-self: flex-end; background: var(--bubble); color: var(--ink); }
@@ -306,14 +331,14 @@ _PAGE_TEMPLATE = """\
   .msg .bodyText { display: block; }
   .quote-btn, .speak-btn { display: inline-block; margin-top: 6px; padding: 2px 8px;
                font-size: 12px; background: transparent; color: inherit;
-               border: 1px solid currentColor; border-radius: 999px; }
+               border: 1px solid currentColor; border-radius: 8px; }
   .quote-btn { margin-right: 6px; }
   #record.recording { background: #B3402A; color: #fff; border-color: #B3402A; }
   #recordStatus { font-size: 13px; align-self: center; }
   #recordStatus[hidden] { display: none; }
   form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
          padding: 10px 12px; background: var(--surface);
-         border: 1px solid var(--line); border-radius: 24px;
+         border: 1px solid var(--line); border-radius: 8px;
          width: min(880px, calc(100% - 24px)); align-self: center;
          margin: 8px 0 14px;
          box-shadow: 0 4px 18px rgba(58, 51, 44, .06); }
@@ -336,7 +361,7 @@ _PAGE_TEMPLATE = """\
   #files:empty { display: none; }
   #input { flex: 1; padding: 8px 6px; font-size: 16px; border: none;
            background: transparent; outline: none; }
-  button { padding: 10px 18px; font-size: 16px; border: none; border-radius: 999px;
+  button { padding: 10px 18px; font-size: 16px; border: none; border-radius: 8px;
            background: __HONEY__; color: #fff; cursor: pointer; }
   button:disabled { opacity: .5; }
   #attach, #record { background: var(--surface); color: var(--ink); border: 1px solid var(--line); }
@@ -359,20 +384,20 @@ _PAGE_TEMPLATE = """\
     <label for="tenantSelect">テナント</label>
     <select id="tenantSelect"></select>
     <input id="newTenant" placeholder="新しいテナント" size="10">
-    <button id="createTenant" type="button">作成</button>
+    <button id="createTenant" type="button" class="iconBtn sm" title="テナントを作成" aria-label="テナントを作成"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
   </div>
   <div class="sessions">
     <label for="userSelect">ユーザー</label>
     <select id="userSelect"></select>
     <input id="newUser" placeholder="新しいユーザー" size="10">
-    <button id="createUser" type="button">作成</button>
+    <button id="createUser" type="button" class="iconBtn sm" title="ユーザーを作成" aria-label="ユーザーを作成"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
   </div>
   <div class="sessions" id="sessionBox">
     <label for="sessionSelect" id="sessionLabel">部屋</label>
     <select id="sessionSelect"></select>
     <input id="newSession" placeholder="新しい部屋" size="10">
-    <button id="createSession" type="button">作成</button>
-    <button id="deleteSession" type="button">削除</button>
+    <button id="createSession" type="button" class="iconBtn sm" title="部屋を作成" aria-label="部屋を作成"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+    <button id="deleteSession" type="button" class="iconBtn sm" title="部屋を削除" aria-label="部屋を削除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg></button>
   </div>
   <div class="sessions">
     <button id="themeBtn" type="button" class="iconBtn"
@@ -380,22 +405,22 @@ _PAGE_TEMPLATE = """\
   </div>
 </header>
 <nav id="tabBar">
-  <button type="button" data-tab="chat" class="active">会話</button>
-  <button type="button" data-tab="feed">フィード</button>
-  <button type="button" data-tab="ideas">アイデア</button>
-  <button type="button" data-tab="goals">目標</button>
-  <button type="button" data-tab="explore">探す</button>
-  <button type="button" data-tab="admin">管理</button>
+  <button type="button" data-tab="chat" class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.5L3 20l1-5.6A8.5 8.5 0 1 1 21 11.5z"/></svg>会話</button>
+  <button type="button" data-tab="feed"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h13v14H6a2 2 0 0 1-2-2zM17 8h3v9a2 2 0 0 1-2 2M7 9h7M7 13h7"/></svg>フィード</button>
+  <button type="button" data-tab="ideas"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 1 4 12.7c-.7.6-1 1-1.2 2.3H9.2C9 15.7 8.4 15.3 8 14.7A7 7 0 0 1 12 2z"/></svg>アイデア</button>
+  <button type="button" data-tab="goals"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg>目標</button>
+  <button type="button" data-tab="explore"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>探す</button>
+  <button type="button" data-tab="admin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8h9M19 8h1M4 16h3M13 16h7"/><circle cx="16" cy="8" r="2"/><circle cx="10" cy="16" r="2"/></svg>管理</button>
 </nav>
 <section id="adminMenu" hidden>
   <h2>管理</h2>
   <div class="adminBtns">
-    <button id="tenantAdminBtn" type="button">テナント管理</button>
-    <button id="outputsBtn" type="button">成果物</button>
-    <button id="profileBtn" type="button">人格・記憶</button>
-    <button id="usageBtn" type="button">使用量</button>
-    <button id="exportBtn" type="button">書き出し</button>
-    <button id="importBtn" type="button">復元</button>
+    <button id="tenantAdminBtn" type="button" class="iconBtn" title="テナント管理" aria-label="テナント管理"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16M15 10h3a1 1 0 0 1 1 1v10M3 21h18M9 21v-4h2v4M8 7h2M8 11h2"/></svg></button>
+    <button id="outputsBtn" type="button" class="iconBtn" title="成果物" aria-label="成果物"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5v8l9 5 9-5zM3 8l9 5 9-5M12 13v8"/></svg></button>
+    <button id="profileBtn" type="button" class="iconBtn" title="人格・記憶" aria-label="人格・記憶"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V4H6.5A2.5 2.5 0 0 0 4 6.5zM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg></button>
+    <button id="usageBtn" type="button" class="iconBtn" title="使用量" aria-label="使用量"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 20v-6M11 20V5M17 20v-9M3 20h18"/></svg></button>
+    <button id="exportBtn" type="button" class="iconBtn" title="書き出し" aria-label="書き出し"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M6 10l6-6 6 6M4 20h16"/></svg></button>
+    <button id="importBtn" type="button" class="iconBtn" title="復元" aria-label="復元"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M6 10l6 6 6-6M4 20h16"/></svg></button>
     <input id="importFile" type="file" accept=".zip" hidden>
     __LOGOUT_BUTTON__
   </div>
@@ -410,7 +435,7 @@ _PAGE_TEMPLATE = """\
   <div id="profileTabs"></div>
   <textarea id="profileText" rows="14" spellcheck="false"></textarea>
   <div class="profileActions">
-    <button id="profileSave" type="button">保存</button>
+    <button id="profileSave" type="button" class="iconBtn sm" title="保存" aria-label="保存"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg></button>
     <span id="profileStatus"></span>
   </div>
 </section>
@@ -433,20 +458,20 @@ _PAGE_TEMPLATE = """\
   <div id="tenantDeleteConfirm" hidden></div>
   <div class="adminNew">
     <input id="adminNewTenant" placeholder="新しいテナント名" size="14">
-    <button id="adminCreateTenant" type="button">テナントを作成</button>
+    <button id="adminCreateTenant" type="button" class="iconBtn sm" title="テナントを作成" aria-label="テナントを作成"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
   </div>
   <h3>知らせ方の好み（現在のユーザー）</h3>
   <div id="notifyMutedRows"></div>
   <div class="adminNew">
     <input id="notifyNewTopic" placeholder="知らせない話題" size="14">
-    <button id="notifyAddTopic" type="button">追加</button>
+    <button id="notifyAddTopic" type="button" class="iconBtn sm" title="話題を追加" aria-label="話題を追加"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
   </div>
   <div class="adminNew">
     <label>静かな時間帯:
       <input id="notifyQuietStart" type="time"> 〜
       <input id="notifyQuietEnd" type="time"></label>
-    <button id="notifySaveQuiet" type="button">時間帯を保存</button>
-    <button id="notifyClearQuiet" type="button">時間帯を解除</button>
+    <button id="notifySaveQuiet" type="button" class="iconBtn sm" title="時間帯を保存" aria-label="時間帯を保存"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg></button>
+    <button id="notifyClearQuiet" type="button" class="iconBtn sm" title="時間帯を解除" aria-label="時間帯を解除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
   </div>
 </section>
 <section id="feedPanel" class="tabNote" hidden>
@@ -471,15 +496,15 @@ _PAGE_TEMPLATE = """\
   <div id="statusBox" hidden><span class="dot">・</span><span class="dot">・</span><span class="dot">・</span><span id="statusText"></span></div>
   <div id="quoteBox" hidden>
     <span id="quoteText"></span>
-    <button id="clearQuote" type="button">解除</button>
+    <button id="clearQuote" type="button" class="iconBtn sm" title="引用を解除" aria-label="引用を解除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
   </div>
   <div id="files"></div>
-  <button id="attach" type="button">添付</button>
-  <button id="record" type="button">録音</button>
+  <button id="attach" type="button" class="iconBtn" title="ファイルを添付" aria-label="ファイルを添付"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.4 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 1 1 5.66 5.66l-9.19 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+  <button id="record" type="button" class="iconBtn" title="録音" aria-label="録音"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 19v3"/></svg></button>
   <span id="recordStatus" hidden></span>
   <input id="file" type="file" multiple hidden>
   <input id="input" autocomplete="off" placeholder="話しかけてください">
-  <button id="send" type="submit">送信</button>
+  <button id="send" type="submit" class="iconBtn go" title="送信" aria-label="送信"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/></svg></button>
 </form>
 <script>
 const log = document.getElementById('log');
@@ -633,14 +658,14 @@ function addMsg(role, text, quote = null, quoteSource = null) {
   const quoteBtn = document.createElement('button');
   quoteBtn.type = 'button';
   quoteBtn.className = 'quote-btn';
-  quoteBtn.textContent = '引用';
+  setIcon(quoteBtn, 'quote', '引用');
   quoteBtn.addEventListener('click', () => setQuote(quoteSource || text));
   div.appendChild(quoteBtn);
   if (role === 'assistant') {
     const speakBtn = document.createElement('button');
     speakBtn.type = 'button';
     speakBtn.className = 'speak-btn';
-    speakBtn.textContent = '読み上げ';
+    setIcon(speakBtn, 'speaker', '読み上げ');
     speakBtn.addEventListener('click', () => toggleSpeak(speakBtn, text));
     div.appendChild(speakBtn);
   }
@@ -654,7 +679,7 @@ function addMsg(role, text, quote = null, quoteSource = null) {
 function stopSpeaking() {
   if ('speechSynthesis' in window) window.speechSynthesis.cancel();
   if (speakingBtn) {
-    speakingBtn.textContent = '読み上げ';
+    setIcon(speakingBtn, 'speaker', '読み上げ');
     speakingBtn = null;
   }
 }
@@ -673,14 +698,14 @@ function toggleSpeak(btn, text) {
   utterance.lang = 'ja-JP';
   const done = () => {
     if (speakingBtn === btn) {
-      btn.textContent = '読み上げ';
+      setIcon(btn, 'speaker', '読み上げ');
       speakingBtn = null;
     }
   };
   utterance.onend = done;
   utterance.onerror = done;
   speakingBtn = btn;
-  btn.textContent = '止める';
+  setIcon(btn, 'stop', '止める');
   window.speechSynthesis.speak(utterance);
 }
 
@@ -1179,7 +1204,7 @@ async function loadOutputs() {
         + (item.created_at ? ' / ' + String(item.created_at).replace('T', ' ').slice(0, 16) : '');
       row.appendChild(meta);
       const link = document.createElement('a');
-      link.textContent = 'ダウンロード';
+      setIcon(link, 'download', 'ダウンロード');
       link.href = '/api/outputs/download' + query
         + '&name=' + encodeURIComponent(item.filename);
       row.appendChild(link);
@@ -1232,7 +1257,7 @@ function renderNotifyPrefs(prefs) {
     row.appendChild(label);
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
-    delBtn.textContent = '削除';
+    setIcon(delBtn, 'trash', '削除');
     delBtn.addEventListener('click', async () => {
       try {
         renderNotifyPrefs(await postNotifyPrefs({remove_topic: topic}));
@@ -1331,7 +1356,7 @@ async function buildTenantRow(name) {
   row.appendChild(retentionLabel);
   const saveBtn = document.createElement('button');
   saveBtn.type = 'button';
-  saveBtn.textContent = '保存';
+  setIcon(saveBtn, 'check', '保存');
   saveBtn.addEventListener('click', async () => {
     const body = {tenant: name, proactive_enabled: toggle.checked,
                   approvals_enabled: approvalToggle.checked,
@@ -1352,7 +1377,7 @@ async function buildTenantRow(name) {
   row.appendChild(saveBtn);
   const switchBtn = document.createElement('button');
   switchBtn.type = 'button';
-  switchBtn.textContent = '切り替え';
+  setIcon(switchBtn, 'swap', '切り替え');
   switchBtn.addEventListener('click', () => applyTenant(name));
   row.appendChild(switchBtn);
   // 削除は取り消せないため既定テナントには出さない。確認は
@@ -1363,7 +1388,7 @@ async function buildTenantRow(name) {
   if (name !== 'default') {
     const deleteBtn = document.createElement('button');
     deleteBtn.type = 'button';
-    deleteBtn.textContent = '削除';
+    setIcon(deleteBtn, 'trash', '削除');
     deleteBtn.addEventListener('click', () => showTenantDeleteConfirm(name));
     row.appendChild(deleteBtn);
   }
@@ -1406,7 +1431,7 @@ async function showTenantDeleteConfirm(name) {
     tenantDeleteConfirm.appendChild(err);
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
-    closeBtn.textContent = '閉じる';
+    setIcon(closeBtn, 'x', '閉じる');
     closeBtn.addEventListener('click', hideTenantDeleteConfirm);
     tenantDeleteConfirm.appendChild(closeBtn);
     return;
@@ -1455,7 +1480,7 @@ async function showTenantDeleteConfirm(name) {
   const doBtn = document.createElement('button');
   doBtn.type = 'button';
   doBtn.className = 'deleteDo';
-  doBtn.textContent = '削除する';
+  setIcon(doBtn, 'trash', '削除する');
   doBtn.addEventListener('click', async () => {
     if (input.value.trim() !== name) {
       window.alert('テナント名が一致しないため、削除しませんでした');
@@ -1485,7 +1510,7 @@ async function showTenantDeleteConfirm(name) {
   buttons.appendChild(doBtn);
   const cancelBtn = document.createElement('button');
   cancelBtn.type = 'button';
-  cancelBtn.textContent = 'キャンセル';
+  setIcon(cancelBtn, 'x', 'キャンセル');
   cancelBtn.addEventListener('click', hideTenantDeleteConfirm);
   buttons.appendChild(cancelBtn);
   tenantDeleteConfirm.appendChild(buttons);
@@ -1528,7 +1553,8 @@ fileInput.addEventListener('change', () => setPending(fileInput.files));
 // 既存の送信処理がそのまま行う。マイクの許可が得られない場合や
 // ブラウザが未対応の場合は、状態表示にエラーを出して会話は壊さない
 function setRecording(on) {
-  recordBtn.textContent = on ? '録音を止める' : '録音';
+  recordBtn.innerHTML = on ? ICONS.stop : ICONS.mic;
+  recordBtn.title = on ? '録音を止める' : '録音';
   recordBtn.classList.toggle('recording', on);
   recordStatus.hidden = !on;
   recordStatus.textContent = on ? '録音中…' : '';
@@ -1536,7 +1562,8 @@ function setRecording(on) {
 
 function showRecordError(message) {
   mediaRecorder = null;
-  recordBtn.textContent = '録音';
+  recordBtn.innerHTML = ICONS.mic;
+  recordBtn.title = '録音';
   recordBtn.classList.remove('recording');
   recordStatus.hidden = false;
   recordStatus.textContent = message;
@@ -1675,8 +1702,8 @@ function renderApprovals(list) {
 function approvalButton(item, approved, label) {
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.textContent = label;
-  if (!approved) btn.className = 'deny';
+  setIcon(btn, approved ? 'check' : 'x', label);
+  if (!approved) btn.classList.add('deny');
   btn.addEventListener('click', async () => {
     btn.disabled = true;
     try {
@@ -1795,8 +1822,30 @@ themeBtn.addEventListener("click", () => {
     localStorage.setItem("kuma-theme", next);
   } catch (e) { /* 保存できなくても切り替え自体は効かせる */ }
   paintThemeBtn();
+
 });
 paintThemeBtn();
+
+// アイコンボタン用の絵柄。文字のボタンは置かず、意味は title と
+// aria-label で伝える
+const ICONS = {
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg>',
+  x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13M10 11v6M14 11v6"/></svg>',
+  swap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4M3 11v-1a4 4 0 0 1 4-4h14M7 22l-4-4 4-4M21 13v1a4 4 0 0 1-4 4H3"/></svg>',
+  download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M6 10l6 6 6-6M4 20h16"/></svg>',
+  quote: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.5 5C5 6.5 4 8.4 4 11.2V18h6.2v-6.2H6.9c.1-2 .9-3.6 2.4-4.9L6.5 5zm10 0C15 6.5 14 8.4 14 11.2V18h6.2v-6.2h-3.3c.1-2 .9-3.6 2.4-4.9L16.5 5z"/></svg>',
+  speaker: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4zM15.5 8.5a5 5 0 0 1 0 7M18.6 5.4a9 9 0 0 1 0 13.2"/></svg>',
+  stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+  mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 19v3"/></svg>',
+};
+
+function setIcon(btn, name, label) {
+  btn.innerHTML = ICONS[name];
+  btn.classList.add('iconBtn', 'sm');
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+}
 input.focus();
 </script>
 </body>
@@ -1827,7 +1876,7 @@ def render_page(provider: str, avatar_svg: str | None = None,
 # ログイン有効時にヘッダーへ差し込むログアウトボタン。押すと
 # POST /api/logout でトークンを破棄してからログイン画面へ移る
 _LOGOUT_BUTTON_HTML = """\
-<button id="logoutBtn" type="button">ログアウト</button>
+<button id="logoutBtn" type="button" class="iconBtn sm" title="ログアウト" aria-label="ログアウト"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg></button>
     <script>
     document.getElementById('logoutBtn').addEventListener('click', async () => {
       try { await fetch('/api/logout', {method: 'POST'}); } catch (e) { /* 失敗してもログイン画面へは移る */ }
@@ -1863,7 +1912,7 @@ _LOGIN_TEMPLATE = """\
   input { background: var(--surface); color: var(--ink); }
   body { margin: 0; font-family: sans-serif; background: var(--bg); color: var(--ink);
          display: flex; align-items: center; justify-content: center; min-height: 100dvh; }
-  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
           padding: 24px; width: min(360px, 90vw); text-align: center;
           box-shadow: 0 4px 18px rgba(58, 51, 44, .06); }
   .card .avatar { width: 64px; height: 64px; margin: 0 auto 8px; }
@@ -1874,7 +1923,7 @@ _LOGIN_TEMPLATE = """\
   .card form { display: flex; flex-direction: column; gap: 10px; }
   .card input { padding: 10px; font-size: 16px; border: 1px solid var(--line);
                 border-radius: 8px; }
-  .card button { padding: 10px 20px; font-size: 16px; border: none; border-radius: 999px;
+  .card button { padding: 10px 20px; font-size: 16px; border: none; border-radius: 8px;
                  background: __HONEY__; color: #fff; cursor: pointer; }
 </style>
 </head>
@@ -1887,7 +1936,7 @@ _LOGIN_TEMPLATE = """\
     <form method="post" action="/login">
       <input type="password" name="password" autocomplete="current-password"
              placeholder="パスワード" autofocus>
-      <button type="submit">ログイン</button>
+      <button type="submit" class="iconBtn go" title="ログイン" aria-label="ログイン"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg></button>
     </form>
   </div>
 </body>
