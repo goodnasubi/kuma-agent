@@ -140,6 +140,9 @@ _PAGE_TEMPLATE = """\
     :root[data-theme="system"] { --bg: #201D1A; --surface: #2B2723;
           --ink: #EFE9E0; --line: #453E34; --bubble: #4A3A24;
           --muted: #A79C8D; --quote-bg: #38302A; --danger-bg: #3B2523; } }
+  :root[data-theme="pixel"] { --bg: #FFF1E8; --surface: #FFFFFF;
+          --ink: #1D2B53; --line: #1D2B53; --bubble: #FFCCAA;
+          --muted: #83769C; --quote-bg: #FFECB8; --danger-bg: #FFD3DC; }
   input, select, textarea { background: var(--surface); color: var(--ink); }
   body { margin: 0; background: var(--bg); color: var(--ink);
          font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
@@ -286,13 +289,13 @@ _PAGE_TEMPLATE = """\
               background: var(--surface); border-top: 1px solid var(--line);
               padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
               justify-content: space-around; z-index: 40; }
-    #tabBar button { flex-direction: column; gap: 2px; font-size: 10px;
-              flex: 1 1 0; min-width: 0;
-              padding: 5px 8px; border: none; background: transparent;
+    #tabBar button { flex: 1 1 0; min-width: 0;
+              padding: 8px 4px; border: none; background: transparent;
               color: var(--ink); }
+    #tabBar button .tabLabel { display: none; }
     #tabBar button.active { background: transparent; color: __HONEY__;
               border: none; }
-    #tabBar button svg { width: 21px; height: 21px; }
+    #tabBar button svg { width: 24px; height: 24px; }
     #outputsPanel, #profilePanel, #usagePanel, #tenantPanel,
     #approvalPanel, #statusPanel, .tabNote, #adminMenu, #form, #quoteBar {
       width: calc(100% - 16px); }
@@ -389,6 +392,30 @@ _PAGE_TEMPLATE = """\
   /* アイコンだけのボタンは、置き場所ごとのボタンの余白指定に
      勝って余白を無くす（余白が残ると絵柄が中央からずれる） */
   button.iconBtn, a.iconBtn { padding: 0; }
+  /* 8ビットテーマ: 角をなくし、枠を太く、影はベタ影、押し込みで沈む */
+  :root[data-theme="pixel"] body { font-family: "Courier New",
+          ui-monospace, monospace; }
+  :root[data-theme="pixel"] * { border-radius: 0 !important; }
+  :root[data-theme="pixel"] button, :root[data-theme="pixel"] input,
+  :root[data-theme="pixel"] select, :root[data-theme="pixel"] textarea {
+          border-width: 2px; }
+  :root[data-theme="pixel"] button {
+          box-shadow: 2px 2px 0 rgba(29, 43, 83, .45); }
+  :root[data-theme="pixel"] #reactionPalette button,
+  :root[data-theme="pixel"] .reactions button { box-shadow: none; }
+  :root[data-theme="pixel"] button:active {
+          transform: translate(2px, 2px); box-shadow: none; }
+  :root[data-theme="pixel"] .iconBtn { background: var(--surface); }
+  :root[data-theme="pixel"] header { border-bottom: 3px solid var(--line); }
+  :root[data-theme="pixel"] #tabBar button.active,
+  :root[data-theme="pixel"] #profileTabs button.active,
+  :root[data-theme="pixel"] .iconBtn.go,
+  :root[data-theme="pixel"] #send { background: #FF004D;
+          border-color: #1D2B53; color: #fff; }
+  :root[data-theme="pixel"] form:focus-within { border-color: #FF004D; }
+  @media (max-width: 720px) {
+    :root[data-theme="pixel"] #tabBar button.active {
+            color: #FF004D; background: transparent; } }
 </style>
 </head>
 <body>
@@ -425,12 +452,12 @@ _PAGE_TEMPLATE = """\
   </div>
 </header>
 <nav id="tabBar">
-  <button type="button" data-tab="chat" class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.5L3 20l1-5.6A8.5 8.5 0 1 1 21 11.5z"/></svg>会話</button>
-  <button type="button" data-tab="feed"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h13v14H6a2 2 0 0 1-2-2zM17 8h3v9a2 2 0 0 1-2 2M7 9h7M7 13h7"/></svg>フィード</button>
-  <button type="button" data-tab="ideas"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 1 4 12.7c-.7.6-1 1-1.2 2.3H9.2C9 15.7 8.4 15.3 8 14.7A7 7 0 0 1 12 2z"/></svg>アイデア</button>
-  <button type="button" data-tab="goals"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg>目標</button>
-  <button type="button" data-tab="explore"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>探す</button>
-  <button type="button" data-tab="admin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8h9M19 8h1M4 16h3M13 16h7"/><circle cx="16" cy="8" r="2"/><circle cx="10" cy="16" r="2"/></svg>管理</button>
+  <button type="button" data-tab="chat" class="active" title="会話" aria-label="会話"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.5L3 20l1-5.6A8.5 8.5 0 1 1 21 11.5z"/></svg><span class="tabLabel">会話</span></button>
+  <button type="button" data-tab="feed" title="フィード" aria-label="フィード"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h13v14H6a2 2 0 0 1-2-2zM17 8h3v9a2 2 0 0 1-2 2M7 9h7M7 13h7"/></svg><span class="tabLabel">フィード</span></button>
+  <button type="button" data-tab="ideas" title="アイデア" aria-label="アイデア"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 1 4 12.7c-.7.6-1 1-1.2 2.3H9.2C9 15.7 8.4 15.3 8 14.7A7 7 0 0 1 12 2z"/></svg><span class="tabLabel">アイデア</span></button>
+  <button type="button" data-tab="goals" title="目標" aria-label="目標"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg><span class="tabLabel">目標</span></button>
+  <button type="button" data-tab="explore" title="探す" aria-label="探す"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><span class="tabLabel">探す</span></button>
+  <button type="button" data-tab="admin" title="管理" aria-label="管理"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8h9M19 8h1M4 16h3M13 16h7"/><circle cx="16" cy="8" r="2"/><circle cx="10" cy="16" r="2"/></svg><span class="tabLabel">管理</span></button>
 </nav>
 <section id="adminMenu" hidden>
   <h2>管理</h2>
@@ -1910,8 +1937,9 @@ async function loadMeta() {
   loadHistory();
 })();
 const themeBtn = document.getElementById("themeBtn");
-const THEME_ORDER = ["light", "dark", "system"];
-const THEME_NAMES = { light: "昼", dark: "夜", system: "システム" };
+const THEME_ORDER = ["light", "dark", "system", "pixel"];
+const THEME_NAMES = { light: "昼", dark: "夜", system: "システム",
+                      pixel: "8ビット" };
 const THEME_ICONS = {
   light: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
     + ' stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12"'
@@ -1924,6 +1952,9 @@ const THEME_ICONS = {
     + ' stroke-width="2"><circle cx="12" cy="12" r="9"/>'
     + '<path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"'
     + ' stroke="none"/></svg>',
+  pixel: '<svg viewBox="0 0 24 24" fill="currentColor">'
+    + '<path d="M6 3h4v4H6zM14 3h4v4h-4zM2 7h20v4H2zM2 11h20v4H2z'
+    + 'M6 15h12v4H6zM10 19h4v4h-4z"/></svg>',
 };
 
 function paintThemeBtn() {
@@ -2031,6 +2062,14 @@ _LOGIN_TEMPLATE = """\
   @media (prefers-color-scheme: dark) {
     :root[data-theme="system"] { --bg: #201D1A; --surface: #2B2723;
           --ink: #EFE9E0; --line: #453E34; } }
+  :root[data-theme="pixel"] { --bg: #FFF1E8; --surface: #FFFFFF;
+          --ink: #1D2B53; --line: #1D2B53; }
+  :root[data-theme="pixel"] .card { border-width: 2px; border-radius: 0;
+          box-shadow: 4px 4px 0 rgba(29, 43, 83, .45); }
+  :root[data-theme="pixel"] .card input { border-width: 2px;
+          border-radius: 0; }
+  :root[data-theme="pixel"] .card button { background: #FF004D;
+          border-radius: 0; }
   input { background: var(--surface); color: var(--ink); }
   body { margin: 0; font-family: sans-serif; background: var(--bg); color: var(--ink);
          display: flex; align-items: center; justify-content: center; min-height: 100dvh; }

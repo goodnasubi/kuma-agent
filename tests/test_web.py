@@ -66,6 +66,8 @@ def test_render_page_has_theme_switcher():
     assert 'id="themeBtn"' in page  # アイコンのボタンで切り替える
     assert 'id="themeSelect"' not in page  # 文字の選択欄は使わない
     assert 'data-theme="dark"' in page  # 夜テーマの配色定義
+    assert 'data-theme="pixel"' in page  # 8ビットテーマの配色定義
+    assert '"pixel"' in page  # 巡回するテーマに8ビットが入っている
     assert "kuma-theme" in page  # 選択を覚える保存キー
 
 
@@ -81,6 +83,9 @@ def test_render_page_has_tab_bar():
     assert 'id="tabBar"' in page
     for tab in ("chat", "feed", "ideas", "goals", "explore", "admin"):
         assert f'data-tab="{tab}"' in page
+    # タブの文字は span に分けてあり、スマホ幅では隠してアイコンだけ出す
+    assert 'class="tabLabel"' in page
+    assert "#tabBar button .tabLabel { display: none; }" in page
     assert 'id="feedPanel"' in page
     assert 'id="ideasPanel"' in page
     assert 'id="goalsPanel"' in page
