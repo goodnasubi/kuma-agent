@@ -126,7 +126,7 @@ def test_web_quote_roundtrip_and_page_controls(tmp_path: Path):
             headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=10) as resp:
             assert json.loads(resp.read().decode("utf-8")) == {
-                "reply": "返答: その続き"}
+                "reply": "返答: その続き", "rid": 1, "user_rid": 0}
         with urllib.request.urlopen(base + "/api/history", timeout=10) as resp:
             messages = json.loads(resp.read().decode("utf-8"))["messages"]
         user = next(m for m in messages if m["role"] == "user")
@@ -142,10 +142,10 @@ def test_web_quote_roundtrip_and_page_controls(tmp_path: Path):
 
 
 def test_message_buttons_sit_side_by_side():
-    """「引用」と「読み上げ」のボタンは横並び（inline-block）にする。"""
+    """発話の操作ボタンは1行（flex の行）に並べる。"""
     page = render_page("muse")
-    assert ".quote-btn, .speak-btn { display: inline-block;" in page
-    assert ".quote-btn { margin-right: 6px; }" in page
+    assert ".msg .msgActions { display: flex;" in page
+    assert "msgActions" in page
 
 
 def test_tui_quote_numbering_and_lookup():

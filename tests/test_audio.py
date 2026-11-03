@@ -202,7 +202,7 @@ def test_web_accepts_audio_attachment(web_server: str):
                          "data_base64": MP3_B64}],
     })
     assert status == 200
-    assert data == {"reply": "添付: voice.mp3"}
+    assert data == {"reply": "添付: voice.mp3", "rid": 1, "user_rid": 0}
 
 
 def test_web_accepts_recorded_webm_with_codecs_param(web_server: str):
@@ -214,7 +214,8 @@ def test_web_accepts_recorded_webm_with_codecs_param(web_server: str):
                          "data_base64": base64.b64encode(b"webm").decode()}],
     })
     assert status == 200
-    assert data == {"reply": "添付: recording-1.webm"}
+    assert data == {"reply": "添付: recording-1.webm",
+                    "rid": 1, "user_rid": 0}
 
 
 def test_web_rejects_oversized_audio(web_server: str,

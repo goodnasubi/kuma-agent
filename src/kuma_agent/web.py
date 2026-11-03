@@ -140,9 +140,9 @@ _PAGE_TEMPLATE = """\
     :root[data-theme="system"] { --bg: #201D1A; --surface: #2B2723;
           --ink: #EFE9E0; --line: #453E34; --bubble: #4A3A24;
           --muted: #A79C8D; --quote-bg: #38302A; --danger-bg: #3B2523; } }
-  :root[data-theme="pixel"] { --bg: #FFF1E8; --surface: #FFFFFF;
-          --ink: #1D2B53; --line: #1D2B53; --bubble: #FFCCAA;
-          --muted: #83769C; --quote-bg: #FFECB8; --danger-bg: #FFD3DC; }
+  :root[data-theme="pixel"] { --bg: #05050F; --surface: #12121F;
+          --ink: #E6FFE6; --line: #2E7D46; --bubble: #14301C;
+          --muted: #6FA876; --quote-bg: #1A2B1A; --danger-bg: #3B1420; }
   input, select, textarea { background: var(--surface); color: var(--ink); }
   body { margin: 0; background: var(--bg); color: var(--ink);
          font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
@@ -265,7 +265,7 @@ _PAGE_TEMPLATE = """\
   .iconBtn.sm svg { width: 17px; height: 17px; }
   .iconBtn.go { background: __HONEY__; color: #fff; border-color: __HONEY__; }
   .msg .reactions { display: flex; gap: 4px; flex-wrap: wrap;
-            margin-top: 6px; flex-basis: 100%; }
+            align-items: center; }
   .msg .reactions[hidden] { display: none; }
   .reactionChip { padding: 2px 9px; font-size: 14px; line-height: 1.5;
             background: var(--quote-bg); color: var(--ink);
@@ -347,10 +347,10 @@ _PAGE_TEMPLATE = """\
                  border-left: 3px solid currentColor; padding-left: 6px;
                  margin-bottom: 4px; }
   .msg .bodyText { display: block; }
-  .quote-btn, .speak-btn { display: inline-block; margin-top: 6px; padding: 2px 8px;
-               font-size: 12px; background: transparent; color: inherit;
-               border: 1px solid currentColor; border-radius: 8px; }
-  .quote-btn { margin-right: 6px; }
+  /* 発話の下の操作ボタン（引用・読み上げ・リアクション）は1行に並べ、
+     デザインはリアクションのボタン（iconBtn）にそろえる */
+  .msg .msgActions { display: flex; flex-wrap: wrap; gap: 6px;
+               margin-top: 6px; align-items: center; }
   #record.recording { background: #B3402A; color: #fff; border-color: #B3402A; }
   #recordStatus { font-size: 13px; align-self: center; }
   #recordStatus[hidden] { display: none; }
@@ -392,15 +392,26 @@ _PAGE_TEMPLATE = """\
   /* アイコンだけのボタンは、置き場所ごとのボタンの余白指定に
      勝って余白を無くす（余白が残ると絵柄が中央からずれる） */
   button.iconBtn, a.iconBtn { padding: 0; }
-  /* 8ビットテーマ: 角をなくし、枠を太く、影はベタ影、押し込みで沈む */
+  /* 8ビットテーマ: インベーダーゲーム風。黒い宇宙に緑のドット、
+     角なし・太枠・ベタ影、押し込みで沈むボタン、背景に星空 */
   :root[data-theme="pixel"] body { font-family: "Courier New",
-          ui-monospace, monospace; }
+          ui-monospace, monospace;
+          background-image:
+            radial-gradient(1.5px 1.5px at 24px 36px,
+              rgba(255,255,255,.55) 50%, transparent 51%),
+            radial-gradient(1px 1px at 130px 90px,
+              rgba(255,255,255,.4) 50%, transparent 51%),
+            radial-gradient(1.5px 1.5px at 220px 150px,
+              rgba(160,255,190,.5) 50%, transparent 51%),
+            radial-gradient(1px 1px at 320px 60px,
+              rgba(255,255,255,.35) 50%, transparent 51%);
+          background-size: 360px 190px; }
   :root[data-theme="pixel"] * { border-radius: 0 !important; }
   :root[data-theme="pixel"] button, :root[data-theme="pixel"] input,
   :root[data-theme="pixel"] select, :root[data-theme="pixel"] textarea {
           border-width: 2px; }
   :root[data-theme="pixel"] button {
-          box-shadow: 2px 2px 0 rgba(29, 43, 83, .45); }
+          box-shadow: 2px 2px 0 rgba(0, 228, 54, .35); }
   :root[data-theme="pixel"] #reactionPalette button,
   :root[data-theme="pixel"] .reactions button { box-shadow: none; }
   :root[data-theme="pixel"] button:active {
@@ -410,12 +421,12 @@ _PAGE_TEMPLATE = """\
   :root[data-theme="pixel"] #tabBar button.active,
   :root[data-theme="pixel"] #profileTabs button.active,
   :root[data-theme="pixel"] .iconBtn.go,
-  :root[data-theme="pixel"] #send { background: #FF004D;
-          border-color: #1D2B53; color: #fff; }
-  :root[data-theme="pixel"] form:focus-within { border-color: #FF004D; }
+  :root[data-theme="pixel"] #send { background: #00E436;
+          border-color: #00E436; color: #05050F; }
+  :root[data-theme="pixel"] form:focus-within { border-color: #00E436; }
   @media (max-width: 720px) {
     :root[data-theme="pixel"] #tabBar button.active {
-            color: #FF004D; background: transparent; } }
+            color: #00E436; background: transparent; } }
 </style>
 </head>
 <body>
@@ -703,20 +714,23 @@ function addMsg(role, text, quote = null, quoteSource = null,
   body.className = 'bodyText';
   body.textContent = text;
   div.appendChild(body);
+  const actions = document.createElement('div');
+  actions.className = 'msgActions';
   const quoteBtn = document.createElement('button');
   quoteBtn.type = 'button';
   quoteBtn.className = 'quote-btn';
   setIcon(quoteBtn, 'quote', '引用');
   quoteBtn.addEventListener('click', () => setQuote(quoteSource || text));
-  div.appendChild(quoteBtn);
+  actions.appendChild(quoteBtn);
   if (role === 'assistant') {
     const speakBtn = document.createElement('button');
     speakBtn.type = 'button';
     speakBtn.className = 'speak-btn';
     setIcon(speakBtn, 'speaker', '読み上げ');
     speakBtn.addEventListener('click', () => toggleSpeak(speakBtn, text));
-    div.appendChild(speakBtn);
+    actions.appendChild(speakBtn);
   }
+  div.appendChild(actions);
   if (rid !== null && rid !== undefined) {
     attachReactions(div, rid, reactions);
   }
@@ -746,6 +760,12 @@ function renderReactionChips(box, rid, reactions) {
 }
 
 function attachReactions(div, rid, reactions) {
+  let row = div.querySelector('.msgActions');
+  if (!row) {
+    row = document.createElement('div');
+    row.className = 'msgActions';
+    div.appendChild(row);
+  }
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'react-btn';
@@ -754,10 +774,10 @@ function attachReactions(div, rid, reactions) {
     ev.stopPropagation();
     openReactionPalette(btn, div, rid);
   });
-  div.appendChild(btn);
+  row.appendChild(btn);
   const box = document.createElement('div');
   box.className = 'reactions';
-  div.appendChild(box);
+  row.appendChild(box);
   div._reactionBox = box;
   renderReactionChips(box, rid, reactions || []);
 }
@@ -1953,8 +1973,11 @@ const THEME_ICONS = {
     + '<path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"'
     + ' stroke="none"/></svg>',
   pixel: '<svg viewBox="0 0 24 24" fill="currentColor">'
-    + '<path d="M6 3h4v4H6zM14 3h4v4h-4zM2 7h20v4H2zM2 11h20v4H2z'
-    + 'M6 15h12v4H6zM10 19h4v4h-4z"/></svg>',
+    + '<path d="M5 4h2v2H5zM17 4h2v2h-2zM7 6h2v2H7zM15 6h2v2h-2z'
+    + 'M5 8h14v2H5zM3 10h4v2H3zM9 10h6v2H9zM17 10h4v2h-4z'
+    + 'M1 12h22v2H1zM1 14h2v2H1zM5 14h14v2H5zM21 14h2v2h-2z'
+    + 'M1 16h2v2H1zM5 16h2v2H5zM17 16h2v2h-2zM21 16h2v2h-2z'
+    + 'M7 18h4v2H7zM13 18h4v2h-4z"/></svg>',
 };
 
 function paintThemeBtn() {
@@ -2062,14 +2085,14 @@ _LOGIN_TEMPLATE = """\
   @media (prefers-color-scheme: dark) {
     :root[data-theme="system"] { --bg: #201D1A; --surface: #2B2723;
           --ink: #EFE9E0; --line: #453E34; } }
-  :root[data-theme="pixel"] { --bg: #FFF1E8; --surface: #FFFFFF;
-          --ink: #1D2B53; --line: #1D2B53; }
+  :root[data-theme="pixel"] { --bg: #05050F; --surface: #12121F;
+          --ink: #E6FFE6; --line: #2E7D46; }
   :root[data-theme="pixel"] .card { border-width: 2px; border-radius: 0;
-          box-shadow: 4px 4px 0 rgba(29, 43, 83, .45); }
+          box-shadow: 4px 4px 0 rgba(0, 228, 54, .35); }
   :root[data-theme="pixel"] .card input { border-width: 2px;
           border-radius: 0; }
-  :root[data-theme="pixel"] .card button { background: #FF004D;
-          border-radius: 0; }
+  :root[data-theme="pixel"] .card button { background: #00E436;
+          color: #05050F; border-radius: 0; }
   input { background: var(--surface); color: var(--ink); }
   body { margin: 0; font-family: sans-serif; background: var(--bg); color: var(--ink);
          display: flex; align-items: center; justify-content: center; min-height: 100dvh; }
