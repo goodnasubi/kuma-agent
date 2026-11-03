@@ -54,8 +54,12 @@ def test_compose_points() -> None:
     assert "- .env" in text
     assert ":/data" in text
     assert "restart: unless-stopped" in text
-    # 認証なしの注意がコメントに書いてある
-    assert "認証がありません" in text
+    # 公開時の注意（パスワード設定の必須）がコメントに書いてある
+    assert "KUMA_WEB_PASSWORD" in text
+    assert "ログインなしでは" in text
+    # お試し公開のトンネル（プロファイル指定のときだけ起動する）
+    assert "cloudflare/cloudflared" in text
+    assert "tunnel" in text
 
 
 def test_env_example_points() -> None:

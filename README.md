@@ -244,6 +244,17 @@ docker compose up -d --build
 
 コンテナでも、ブラウザ操作と Google カレンダーの MCP サーバーが使えます（イメージに Node.js と Chromium が入っています）。設定は `/data/mcp.json` に書き、コマンド名は `playwright-mcp` / `google-calendar-mcp` を使います。詳しくは DESIGN.md の「ブラウザ操作」「実サービスの接続例」のコンテナ向け設定例を見てください。
 
+### 外から試す（Cloudflare トンネル）
+
+スマホなど外のネットワークから試したいときは、Cloudflare の Quick Tunnel で一時的な公開 URL を作れます（アカウント不要）。公開 URL はだれでも開けるため、先に `.env` へ `KUMA_WEB_PASSWORD` を設定して、ログインを有効にしてください。
+
+```bash
+docker compose --profile tunnel up -d --build
+docker compose logs cloudflared   # https://〜.trycloudflare.com の URL を確認
+```
+
+URL は起動のたびに変わります。止めるときは `docker compose --profile tunnel down` です。LINE の webhook の受け口にも使えますが、URL が変わるたびに LINE 側の登録も直す必要があります。固定の URL で続けたい場合は、Cloudflare のアカウントとドメインを使う名前付きトンネルか、逆プロキシを用意してください。
+
 ### Web UI の注意
 
 Web UI は `--host` / `--port` で待ち受け先を変えられます。既定は

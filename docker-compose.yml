@@ -5,10 +5,16 @@
 #   2. docker compose up -d --build
 #   3. ブラウザで http://localhost:8765 を開く
 #
-# 注意: Web UI には認証がありません。ポートを外のネットワークに
-# 開けると、誰でも会話できてしまいます。外から使いたい場合は、
-# そのまま公開せず、認証付きの逆プロキシを前に置くなどして
-# ください。
+# 外から試す場合（お試し公開）:
+#   1. .env に KUMA_WEB_PASSWORD を必ず設定する（ログインなしでは
+#      公開先のだれでも会話できてしまう）
+#   2. docker compose --profile tunnel up -d --build
+#   3. docker compose logs cloudflared に出る
+#      https://〜.trycloudflare.com の URL を開く
+#   URL は起動のたびに変わります。恒常的な公開には向きません。
+#
+# 注意: ホスト側のポート（8765）も、信頼できないネットワークへは
+# そのまま開けないでください。
 
 services:
   kuma-agent:
@@ -19,6 +25,17 @@ services:
       - .env
     volumes:
       - kuma-data:/data
+    restart: unless-stopped
+
+  # Cloudflare の Quick Tunnel（アカウント不要のお試し公開）。
+  # プロファイルを指定したときだけ起動する。
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://kuma-agent:8765
+    depends_on:
+      - kuma-agent
+    profiles:
+      - tunnel
     restart: unless-stopped
 
 volumes:
