@@ -261,6 +261,21 @@ _PAGE_TEMPLATE = """\
   .iconBtn.sm { width: 32px; height: 32px; }
   .iconBtn.sm svg { width: 17px; height: 17px; }
   .iconBtn.go { background: __HONEY__; color: #fff; border-color: __HONEY__; }
+  .msg .reactions { display: flex; gap: 4px; flex-wrap: wrap;
+            margin-top: 6px; flex-basis: 100%; }
+  .msg .reactions[hidden] { display: none; }
+  .reactionChip { padding: 2px 9px; font-size: 14px; line-height: 1.5;
+            background: var(--quote-bg); color: var(--ink);
+            border: 1px solid var(--line); border-radius: 8px;
+            cursor: pointer; }
+  #reactionPalette { position: fixed; z-index: 60; display: flex; gap: 2px;
+            background: var(--surface); border: 1px solid var(--line);
+            border-radius: 8px; padding: 6px;
+            box-shadow: 0 8px 24px rgba(58, 51, 44, .18); }
+  #reactionPalette button { padding: 4px 7px; font-size: 19px; line-height: 1;
+            background: transparent; border: none; border-radius: 6px;
+            cursor: pointer; color: var(--ink); }
+  #reactionPalette button:hover { background: var(--quote-bg); }
   #tabBar button { display: inline-flex; align-items: center; gap: 6px; }
   #tabBar button svg { width: 18px; height: 18px; display: block; }
   @media (max-width: 720px) {
@@ -371,6 +386,9 @@ _PAGE_TEMPLATE = """\
   #dropHint { display: none; text-align: center; padding: 8px; font-size: 14px;
               background: var(--surface); border-top: 1px solid var(--line); }
   body.dragover #dropHint { display: block; }
+  /* アイコンだけのボタンは、置き場所ごとのボタンの余白指定に
+     勝って余白を無くす（余白が残ると絵柄が中央からずれる） */
+  button.iconBtn, a.iconBtn { padding: 0; }
 </style>
 </head>
 <body>
@@ -644,7 +662,8 @@ function clearQuote() {
 
 clearQuoteBtn.addEventListener('click', clearQuote);
 
-function addMsg(role, text, quote = null, quoteSource = null) {
+function addMsg(role, text, quote = null, quoteSource = null,
+                rid = null, reactions = []) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
   if (quote) {
@@ -671,8 +690,99 @@ function addMsg(role, text, quote = null, quoteSource = null) {
     speakBtn.addEventListener('click', () => toggleSpeak(speakBtn, text));
     div.appendChild(speakBtn);
   }
+  if (rid !== null && rid !== undefined) {
+    attachReactions(div, rid, reactions);
+  }
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
+  return div;
+}
+
+// リアクション: 発話に絵文字を付け外しする。保存はサーバー側
+// （/api/reactions）で、宛先は会話記録での位置（rid）
+const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '🎉', '🙏'];
+let reactionPalette = null;
+
+function renderReactionChips(box, rid, reactions) {
+  box.innerHTML = '';
+  for (const emoji of reactions) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'reactionChip';
+    chip.textContent = emoji;
+    chip.title = 'リアクションを外す';
+    chip.setAttribute('aria-label', 'リアクション ' + emoji + ' を外す');
+    chip.addEventListener('click', () => toggleReaction(rid, emoji, box));
+    box.appendChild(chip);
+  }
+  box.hidden = reactions.length === 0;
+}
+
+function attachReactions(div, rid, reactions) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'react-btn';
+  setIcon(btn, 'smile', 'リアクション');
+  btn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    openReactionPalette(btn, div, rid);
+  });
+  div.appendChild(btn);
+  const box = document.createElement('div');
+  box.className = 'reactions';
+  div.appendChild(box);
+  div._reactionBox = box;
+  renderReactionChips(box, rid, reactions || []);
+}
+
+function openReactionPalette(anchor, div, rid) {
+  closeReactionPalette();
+  const palette = document.createElement('div');
+  palette.id = 'reactionPalette';
+  for (const emoji of REACTION_EMOJIS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = emoji;
+    b.setAttribute('aria-label', 'リアクション ' + emoji);
+    b.addEventListener('click', () => {
+      toggleReaction(rid, emoji, div._reactionBox);
+      closeReactionPalette();
+    });
+    palette.appendChild(b);
+  }
+  document.body.appendChild(palette);
+  const rect = anchor.getBoundingClientRect();
+  palette.style.left = Math.max(8,
+    Math.min(rect.left - 8, window.innerWidth - 264)) + 'px';
+  palette.style.top = (rect.bottom + 6) + 'px';
+  reactionPalette = palette;
+}
+
+function closeReactionPalette() {
+  if (reactionPalette) {
+    reactionPalette.remove();
+    reactionPalette = null;
+  }
+}
+
+document.addEventListener('click', (ev) => {
+  if (reactionPalette && !reactionPalette.contains(ev.target)) {
+    closeReactionPalette();
+  }
+});
+
+async function toggleReaction(rid, emoji, box) {
+  try {
+    const res = await fetch('/api/reactions', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({tenant: currentTenant, user: currentUser,
+                            session: currentSession, rid, emoji}),
+    });
+    if (!res.ok) throw new Error('reaction failed');
+    const data = await res.json();
+    if (box) renderReactionChips(box, rid, data.reactions || []);
+  } catch (e) { /* 付け外しに失敗したら表示はそのままにする */ }
 }
 
 // 読み上げ: ブラウザの speechSynthesis（ja-JP）で読む。読み上げ中に
@@ -727,7 +837,8 @@ async function loadHistory() {
     for (const m of data.messages) {
       if ((m.role === 'user' || m.role === 'assistant') && (m.content || m.attachments)) {
         const shown = describe(m.content, m.attachments);
-        addMsg(m.role, shown, m.quote || null, m.content || shown);
+        addMsg(m.role, shown, m.quote || null, m.content || shown,
+               (m.rid === undefined ? null : m.rid), m.reactions || []);
       }
     }
   } catch (e) { /* 履歴が取れなくても会話は続けられる */ }
@@ -1730,7 +1841,8 @@ form.addEventListener('submit', async (ev) => {
   if (!text) return;
   const files = pendingFiles;
   const quote = pendingQuote;
-  addMsg('user', describe(text, files.map((f) => f.name)), quote, text);
+  const userDiv = addMsg('user', describe(text, files.map((f) => f.name)),
+                         quote, text);
   input.value = '';
   clearQuote();
   pendingFiles = [];
@@ -1749,7 +1861,14 @@ form.addEventListener('submit', async (ev) => {
                             user: currentUser}),
     });
     const data = await res.json();
-    addMsg('assistant', data.reply || ('エラー: ' + (data.error || res.status)));
+    const replyDiv = addMsg('assistant',
+      data.reply || ('エラー: ' + (data.error || res.status)));
+    if (data.user_rid !== undefined && data.user_rid !== null) {
+      attachReactions(userDiv, data.user_rid, []);
+    }
+    if (data.rid !== undefined && data.rid !== null) {
+      attachReactions(replyDiv, data.rid, []);
+    }
   } catch (e) {
     addMsg('assistant', '通信に失敗しました');
   } finally {
@@ -1840,6 +1959,7 @@ const ICONS = {
   speaker: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4zM15.5 8.5a5 5 0 0 1 0 7M18.6 5.4a9 9 0 0 1 0 13.2"/></svg>',
   stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
   mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 19v3"/></svg>',
+  smile: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a5 5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/></svg>',
 };
 
 function setIcon(btn, name, label) {
@@ -2711,6 +2831,7 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 store = tenants.store(_first(query.get("tenant")),
                                       _first(query.get("user")))
                 session = store.get(_first(query.get("session")))
+                reactions = session.memory.load_reactions()
                 messages = []
                 for m in session.history:
                     entry: dict = {"role": m.role, "content": m.content}
@@ -2718,6 +2839,12 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                         entry["attachments"] = [a.name for a in m.attachments]
                     if m.quote:  # 引用がある発話だけ引用元の本文を足す
                         entry["quote"] = m.quote
+                    if m.record_index is not None:
+                        # 記録された発話だけ、リアクションの宛先と
+                        # 現在のリアクションを足す
+                        entry["rid"] = m.record_index
+                        if reactions.get(m.record_index):
+                            entry["reactions"] = reactions[m.record_index]
                     messages.append(entry)
                 self._send_json(200, {"messages": messages})
             else:
@@ -2904,6 +3031,9 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 return
             if path == "/api/approvals/decide":
                 self._decide_approval()
+                return
+            if path == "/api/reactions":
+                self._toggle_reaction()
                 return
             if path != "/api/chat":
                 self._send_json(404, {"error": "not found"})
@@ -3222,7 +3352,46 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             except Exception as exc:  # モデル側の失敗を画面に返す
                 self._send_json(500, {"error": f"応答の生成に失敗しました: {exc}"})
                 return
-            self._send_json(200, {"reply": reply})
+            # 送った直後の発話にもリアクションを付けられるよう、
+            # 記録での位置（rid）を一緒に返す
+            payload: dict = {"reply": reply}
+            for m in reversed(session.history):
+                if "rid" not in payload and m.role == "assistant" \
+                        and m.record_index is not None and m.content == reply:
+                    payload["rid"] = m.record_index
+                elif "user_rid" not in payload and m.role == "user" \
+                        and m.record_index is not None:
+                    payload["user_rid"] = m.record_index
+                if "rid" in payload and "user_rid" in payload:
+                    break
+            self._send_json(200, payload)
+
+        def _toggle_reaction(self) -> None:
+            """発話へのリアクションを付け外しする。
+
+            本文は tenant / user / session / rid（会話記録での位置）/
+            emoji。付け外しと検証（使える絵文字・宛先の発話）は
+            Memory.toggle_reaction が担い、その発話の最新の並びを返す。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            rid = data.get("rid")
+            emoji = data.get("emoji")
+            if not isinstance(rid, int) or isinstance(rid, bool) \
+                    or not isinstance(emoji, str):
+                self._send_json(400, {"error": "rid と emoji を指定してください"})
+                return
+            session = tenants.store(
+                data.get("tenant"), data.get("user")).get(data.get("session"))
+            with lock:  # 記録の読み書きを直列化する
+                try:
+                    current = session.memory.toggle_reaction(rid, emoji)
+                except ValueError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+            self._send_json(200, {"rid": rid, "reactions": current})
 
     return Handler
 

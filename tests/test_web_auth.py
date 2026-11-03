@@ -200,7 +200,8 @@ def test_correct_password_issues_cookie_and_unlocks(auth_server):
         body=json.dumps({"message": "こんにちは"}),
         headers={"Content-Type": "application/json", "Cookie": cookie})
     assert status == 200
-    assert json.loads(body) == {"reply": "返答: こんにちは"}
+    assert json.loads(body) == {
+        "reply": "返答: こんにちは", "user_rid": 0, "rid": 1}
 
 
 def test_logout_invalidates_token(auth_server):

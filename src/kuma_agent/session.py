@@ -367,16 +367,18 @@ class Session:
         置き換える（メモリ上の圧縮と同じ状態を再現する）。
         """
         history: list[Message] = []
-        for record in self.memory.load_turns():
+        for index, record in enumerate(self.memory.load_turns()):
             role = record.get("role")
             content = str(record.get("content", ""))
             if role == "summary":
-                history = [Message("user", f"{SUMMARY_PREFIX}\n{content}")]
+                history = [Message("user", f"{SUMMARY_PREFIX}\n{content}",
+                                   record_index=index)]
             elif role in ("user", "assistant"):
                 quote = record.get("quote")
                 history.append(Message(
                     role, content,
                     quote=quote if isinstance(quote, str) and quote else None,
+                    record_index=index,
                 ))
         return history
 
@@ -393,10 +395,11 @@ class Session:
         # 音声添付は、頭脳へ渡す前に必要なら文字起こししておく
         # （履歴と記録の両方に文章が流れるよう、この合流点で行う）
         self._transcribe_audio_attachments(atts)
-        self.history.append(Message(
-            "user", user_text, attachments=atts, quote=quote_text))
-        self.memory.append_turn(
-            "user", _message_text(self.history[-1]), quote=quote_text)
+        user_msg = Message(
+            "user", user_text, attachments=atts, quote=quote_text)
+        self.history.append(user_msg)
+        user_msg.record_index = self.memory.append_turn(
+            "user", _message_text(user_msg), quote=quote_text)
         try:
             for _ in range(self.cfg.max_tool_rounds):
                 # モデルへの問い合わせ（CLI 系バックエンドもこの経路）
@@ -408,7 +411,8 @@ class Session:
                 reply = self._call_model(prompt, self.history, self.tools.schemas())
                 self.history.append(reply)
                 if not reply.tool_calls:
-                    self.memory.append_turn("assistant", reply.content)
+                    reply.record_index = self.memory.append_turn(
+                        "assistant", reply.content)
                     self._maybe_compact()
                     return reply.content
                 for call in reply.tool_calls:
@@ -452,8 +456,10 @@ class Session:
         回さない。記録には能動発信の印（proactive: true）を付けるが、
         復元時は通常の assistant 発言として戻る。
         """
-        self.history.append(Message("assistant", content))
-        self.memory.append_turn("assistant", content, proactive=True)
+        msg = Message("assistant", content)
+        self.history.append(msg)
+        msg.record_index = self.memory.append_turn(
+            "assistant", content, proactive=True)
 
     def _notify(self, status: str) -> None:
         """作業中表示のコールバックへ現在の作業を通知する。

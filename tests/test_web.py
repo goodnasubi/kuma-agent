@@ -110,7 +110,8 @@ def test_status_endpoint_includes_task_counts(server: str):
 def test_chat_endpoint_replies_with_fake_model(server: str):
     status, data = _post_json(server + "/api/chat", {"message": "こんにちは"})
     assert status == 200
-    assert data == {"reply": "返答: こんにちは"}
+    # 応答に加えて、リアクションの宛先（記録での位置）も返る
+    assert data == {"reply": "返答: こんにちは", "user_rid": 0, "rid": 1}
 
 
 def test_history_endpoint_returns_conversation(server: str):
@@ -118,8 +119,8 @@ def test_history_endpoint_returns_conversation(server: str):
     status, body = _get(server + "/api/history")
     assert status == 200
     messages = json.loads(body)["messages"]
-    assert {"role": "user", "content": "やあ"} in messages
-    assert {"role": "assistant", "content": "返答: やあ"} in messages
+    assert {"role": "user", "content": "やあ", "rid": 0} in messages
+    assert {"role": "assistant", "content": "返答: やあ", "rid": 1} in messages
 
 
 def test_page_supports_drag_and_drop():

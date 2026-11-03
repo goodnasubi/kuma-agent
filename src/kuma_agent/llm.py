@@ -192,6 +192,7 @@ class Message:
     attachments: list[Attachment] = field(default_factory=list)  # 利用者の添付ファイル
     quote: str | None = None  # この発話が返信する過去の発話の本文
     usage: Usage | None = None  # 応答した頭脳が返した使用量（assistant のみ、無ければ None）
+    record_index: int | None = None  # 会話記録（JSONL）での位置。記録された発話だけに付く（リアクションの宛先）
 
 
 def truncate_quote(quote: str, limit: int = MAX_QUOTE_CHARS) -> str:

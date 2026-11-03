@@ -424,6 +424,10 @@ def memory_inject_text(text: str, full_limit: int) -> tuple[str, bool]:
     return "\n".join(seg.text for seg in picked), True
 
 
+# 発話に付けられるリアクションの絵文字（画面と保存の両方でこの範囲に限る）
+REACTION_EMOJIS: tuple[str, ...] = ("👍", "❤️", "😂", "😮", "🎉", "🙏")
+
+
 class Memory:
     def __init__(self, data_dir: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
         self.data_dir = data_dir
@@ -435,6 +439,15 @@ class Memory:
     def conversation_file(self) -> Path:
         """このセッションの会話記録ファイル。"""
         return self.conversations_dir / f"{self.session_id}.jsonl"
+
+    @property
+    def reactions_file(self) -> Path:
+        """このセッションのリアクションの保存ファイル。
+
+        会話記録（JSONL）とは別に置く。キーは記録での位置
+        （load_turns が返す順の 0 始まり）で、値は絵文字の並び。
+        """
+        return self.conversations_dir / f"{self.session_id}.reactions.json"
 
     def load_long_term(self) -> str:
         if self.memory_file.exists():
@@ -473,7 +486,7 @@ class Memory:
 
     def append_turn(self, role: str, content: str,
                     quote: str | None = None,
-                    proactive: bool = False) -> None:
+                    proactive: bool = False) -> int:
         """会話履歴に 1 発話を追記する（セッションごとの JSONL）。
 
         quote は引用返信の引用元の本文。無い発話ではキー自体を
@@ -482,7 +495,11 @@ class Memory:
         キーを付ける。読み込み側は role / content / quote 以外の
         キーを無視するので、印があっても復元は通常の発話として
         扱われる。
+
+        戻り値は、追記したレコードの位置（load_turns が返す順の
+        0 始まり）。リアクションの宛先に使う。
         """
+        index = len(self.load_turns())
         self.conversations_dir.mkdir(parents=True, exist_ok=True)
         record = {"ts": datetime.now().isoformat(timespec="seconds"),
                   "session": self.session_id, "role": role, "content": content}
@@ -492,6 +509,65 @@ class Memory:
             record["proactive"] = True
         with self.conversation_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return index
+
+    def load_reactions(self) -> dict[int, list[str]]:
+        """このセッションのリアクションを {記録の位置: [絵文字]} で返す。
+
+        壊れた内容や許可外の絵文字は読み飛ばす（表示側を壊さない）。
+        """
+        if not self.reactions_file.exists():
+            return {}
+        try:
+            raw = json.loads(self.reactions_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        reactions: dict[int, list[str]] = {}
+        if not isinstance(raw, dict):
+            return reactions
+        for key, value in raw.items():
+            try:
+                index = int(key)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(value, list):
+                continue
+            emojis = [e for e in value if e in REACTION_EMOJIS]
+            if emojis:
+                reactions[index] = emojis
+        return reactions
+
+    def toggle_reaction(self, record_index: int, emoji: str) -> list[str]:
+        """1 発話へのリアクションを付け外しし、その発話の現在値を返す。
+
+        絵文字は REACTION_EMOJIS の範囲だけを受け付ける。宛先は
+        user / assistant のレコードに限る。どちらも満たさなければ
+        ValueError。保存はキー（位置の文字列）→絵文字の並びで、
+        空になった発話のキーは残さない。
+        """
+        if emoji not in REACTION_EMOJIS:
+            raise ValueError("使えない絵文字です")
+        turns = self.load_turns()
+        if not 0 <= record_index < len(turns):
+            raise ValueError("宛先の発話がありません")
+        if turns[record_index].get("role") not in ("user", "assistant"):
+            raise ValueError("宛先の発話がありません")
+        reactions = self.load_reactions()
+        current = reactions.get(record_index, [])
+        if emoji in current:
+            current = [e for e in current if e != emoji]
+        else:
+            current = current + [emoji]
+        if current:
+            reactions[record_index] = current
+        else:
+            reactions.pop(record_index, None)
+        self.conversations_dir.mkdir(parents=True, exist_ok=True)
+        payload = {str(k): v for k, v in sorted(reactions.items())}
+        self.reactions_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=1) + "\n",
+            encoding="utf-8")
+        return current
 
     def append_summary(self, content: str) -> None:
         """圧縮で作った要約を記録する（role は "summary"）。"""
