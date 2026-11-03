@@ -78,8 +78,9 @@ from .usage import summarize_usage
 
 # ブランド色（README のイメージカラー）
 HONEY = "#E79A3C"
-COCOA = "#4B3226"
-CREAM = "#FFF3E0"
+COCOA = "#3A332C"
+CREAM = "#FAF9F7"
+LINE = "#E7DFD3"
 
 _FALLBACK_AVATAR = """\
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="クマ">
@@ -119,40 +120,65 @@ _PAGE_TEMPLATE = """\
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kuma-agent</title>
+<script>
+  try {
+    document.documentElement.dataset.theme =
+      localStorage.getItem("kuma-theme") || "system";
+  } catch (e) {
+    document.documentElement.dataset.theme = "system";
+  }
+</script>
 <style>
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: sans-serif; background: __CREAM__; color: __COCOA__;
+  :root { --bg: __CREAM__; --surface: #FFFFFF; --ink: __COCOA__;
+          --line: __LINE__; --bubble: #F3E9DC; --muted: #8A8175;
+          --quote-bg: #FBF4E8; --danger-bg: #FDF3F2; }
+  :root[data-theme="dark"] { --bg: #201D1A; --surface: #2B2723;
+          --ink: #EFE9E0; --line: #453E34; --bubble: #4A3A24;
+          --muted: #A79C8D; --quote-bg: #38302A; --danger-bg: #3B2523; }
+  @media (prefers-color-scheme: dark) {
+    :root[data-theme="system"] { --bg: #201D1A; --surface: #2B2723;
+          --ink: #EFE9E0; --line: #453E34; --bubble: #4A3A24;
+          --muted: #A79C8D; --quote-bg: #38302A; --danger-bg: #3B2523; } }
+  input, select, textarea { background: var(--surface); color: var(--ink); }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
+                      "Noto Sans JP", sans-serif;
          display: flex; flex-direction: column; height: 100dvh; }
-  header { background: __COCOA__; color: __CREAM__; display: flex; align-items: center;
-           flex-wrap: wrap; gap: 12px; padding: 8px 16px; }
-  header .avatar { width: 44px; height: 44px; flex: none; }
+  header { background: var(--surface); color: var(--ink); display: flex; align-items: center;
+           flex-wrap: wrap; gap: 12px; padding: 10px 16px;
+           border-bottom: 1px solid var(--line); }
+  header .avatar { width: 40px; height: 40px; flex: none; }
   header .avatar svg { width: 100%; height: 100%; display: block; }
-  header h1 { font-size: 18px; margin: 0; }
-  header .provider { font-size: 12px; opacity: .8; }
+  header h1 { font-size: 17px; margin: 0; }
+  header .provider { font-size: 12px; color: var(--muted); }
   .sessions { display: flex; gap: 6px; align-items: center; margin-left: auto;
               flex-wrap: wrap; font-size: 13px; }
   .sessions select, .sessions input { padding: 6px; font-size: 13px;
-           border-radius: 6px; border: 1px solid __COCOA__; }
-  .sessions button { padding: 6px 12px; font-size: 13px; background: #fff;
-           color: __COCOA__; border: 1px solid __COCOA__; }
+           border-radius: 8px; border: 1px solid var(--line); background: var(--surface); }
+  .sessions button { padding: 6px 14px; font-size: 13px; background: var(--surface);
+           color: var(--ink); border: 1px solid var(--line); border-radius: 999px; }
   .sessions[hidden] { display: none; }
-  #tenantPanel { background: #fff; border-bottom: 1px solid __HONEY__;
-                 padding: 12px 16px; }
+  #tenantPanel { background: var(--surface); border: 1px solid var(--line);
+                 border-radius: 16px; padding: 16px 20px;
+                 width: min(880px, calc(100% - 24px)); align-self: center;
+                 margin-top: 12px; }
   #tenantPanel[hidden] { display: none; }
   #tenantPanel h2 { font-size: 15px; margin: 0 0 8px; }
   .tenantRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
-               padding: 8px 0; border-top: 1px dashed __HONEY__; font-size: 14px; }
+               padding: 8px 0; border-top: 1px dashed var(--line); font-size: 14px; }
   .tenantRow .tname { font-weight: bold; min-width: 8em; }
   .tenantRow input[type="number"] { width: 5em; padding: 4px; font-size: 13px;
-               border-radius: 6px; border: 1px solid __COCOA__; }
-  .tenantRow button, .adminNew button { padding: 4px 12px; font-size: 13px;
-               background: #fff; color: __COCOA__; border: 1px solid __COCOA__; }
+               border-radius: 6px; border: 1px solid var(--line); }
+  .tenantRow button, .adminNew button { padding: 4px 14px; font-size: 13px;
+               background: var(--surface); color: var(--ink); border: 1px solid var(--line);
+               border-radius: 999px; }
   .adminNew { display: flex; gap: 8px; align-items: center; margin-top: 10px;
               font-size: 14px; }
   .adminNew input { padding: 6px; font-size: 13px; border-radius: 6px;
-               border: 1px solid __COCOA__; }
+               border: 1px solid var(--line); }
   #tenantDeleteConfirm { border: 2px solid #b3261e; border-radius: 8px;
-               padding: 12px 14px; margin: 12px 0; background: #fdf3f2;
+               padding: 12px 14px; margin: 12px 0; background: var(--danger-bg);
                font-size: 14px; }
   #tenantDeleteConfirm[hidden] { display: none; }
   #tenantDeleteConfirm h3 { margin: 0 0 8px; font-size: 15px; }
@@ -162,37 +188,43 @@ _PAGE_TEMPLATE = """\
   #tenantDeleteConfirm .deleteDo { background: #b3261e; color: #fff;
                border: 1px solid #b3261e; padding: 6px 14px; border-radius: 6px; }
   #tenantPanel h3 { font-size: 14px; margin: 16px 0 4px;
-               border-top: 1px solid __HONEY__; padding-top: 12px; }
-  #outputsPanel { background: #fff; border-bottom: 1px solid __HONEY__;
-                 padding: 12px 16px; }
+               border-top: 1px solid var(--line); padding-top: 12px; }
+  #outputsPanel { background: var(--surface); border: 1px solid var(--line);
+                 border-radius: 16px; padding: 16px 20px;
+                 width: min(880px, calc(100% - 24px)); align-self: center;
+                 margin-top: 12px; }
   #outputsPanel[hidden] { display: none; }
   #outputsPanel h2 { font-size: 15px; margin: 0 0 8px; }
   .outputRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
-               padding: 8px 0; border-top: 1px dashed __HONEY__; font-size: 14px; }
+               padding: 8px 0; border-top: 1px dashed var(--line); font-size: 14px; }
   .outputRow .otitle { font-weight: bold; min-width: 8em; }
   .outputRow .oname, .outputRow .ometa { opacity: .85; }
-  .outputRow a { padding: 4px 12px; font-size: 13px; background: #fff;
-               color: __COCOA__; border: 1px solid __COCOA__;
-               border-radius: 8px; text-decoration: none; }
-  #profilePanel { background: #fff; border-bottom: 1px solid __HONEY__;
-                 padding: 12px 16px; }
+  .outputRow a { padding: 4px 14px; font-size: 13px; background: var(--surface);
+               color: var(--ink); border: 1px solid var(--line);
+               border-radius: 999px; text-decoration: none; }
+  #profilePanel { background: var(--surface); border: 1px solid var(--line);
+                 border-radius: 16px; padding: 16px 20px;
+                 width: min(880px, calc(100% - 24px)); align-self: center;
+                 margin-top: 12px; }
   #profilePanel[hidden] { display: none; }
   #profilePanel h2 { font-size: 15px; margin: 0 0 8px; }
   #profilePanel .profileNote { font-size: 13px; margin: 0 0 8px; }
   #profileTabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-  #profileTabs button { padding: 4px 12px; font-size: 13px; background: #fff;
-               color: __COCOA__; border: 1px solid __COCOA__; }
+  #profileTabs button { padding: 4px 14px; font-size: 13px; background: var(--surface);
+               color: var(--ink); border: 1px solid var(--line); border-radius: 999px; }
   #profileTabs button.active { background: __HONEY__; color: #fff;
                border-color: __HONEY__; }
   #profileText { width: 100%; padding: 10px; font-size: 14px; line-height: 1.5;
-               border: 1px solid __COCOA__; border-radius: 8px;
+               border: 1px solid var(--line); border-radius: 8px;
                font-family: monospace; }
   .profileActions { display: flex; gap: 10px; align-items: center;
                margin-top: 8px; }
   .profileActions button { padding: 6px 16px; font-size: 14px; }
   #profileStatus { font-size: 13px; }
-  #usagePanel { background: #fff; border-bottom: 1px solid __HONEY__;
-                 padding: 12px 16px; }
+  #usagePanel { background: var(--surface); border: 1px solid var(--line);
+                 border-radius: 16px; padding: 16px 20px;
+                 width: min(880px, calc(100% - 24px)); align-self: center;
+                 margin-top: 12px; }
   #usagePanel[hidden] { display: none; }
   #usagePanel h2 { font-size: 15px; margin: 0 0 8px; }
   #usagePanel h3 { font-size: 14px; margin: 14px 0 4px; }
@@ -204,26 +236,31 @@ _PAGE_TEMPLATE = """\
   .notifyRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
                padding: 6px 0; font-size: 14px; }
   .notifyRow .tname { min-width: 8em; }
-  .notifyRow button { padding: 4px 12px; font-size: 13px;
-               background: #fff; color: __COCOA__; border: 1px solid __COCOA__; }
+  .notifyRow button { padding: 4px 14px; font-size: 13px;
+               background: var(--surface); color: var(--ink); border: 1px solid var(--line);
+               border-radius: 999px; }
   .adminNew input[type="time"] { padding: 4px; }
-  #approvalPanel { background: #fff; border-bottom: 2px solid __HONEY__;
-                 padding: 12px 16px; }
+  #approvalPanel { background: var(--surface); border: 1px solid var(--line);
+                 border-radius: 16px; padding: 16px 20px;
+                 width: min(880px, calc(100% - 24px)); align-self: center;
+                 margin-top: 12px; }
   #approvalPanel[hidden] { display: none; }
   #approvalPanel h2 { font-size: 15px; margin: 0 0 8px; }
   .approvalRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
-               padding: 8px 0; border-top: 1px dashed __HONEY__; font-size: 14px; }
+               padding: 8px 0; border-top: 1px dashed var(--line); font-size: 14px; }
   .approvalRow .asummary { flex: 1; min-width: 12em; word-break: break-all; }
   .approvalRow button { padding: 6px 14px; font-size: 13px; }
-  .approvalRow button.deny { background: #fff; color: __COCOA__;
-               border: 1px solid __COCOA__; }
-  #log { flex: 1; overflow-y: auto; padding: 16px; display: flex;
-         flex-direction: column; gap: 10px; }
-  .msg { max-width: 80%; padding: 10px 14px; border-radius: 14px;
-         white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
-  .msg.user { align-self: flex-end; background: __HONEY__; color: #fff; }
-  .msg.assistant { align-self: flex-start; background: #fff;
-                    border: 1px solid __HONEY__; }
+  .approvalRow button.deny { background: var(--surface); color: var(--ink);
+               border: 1px solid var(--line); }
+  #log { flex: 1; overflow-y: auto; padding: 20px 16px 8px; display: flex;
+         flex-direction: column; gap: 20px;
+         width: min(880px, 100%); align-self: center; }
+  .msg { max-width: 78%; padding: 10px 14px; border-radius: 18px;
+         white-space: pre-wrap; word-break: break-word; line-height: 1.65;
+         font-size: 15px; }
+  .msg.user { align-self: flex-end; background: var(--bubble); color: var(--ink); }
+  .msg.assistant { align-self: stretch; max-width: 100%;
+                    background: transparent; border: none; padding: 0 2px; }
   .msg .quoted { display: block; font-size: 12px; opacity: .85;
                  border-left: 3px solid currentColor; padding-left: 6px;
                  margin-bottom: 4px; }
@@ -235,17 +272,22 @@ _PAGE_TEMPLATE = """\
   #record.recording { background: #B3402A; color: #fff; border-color: #B3402A; }
   #recordStatus { font-size: 13px; align-self: center; }
   #recordStatus[hidden] { display: none; }
-  form { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; background: #fff;
-         border-top: 1px solid __HONEY__; }
+  form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+         padding: 10px 12px; background: var(--surface);
+         border: 1px solid var(--line); border-radius: 24px;
+         width: min(880px, calc(100% - 24px)); align-self: center;
+         margin: 8px 0 14px;
+         box-shadow: 0 4px 18px rgba(58, 51, 44, .06); }
+  form:focus-within { border-color: __HONEY__; }
   #quoteBox { flex-basis: 100%; display: flex; gap: 8px; align-items: center;
-              font-size: 13px; background: __CREAM__; padding: 6px 8px;
-              border-left: 4px solid __HONEY__; }
+              font-size: 13px; background: var(--quote-bg); padding: 6px 8px;
+              border-left: 4px solid __HONEY__; border-radius: 6px; }
   #quoteBox[hidden] { display: none; }
   #quoteText { flex: 1; overflow: hidden; text-overflow: ellipsis;
                white-space: nowrap; }
   #clearQuote { padding: 4px 10px; font-size: 12px; }
   #statusBox { flex-basis: 100%; display: flex; gap: 2px; align-items: center;
-               font-size: 13px; color: __COCOA__; min-height: 1em; }
+               font-size: 13px; color: var(--ink); min-height: 1em; }
   #statusBox[hidden] { display: none; }
   #statusBox .dot { animation: statusBlink 1.2s infinite; }
   #statusBox .dot:nth-child(2) { animation-delay: .2s; }
@@ -253,15 +295,15 @@ _PAGE_TEMPLATE = """\
   @keyframes statusBlink { 0%, 60%, 100% { opacity: .15; } 30% { opacity: 1; } }
   #files { flex-basis: 100%; font-size: 13px; min-height: 1em; }
   #files:empty { display: none; }
-  #input { flex: 1; padding: 10px; font-size: 16px; border: 1px solid __COCOA__;
-           border-radius: 8px; }
-  button { padding: 10px 20px; font-size: 16px; border: none; border-radius: 8px;
+  #input { flex: 1; padding: 8px 6px; font-size: 16px; border: none;
+           background: transparent; outline: none; }
+  button { padding: 10px 18px; font-size: 16px; border: none; border-radius: 999px;
            background: __HONEY__; color: #fff; cursor: pointer; }
   button:disabled { opacity: .5; }
-  #attach, #record { background: #fff; color: __COCOA__; border: 1px solid __COCOA__; }
+  #attach, #record { background: var(--surface); color: var(--ink); border: 1px solid var(--line); }
   body.dragover #log { outline: 3px dashed __HONEY__; outline-offset: -8px; }
   #dropHint { display: none; text-align: center; padding: 8px; font-size: 14px;
-              background: #fff; border-top: 1px solid __HONEY__; }
+              background: var(--surface); border-top: 1px solid var(--line); }
   body.dragover #dropHint { display: block; }
 </style>
 </head>
@@ -291,6 +333,14 @@ _PAGE_TEMPLATE = """\
     <input id="newSession" placeholder="新しい部屋" size="10">
     <button id="createSession" type="button">作成</button>
     <button id="deleteSession" type="button">削除</button>
+  </div>
+  <div class="sessions">
+    <label for="themeSelect">テーマ</label>
+    <select id="themeSelect">
+      <option value="light">昼</option>
+      <option value="dark">夜</option>
+      <option value="system">システム</option>
+    </select>
   </div>
   <div class="sessions">
     <button id="tenantAdminBtn" type="button">テナント管理</button>
@@ -1533,6 +1583,14 @@ async function loadMeta() {
   await loadSessions();
   loadHistory();
 })();
+const themeSelect = document.getElementById("themeSelect");
+themeSelect.value = document.documentElement.dataset.theme || "system";
+themeSelect.addEventListener("change", () => {
+  document.documentElement.dataset.theme = themeSelect.value;
+  try {
+    localStorage.setItem("kuma-theme", themeSelect.value);
+  } catch (e) { /* 保存できなくても切り替え自体は効かせる */ }
+});
 input.focus();
 </script>
 </body>
@@ -1556,6 +1614,7 @@ def render_page(provider: str, avatar_svg: str | None = None,
         .replace("__HONEY__", HONEY)
         .replace("__COCOA__", COCOA)
         .replace("__CREAM__", CREAM)
+        .replace("__LINE__", LINE)
     )
 
 
@@ -1578,21 +1637,38 @@ _LOGIN_TEMPLATE = """\
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ログイン - kuma-agent</title>
+<script>
+  try {
+    document.documentElement.dataset.theme =
+      localStorage.getItem("kuma-theme") || "system";
+  } catch (e) {
+    document.documentElement.dataset.theme = "system";
+  }
+</script>
 <style>
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: sans-serif; background: __CREAM__; color: __COCOA__;
+  :root { --bg: __CREAM__; --surface: #FFFFFF; --ink: __COCOA__;
+          --line: __LINE__; }
+  :root[data-theme="dark"] { --bg: #201D1A; --surface: #2B2723;
+          --ink: #EFE9E0; --line: #453E34; }
+  @media (prefers-color-scheme: dark) {
+    :root[data-theme="system"] { --bg: #201D1A; --surface: #2B2723;
+          --ink: #EFE9E0; --line: #453E34; } }
+  input { background: var(--surface); color: var(--ink); }
+  body { margin: 0; font-family: sans-serif; background: var(--bg); color: var(--ink);
          display: flex; align-items: center; justify-content: center; min-height: 100dvh; }
-  .card { background: #fff; border: 1px solid __HONEY__; border-radius: 14px;
-          padding: 24px; width: min(360px, 90vw); text-align: center; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
+          padding: 24px; width: min(360px, 90vw); text-align: center;
+          box-shadow: 0 4px 18px rgba(58, 51, 44, .06); }
   .card .avatar { width: 64px; height: 64px; margin: 0 auto 8px; }
   .card .avatar svg { width: 100%; height: 100%; display: block; }
   .card h1 { font-size: 20px; margin: 0 0 4px; }
   .card p { font-size: 14px; margin: 0 0 16px; }
   .card .error { color: #B3402A; min-height: 1.2em; }
   .card form { display: flex; flex-direction: column; gap: 10px; }
-  .card input { padding: 10px; font-size: 16px; border: 1px solid __COCOA__;
+  .card input { padding: 10px; font-size: 16px; border: 1px solid var(--line);
                 border-radius: 8px; }
-  .card button { padding: 10px 20px; font-size: 16px; border: none; border-radius: 8px;
+  .card button { padding: 10px 20px; font-size: 16px; border: none; border-radius: 999px;
                  background: __HONEY__; color: #fff; cursor: pointer; }
 </style>
 </head>
@@ -1622,6 +1698,7 @@ def render_login_page(error: str = "", avatar_svg: str | None = None) -> str:
         .replace("__HONEY__", HONEY)
         .replace("__COCOA__", COCOA)
         .replace("__CREAM__", CREAM)
+        .replace("__LINE__", LINE)
     )
 
 

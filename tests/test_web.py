@@ -61,6 +61,14 @@ def test_render_page_contains_avatar_and_provider():
     assert "gemini" in page
 
 
+def test_render_page_has_theme_switcher():
+    page = render_page("muse")
+    assert 'id="themeSelect"' in page
+    assert "昼" in page and "夜" in page and "システム" in page
+    assert 'data-theme="dark"' in page  # 夜テーマの配色定義
+    assert "kuma-theme" in page  # 選択を覚える保存キー
+
+
 def test_chat_endpoint_replies_with_fake_model(server: str):
     status, data = _post_json(server + "/api/chat", {"message": "こんにちは"})
     assert status == 200
