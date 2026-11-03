@@ -151,6 +151,16 @@ _PAGE_TEMPLATE = """\
               font-size: 14px; }
   .adminNew input { padding: 6px; font-size: 13px; border-radius: 6px;
                border: 1px solid __COCOA__; }
+  #tenantDeleteConfirm { border: 2px solid #b3261e; border-radius: 8px;
+               padding: 12px 14px; margin: 12px 0; background: #fdf3f2;
+               font-size: 14px; }
+  #tenantDeleteConfirm[hidden] { display: none; }
+  #tenantDeleteConfirm h3 { margin: 0 0 8px; font-size: 15px; }
+  #tenantDeleteConfirm ul { margin: 6px 0 10px; padding-left: 1.4em; }
+  #tenantDeleteConfirm .warn { color: #b3261e; font-weight: bold; }
+  #tenantDeleteConfirm .buttons { display: flex; gap: 10px; margin-top: 10px; }
+  #tenantDeleteConfirm .deleteDo { background: #b3261e; color: #fff;
+               border: 1px solid #b3261e; padding: 6px 14px; border-radius: 6px; }
   #tenantPanel h3 { font-size: 14px; margin: 16px 0 4px;
                border-top: 1px solid __HONEY__; padding-top: 12px; }
   #outputsPanel { background: #fff; border-bottom: 1px solid __HONEY__;
@@ -318,6 +328,7 @@ _PAGE_TEMPLATE = """\
 <section id="tenantPanel" hidden>
   <h2>テナント管理</h2>
   <div id="tenantRows"></div>
+  <div id="tenantDeleteConfirm" hidden></div>
   <div class="adminNew">
     <input id="adminNewTenant" placeholder="新しいテナント名" size="14">
     <button id="adminCreateTenant" type="button">テナントを作成</button>
@@ -1117,47 +1128,141 @@ async function buildTenantRow(name) {
   switchBtn.textContent = '切り替え';
   switchBtn.addEventListener('click', () => applyTenant(name));
   row.appendChild(switchBtn);
-  // 削除は取り消せないため既定テナントには出さず、確認として
-  // テナント名の入力を求める（一致しない場合は進めない）。実際の
-  // 削除は /api/tenants/delete が担い、サーバー側で控えを取って
-  // から置き場を消す
+  // 削除は取り消せないため既定テナントには出さない。確認は
+  // showTenantDeleteConfirm が担い、消えるデータの内訳を表示した
+  // うえでテナント名の入力を求める（一致しない場合は進めない）。
+  // 実際の削除は /api/tenants/delete が担い、サーバー側で控えを
+  // 取ってから置き場を消す
   if (name !== 'default') {
     const deleteBtn = document.createElement('button');
     deleteBtn.type = 'button';
     deleteBtn.textContent = '削除';
-    deleteBtn.addEventListener('click', async () => {
-      const typed = window.prompt(
-        'テナント「' + name + '」を削除します。'
-        + 'データは控え（ZIP）を取ってから消え、取り消せません。'
-        + '確認のため、テナント名を入力してください');
-      if (typed === null) return;
-      if (typed.trim() !== name) {
-        window.alert('テナント名が一致しないため、削除しませんでした');
-        return;
-      }
-      let data = {};
-      try {
-        const res = await fetch('/api/tenants/delete', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({tenant: name}),
-        });
-        data = await res.json();
-        if (!res.ok) throw new Error(data.error || '削除に失敗しました');
-      } catch (e) {
-        window.alert('削除に失敗しました: ' + (e.message || e));
-        return;
-      }
-      window.alert('テナント「' + name + '」を削除しました'
-        + (data.backup ? '（控え: ' + data.backup + '）' : ''));
-      const wasCurrent = currentTenant === name;
-      await loadTenants();
-      await loadTenantAdmin();
-      if (wasCurrent) applyTenant('default');
-    });
+    deleteBtn.addEventListener('click', () => showTenantDeleteConfirm(name));
     row.appendChild(deleteBtn);
   }
   return row;
+}
+
+// 削除の確認欄。押されたテナントについて、消えるデータの内訳
+// （ユーザー・会話・用事の一覧・能動発信と保持期限の設定）を
+// /api/tenants/impact で取り、パネル内に一覧表示する。確認として
+// テナント名の入力も求め、一致したときだけ「削除する」で
+// /api/tenants/delete を呼ぶ。キャンセルでは何も消えない
+const tenantDeleteConfirm = document.getElementById('tenantDeleteConfirm');
+let tenantDeleteTarget = null;
+
+function hideTenantDeleteConfirm() {
+  tenantDeleteTarget = null;
+  tenantDeleteConfirm.hidden = true;
+  tenantDeleteConfirm.replaceChildren();
+}
+
+async function showTenantDeleteConfirm(name) {
+  tenantDeleteTarget = name;
+  tenantDeleteConfirm.hidden = false;
+  tenantDeleteConfirm.replaceChildren();
+  const loading = document.createElement('p');
+  loading.textContent = 'テナント「' + name + '」の内容を確認しています…';
+  tenantDeleteConfirm.appendChild(loading);
+  let impact = null;
+  try {
+    const res = await fetch(
+      '/api/tenants/impact?tenant=' + encodeURIComponent(name));
+    impact = await res.json();
+    if (!res.ok) throw new Error(impact.error || '内容を確認できませんでした');
+  } catch (e) {
+    if (tenantDeleteTarget !== name) return;
+    tenantDeleteConfirm.replaceChildren();
+    const err = document.createElement('p');
+    err.textContent = '内容を確認できなかったため、削除は行いません: '
+      + (e.message || e);
+    tenantDeleteConfirm.appendChild(err);
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.textContent = '閉じる';
+    closeBtn.addEventListener('click', hideTenantDeleteConfirm);
+    tenantDeleteConfirm.appendChild(closeBtn);
+    return;
+  }
+  if (tenantDeleteTarget !== name) return;
+  tenantDeleteConfirm.replaceChildren();
+  const title = document.createElement('h3');
+  title.textContent = 'テナント「' + name + '」を削除しますか？';
+  tenantDeleteConfirm.appendChild(title);
+  const intro = document.createElement('p');
+  intro.textContent = 'このテナントには次のデータがあります。'
+    + '削除すると、すべて消えます。';
+  tenantDeleteConfirm.appendChild(intro);
+  const list = document.createElement('ul');
+  const userNames = (impact.users || []).map(u => u.user).join('、');
+  const items = [
+    'ユーザー: ' + userNames + '（' + impact.user_count + '人）',
+    '会話: ' + impact.conversations + '件',
+    '用事の一覧: ' + impact.tasks + '件（うち未完了 '
+      + impact.tasks_open + '件）',
+    '能動発信: ' + (impact.proactive_enabled ? 'オン' : 'オフ'),
+    'データの保持期限: ' + impact.retention_effective_days + '日',
+    'データの大きさ: 約 '
+      + Math.max(1, Math.round(impact.size_bytes / 1024)) + ' KB',
+  ];
+  for (const text of items) {
+    const li = document.createElement('li');
+    li.textContent = text;
+    list.appendChild(li);
+  }
+  tenantDeleteConfirm.appendChild(list);
+  const warn = document.createElement('p');
+  warn.className = 'warn';
+  warn.textContent = '削除は取り消せません。実行の直前に控え（ZIP）が'
+    + '自動で作られますが、画面から元に戻すことはできません。';
+  tenantDeleteConfirm.appendChild(warn);
+  const label = document.createElement('label');
+  label.textContent = '確認のため、テナント名を入力してください: ';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.size = 14;
+  label.appendChild(input);
+  tenantDeleteConfirm.appendChild(label);
+  const buttons = document.createElement('div');
+  buttons.className = 'buttons';
+  const doBtn = document.createElement('button');
+  doBtn.type = 'button';
+  doBtn.className = 'deleteDo';
+  doBtn.textContent = '削除する';
+  doBtn.addEventListener('click', async () => {
+    if (input.value.trim() !== name) {
+      window.alert('テナント名が一致しないため、削除しませんでした');
+      return;
+    }
+    let data = {};
+    try {
+      const res = await fetch('/api/tenants/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({tenant: name}),
+      });
+      data = await res.json();
+      if (!res.ok) throw new Error(data.error || '削除に失敗しました');
+    } catch (e) {
+      window.alert('削除に失敗しました: ' + (e.message || e));
+      return;
+    }
+    hideTenantDeleteConfirm();
+    window.alert('テナント「' + name + '」を削除しました'
+      + (data.backup ? '（控え: ' + data.backup + '）' : ''));
+    const wasCurrent = currentTenant === name;
+    await loadTenants();
+    await loadTenantAdmin();
+    if (wasCurrent) applyTenant('default');
+  });
+  buttons.appendChild(doBtn);
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.textContent = 'キャンセル';
+  cancelBtn.addEventListener('click', hideTenantDeleteConfirm);
+  buttons.appendChild(cancelBtn);
+  tenantDeleteConfirm.appendChild(buttons);
+  input.focus();
 }
 
 adminCreateTenant.addEventListener('click', async () => {
@@ -2018,6 +2123,74 @@ def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     }
 
 
+def _count_tasks_file(user_data_dir: Path) -> tuple[int, int]:
+    """用事の一覧ファイル（tasks.json）を直接読み、(総数, 未完了数)。
+
+    TaskStore を作ると旧形式ファイルの取り込み（書き込み）が走る
+    ため、削除前の確認のような読み取り専用の集計ではファイルだけを
+    読む。ファイルが無い・壊れている場合は (0, 0)。
+    """
+    try:
+        records = json.loads(
+            (user_data_dir / "tasks.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0, 0
+    if not isinstance(records, list):
+        return 0, 0
+    open_count = sum(
+        1 for r in records
+        if isinstance(r, dict) and r.get("status", "open") == "open")
+    return len(records), open_count
+
+
+def _dir_size_bytes(root: Path) -> int:
+    """置き場以下のファイルサイズの合計（読めないものは飛ばす）。"""
+    total = 0
+    for path in root.rglob("*"):
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _tenant_impact_payload(tenants: TenantStore, name: str) -> dict:
+    """テナント削除の確認に出す、影響範囲の集計（GET /api/tenants/impact）。
+
+    そのテナントのユーザーごとに会話（保存済みセッション）と
+    用事の一覧を数え、テナント設定（能動発信の有無・保持期限の
+    実効値）と置き場の大きさを添える。読み取りだけで、置き場や
+    ストアは作らない。
+    """
+    tdir = tenant_dir(tenants.data_dir, name)
+    users = []
+    conversations = 0
+    tasks = 0
+    tasks_open = 0
+    for uname in list_user_names(tdir):
+        udir = user_dir(tdir, uname)
+        conv = len(list_session_ids(udir))
+        t_all, t_open = _count_tasks_file(udir)
+        users.append({"user": uname, "conversations": conv,
+                      "tasks": t_all, "tasks_open": t_open})
+        conversations += conv
+        tasks += t_all
+        tasks_open += t_open
+    settings = _tenant_settings_payload(tenants, name)
+    return {
+        "tenant": name,
+        "users": users,
+        "user_count": len(users),
+        "conversations": conversations,
+        "tasks": tasks,
+        "tasks_open": tasks_open,
+        "proactive_enabled": settings["proactive_enabled"],
+        "retention_effective_days": settings["retention_effective_days"],
+        "size_bytes": _dir_size_bytes(tdir),
+    }
+
+
 def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                  line_bot: LineBot | None = None):
     """TenantStore を受け取るリクエストハンドラクラスを作る。
@@ -2138,6 +2311,13 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             elif split.path == "/api/tenant_settings":
                 name = normalize_tenant_name(_first(query.get("tenant")))
                 self._send_json(200, _tenant_settings_payload(tenants, name))
+            elif split.path == "/api/tenants/impact":
+                name = normalize_tenant_name(_first(query.get("tenant")))
+                if name not in list_tenant_names(tenants.data_dir):
+                    self._send_json(404, {"error": "テナントが見つかりません"})
+                else:
+                    self._send_json(
+                        200, _tenant_impact_payload(tenants, name))
             elif split.path == "/api/notify_prefs":
                 tenant = normalize_tenant_name(
                     _first(query.get("tenant")) or tenants.default_tenant)

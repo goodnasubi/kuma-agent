@@ -6,6 +6,11 @@ backups/ に作られテナントのファイルが入っていること、既�
 なること、置き場の外の設定（settings.json / retention.json の
 項目）が取り除かれること、控えが作れなければ削除しないこと、
 ログイン有効時は未認証で拒否されることを確認する。
+
+あわせて、削除前の確認に出す影響範囲の集計
+（GET /api/tenants/impact）が、ユーザー・会話・用事の件数と
+テナント設定を正しく返し、読み取りだけで何も変えないことも
+確認する。
 """
 import http.client
 import io
@@ -325,3 +330,81 @@ def test_delete_requires_login_when_auth_enabled(tmp_path: Path):
         assert status == 200
         assert json.loads(body)["deleted"] is True
         assert not tdir.exists()
+
+
+# ---------------------------------------------------------------- 削除前の影響範囲
+
+def test_impact_reports_users_conversations_tasks_and_settings(server):
+    base, tmp_path = server
+    _create(base, "acme")
+    tdir = _seed_tenant_files(tmp_path)
+    # 用事の一覧: 既定ユーザーに2件（未完了1・完了1）、bob に1件（未完了）
+    (tdir / "tasks.json").write_text(json.dumps([
+        {"title": "牛乳を買う", "status": "open"},
+        {"title": "手紙を出す", "status": "done"},
+    ]), encoding="utf-8")
+    bob = tdir / "users" / "bob"
+    (bob / "tasks.json").write_text(json.dumps([
+        {"title": "予約を取る", "status": "open"},
+    ]), encoding="utf-8")
+    # テナント設定: 能動発信オフ、保持期限 45 日
+    status, _data = _post(base + "/api/tenant_settings",
+                          {"tenant": "acme", "proactive_enabled": False,
+                           "retention_days": 45})
+    assert status == 200
+
+    status, data = _get(base + "/api/tenants/impact?tenant=acme")
+    assert status == 200
+    assert data["tenant"] == "acme"
+    assert data["user_count"] == 2
+    assert data["conversations"] == 1
+    assert data["tasks"] == 3
+    assert data["tasks_open"] == 2
+    assert data["proactive_enabled"] is False
+    assert data["retention_effective_days"] == 45
+    assert data["size_bytes"] > 0
+    by_user = {u["user"]: u for u in data["users"]}
+    assert by_user["default"]["conversations"] == 1
+    assert by_user["default"]["tasks"] == 2
+    assert by_user["bob"]["tasks"] == 1
+    assert by_user["bob"]["tasks_open"] == 1
+
+
+def test_impact_changes_nothing(server):
+    """影響範囲の取得は読み取りだけで、置き場に何も作らない・消さない。"""
+    base, tmp_path = server
+    _create(base, "acme")
+    tdir = _seed_tenant_files(tmp_path)
+    before = sorted(str(p.relative_to(tmp_path))
+                    for p in tmp_path.rglob("*"))
+    status, _data = _get(base + "/api/tenants/impact?tenant=acme")
+    assert status == 200
+    after = sorted(str(p.relative_to(tmp_path))
+                   for p in tmp_path.rglob("*"))
+    assert before == after
+    assert tdir.is_dir()
+
+
+def test_impact_unknown_tenant_is_404(server):
+    base, _tmp_path = server
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        _get(base + "/api/tenants/impact?tenant=ghost")
+    assert excinfo.value.code == 404
+
+
+def test_impact_default_tenant_ok(server):
+    base, _tmp_path = server
+    status, data = _get(base + "/api/tenants/impact?tenant=default")
+    assert status == 200
+    assert data["tenant"] == "default"
+    assert data["user_count"] >= 1
+
+
+def test_admin_page_has_impact_confirmation(server):
+    """管理画面に、影響範囲を表示する削除の確認欄が含まれている。"""
+    base, _tmp_path = server
+    with urllib.request.urlopen(base + "/", timeout=10) as resp:
+        page = resp.read().decode("utf-8")
+    assert "tenantDeleteConfirm" in page
+    assert "/api/tenants/impact" in page
+    assert "showTenantDeleteConfirm" in page
