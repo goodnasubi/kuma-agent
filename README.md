@@ -100,6 +100,23 @@ kuma-agent web           # Web UI を http://127.0.0.1:8765 で起動する
 
 ![Web UI の操作動画](assets/demo-web.gif)
 
+テーマごとの画面（同じ会話を、各テーマの PC／スマホで表示）:
+
+| テーマ | PC | スマホ |
+| --- | --- | --- |
+| 昼 | <img src="assets/screenshot-web-light-pc.png" width="420" alt="昼テーマ（PC）"> | <img src="assets/screenshot-web-light-mobile.png" width="180" alt="昼テーマ（スマホ）"> |
+| 夜 | <img src="assets/screenshot-web-dark-pc.png" width="420" alt="夜テーマ（PC）"> | <img src="assets/screenshot-web-dark-mobile.png" width="180" alt="夜テーマ（スマホ）"> |
+| システム（端末が夜の設定のとき） | <img src="assets/screenshot-web-system-pc.png" width="420" alt="システムテーマ（PC）"> | <img src="assets/screenshot-web-system-mobile.png" width="180" alt="システムテーマ（スマホ）"> |
+| 8ビット（インベーダーゲーム風） | <img src="assets/screenshot-web-pixel-pc.png" width="420" alt="8ビットテーマ（PC）"> | <img src="assets/screenshot-web-pixel-mobile.png" width="180" alt="8ビットテーマ（スマホ）"> |
+
+8ビットモードの操作動画（PC）:
+
+<img src="assets/demo-web-pixel-pc.gif" width="640" alt="8ビットモードの操作動画（PC）">
+
+8ビットモードの操作動画（スマホ）:
+
+<img src="assets/demo-web-pixel-mobile.gif" width="260" alt="8ビットモードの操作動画（スマホ）">
+
 ### TUI（`kuma-agent chat --tui`）
 
 `/attach <パス>` で添付します。
