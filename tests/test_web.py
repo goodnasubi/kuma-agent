@@ -63,8 +63,8 @@ def test_render_page_contains_avatar_and_provider():
 
 def test_render_page_has_theme_switcher():
     page = render_page("muse")
-    assert 'id="themeSelect"' in page
-    assert "昼" in page and "夜" in page and "システム" in page
+    assert 'id="themeBtn"' in page  # アイコンのボタンで切り替える
+    assert 'id="themeSelect"' not in page  # 文字の選択欄は使わない
     assert 'data-theme="dark"' in page  # 夜テーマの配色定義
     assert "kuma-theme" in page  # 選択を覚える保存キー
 

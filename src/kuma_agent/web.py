@@ -252,6 +252,11 @@ _PAGE_TEMPLATE = """\
   #statusPanel h2 { font-size: 15px; margin: 0 0 8px; }
   #statusPanel .statusLine { font-size: 14px; margin: 0 0 6px; }
   #statusFacts { margin: 6px 0 0; padding-left: 1.4em; font-size: 14px; }
+  .iconBtn { width: 38px; height: 38px; padding: 0; display: grid;
+             place-items: center; background: var(--surface);
+             color: var(--ink); border: 1px solid var(--line);
+             border-radius: 999px; cursor: pointer; }
+  .iconBtn svg { width: 20px; height: 20px; display: block; }
   #tabBar { display: flex; gap: 6px; flex-wrap: nowrap; overflow-x: auto;
             width: min(880px, calc(100% - 24px)); align-self: center;
             padding: 10px 2px 2px; }
@@ -370,12 +375,8 @@ _PAGE_TEMPLATE = """\
     <button id="deleteSession" type="button">削除</button>
   </div>
   <div class="sessions">
-    <label for="themeSelect">テーマ</label>
-    <select id="themeSelect">
-      <option value="light">昼</option>
-      <option value="dark">夜</option>
-      <option value="system">システム</option>
-    </select>
+    <button id="themeBtn" type="button" class="iconBtn"
+            title="テーマを切り替える"></button>
   </div>
 </header>
 <nav id="tabBar">
@@ -1760,14 +1761,42 @@ async function loadMeta() {
   await loadSessions();
   loadHistory();
 })();
-const themeSelect = document.getElementById("themeSelect");
-themeSelect.value = document.documentElement.dataset.theme || "system";
-themeSelect.addEventListener("change", () => {
-  document.documentElement.dataset.theme = themeSelect.value;
+const themeBtn = document.getElementById("themeBtn");
+const THEME_ORDER = ["light", "dark", "system"];
+const THEME_NAMES = { light: "昼", dark: "夜", system: "システム" };
+const THEME_ICONS = {
+  light: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    + ' stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12"'
+    + ' r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4'
+    + ' 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+  dark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    + '<path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>',
+  system: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    + ' stroke-width="2"><circle cx="12" cy="12" r="9"/>'
+    + '<path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"'
+    + ' stroke="none"/></svg>',
+};
+
+function paintThemeBtn() {
+  const t = document.documentElement.dataset.theme || "system";
+  themeBtn.innerHTML = THEME_ICONS[t];
+  themeBtn.title = "テーマ: " + THEME_NAMES[t] + "（押すと切り替え）";
+  themeBtn.setAttribute("aria-label",
+    "テーマ: " + THEME_NAMES[t] + "（押すと切り替え）");
+}
+
+themeBtn.addEventListener("click", () => {
+  const cur = document.documentElement.dataset.theme || "system";
+  const next = THEME_ORDER[
+    (THEME_ORDER.indexOf(cur) + 1) % THEME_ORDER.length];
+  document.documentElement.dataset.theme = next;
   try {
-    localStorage.setItem("kuma-theme", themeSelect.value);
+    localStorage.setItem("kuma-theme", next);
   } catch (e) { /* 保存できなくても切り替え自体は効かせる */ }
+  paintThemeBtn();
 });
+paintThemeBtn();
 input.focus();
 </script>
 </body>
