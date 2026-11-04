@@ -31,6 +31,7 @@ from .export import (
     default_export_filename,
     save_tenant_backup,
 )
+from .feed import load_feed_entries
 from .line_api import HttpxLineApi, LineBot, line_enabled
 from .line_api import build_proactive_notifier as build_line_proactive_notifier
 from .llm import MAX_ATTACHMENT_BYTES, Attachment, guess_media_type
@@ -206,6 +207,25 @@ _PAGE_TEMPLATE = """\
   .outputRow a { padding: 4px 14px; font-size: 13px; background: var(--surface);
                color: var(--ink); border: 1px solid var(--line);
                border-radius: 8px; text-decoration: none; }
+  #feedPanel { background: var(--surface); border: 1px solid var(--line);
+                 border-radius: 6px; padding: 16px 20px;
+                 width: min(880px, calc(100% - 24px)); align-self: center;
+                 margin-top: 12px; }
+  #feedPanel[hidden] { display: none; }
+  #feedPanel h2 { font-size: 15px; margin: 0 0 8px; }
+  .feedRow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+               padding: 10px 0; border-top: 1px dashed var(--line);
+               font-size: 14px; }
+  .feedRow .fkind { padding: 1px 9px; font-size: 12px; line-height: 1.6;
+               background: var(--quote-bg); color: var(--ink);
+               border: 1px solid var(--line); border-radius: 8px;
+               white-space: nowrap; }
+  .feedRow[data-kind="briefing"] .fkind { border-color: __HONEY__;
+               font-weight: bold; }
+  .feedRow .ftime { opacity: .85; font-size: 13px; }
+  .feedRow .ftitle { font-weight: bold; }
+  .feedRow .fbody { flex-basis: 100%; white-space: pre-wrap;
+               word-break: break-word; line-height: 1.55; }
   #profilePanel { background: var(--surface); border: 1px solid var(--line);
                  border-radius: 6px; padding: 16px 20px;
                  width: min(880px, calc(100% - 24px)); align-self: center;
@@ -301,7 +321,7 @@ _PAGE_TEMPLATE = """\
     #tabBar button.active { background: transparent; color: __HONEY__;
               border: none; }
     #tabBar button svg { width: 24px; height: 24px; }
-    #outputsPanel, #profilePanel, #usagePanel, #tenantPanel,
+    #outputsPanel, #feedPanel, #profilePanel, #usagePanel, #tenantPanel,
     #approvalPanel, #statusPanel, .tabNote, #adminMenu, #form, #quoteBar {
       width: calc(100% - 16px); }
   }
@@ -537,9 +557,9 @@ _PAGE_TEMPLATE = """\
     <button id="notifyClearQuiet" type="button" class="iconBtn sm" title="時間帯を解除" aria-label="時間帯を解除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
   </div>
 </section>
-<section id="feedPanel" class="tabNote" hidden>
+<section id="feedPanel" hidden>
   <h2>フィード</h2>
-  <p>準備中です。これから、朝のまとめや声かけ、用事の進み具合をここに並べます。</p>
+  <div id="feedRows"></div>
 </section>
 <section id="ideasPanel" class="tabNote" hidden>
   <h2>アイデア</h2>
@@ -627,14 +647,16 @@ const tabBar = document.getElementById('tabBar');
 const dropHint = document.getElementById('dropHint');
 const adminMenu = document.getElementById('adminMenu');
 const feedPanel = document.getElementById('feedPanel');
+const feedRows = document.getElementById('feedRows');
 const ideasPanel = document.getElementById('ideasPanel');
 const goalsPanel = document.getElementById('goalsPanel');
 let activeTab = 'chat';
 let lastApprovals = [];
 
 // タブの切り替え。会話タブだけが会話ログと入力欄を持ち、探すタブは
-// 成果物、管理タブは管理メニューとその配下のパネルを出す。
-// フィード／アイデア／目標は器だけで、中身はこれから入れる
+// 成果物、フィードタブは能動発信と用事の進み具合の時系列、管理タブは
+// 管理メニューとその配下のパネルを出す。
+// アイデア／目標は器だけで、中身はこれから入れる
 function showTab(name) {
   activeTab = name;
   for (const btn of tabBar.querySelectorAll('button')) {
@@ -650,6 +672,7 @@ function showTab(name) {
     approvalPanel.hidden = true;
   }
   feedPanel.hidden = name !== 'feed';
+  if (name === 'feed') loadFeed();
   ideasPanel.hidden = name !== 'ideas';
   goalsPanel.hidden = name !== 'goals';
   outputsPanel.hidden = name !== 'explore';
@@ -1352,6 +1375,54 @@ function formatOutputSize(size) {
   const kb = bytes / 1024;
   if (kb < 1024) return kb.toFixed(1) + ' KB';
   return (kb / 1024).toFixed(1) + ' MB';
+}
+
+// フィード（能動発信と用事の進み具合の時系列）。タブを開くたびに
+// /api/feed で新しい順に取り直す。種別の印は小さなバッジで示す
+const FEED_KIND_LABELS = {briefing: '朝のまとめ', proactive: 'お知らせ',
+                          task: '用事の動き'};
+
+async function loadFeed() {
+  feedRows.innerHTML = '';
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser);
+    const res = await fetch('/api/feed' + query);
+    const data = await res.json();
+    const entries = data.entries || [];
+    if (!entries.length) {
+      const row = document.createElement('div');
+      row.className = 'feedRow';
+      row.textContent = 'フィードはまだありません';
+      feedRows.appendChild(row);
+      return;
+    }
+    for (const item of entries) {
+      const row = document.createElement('div');
+      row.className = 'feedRow';
+      row.dataset.kind = item.kind || '';
+      const badge = document.createElement('span');
+      badge.className = 'fkind';
+      badge.textContent = FEED_KIND_LABELS[item.kind] || item.kind || '';
+      row.appendChild(badge);
+      const time = document.createElement('span');
+      time.className = 'ftime';
+      time.textContent = item.ts
+        ? String(item.ts).replace('T', ' ').slice(0, 16) : '';
+      row.appendChild(time);
+      if (item.title) {
+        const title = document.createElement('span');
+        title.className = 'ftitle';
+        title.textContent = item.title;
+        row.appendChild(title);
+      }
+      const body = document.createElement('div');
+      body.className = 'fbody';
+      body.textContent = item.body || '';
+      row.appendChild(body);
+      feedRows.appendChild(row);
+    }
+  } catch (e) { /* 一覧が取れなければパネルは空のままにする */ }
 }
 
 async function loadOutputs() {
@@ -2645,6 +2716,22 @@ def _usage_payload(tenants: TenantStore, tenant: str,
     return {"tenant": tenant, "user": user, **summary.to_dict()}
 
 
+def _feed_payload(tenants: TenantStore, tenant: str, user: str,
+                  limit: object = None, kind: str | None = None) -> dict:
+    """フィード API の応答（GET /api/feed）。
+
+    フィードの記録はユーザーごとの置き場（feed.jsonl）にあり、
+    対象は tenant / user で指した組み合わせ。エントリは新しい順で、
+    limit は件数の上限（既定・上限は feed 側でそろえる）、kind は
+    種別の絞り込み（briefing / proactive / task）。
+    """
+    entries = load_feed_entries(
+        user_dir(tenant_dir(tenants.data_dir, tenant), user),
+        limit=limit, kind=kind)
+    return {"tenant": tenant, "user": user,
+            "entries": [entry.to_dict() for entry in entries]}
+
+
 def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     """テナント設定 API の応答（GET / POST で共通の形）。
 
@@ -2896,6 +2983,15 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                     200, _outputs_payload(tenants, tenant, user))
             elif split.path == "/api/outputs/download":
                 self._download_output(query)
+            elif split.path == "/api/feed":
+                tenant = normalize_tenant_name(
+                    _first(query.get("tenant")) or tenants.default_tenant)
+                user = normalize_user_name(
+                    _first(query.get("user")) or tenants.default_user)
+                self._send_json(
+                    200, _feed_payload(tenants, tenant, user,
+                                       _first(query.get("limit")),
+                                       _first(query.get("kind"))))
             elif split.path == "/api/usage":
                 tenant = normalize_tenant_name(
                     _first(query.get("tenant")) or tenants.default_tenant)

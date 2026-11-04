@@ -79,6 +79,12 @@ Session の巡回では実行せず、試行の記録も残さない。こちら
 quote 以外のキーを無視するため、復元は通常の assistant 発言
 として扱われ、記録が壊れることはない。
 
+投稿が確定した発言は、フィード（feed.py）にも脇の記録として
+残す。種別は、朝のまとめの子の文章そのものが文面になった場合
+だけ briefing で、それ以外（日報・リマインダー・定期ジョブの
+結果や失敗の知らせ）は proactive。会話への投稿の振る舞い自体は
+変えず、フィードは読み物として後から並べるための記録である。
+
 投稿した内容は、呼び出し側が通知コールバック（notify: テナント名・
 ユーザー名・文面を受け取る）を渡していれば、それにも渡す。
 Telegram への配信（telegram.build_proactive_notifier）と LINE
@@ -96,6 +102,7 @@ from typing import Callable
 
 from .config import Config, normalize_mode
 from .delegate import run_delegated_task
+from .feed import KIND_BRIEFING, KIND_PROACTIVE, append_feed_entry
 from .jobs import Job, JobBoard, is_due
 from .llm import ChatModel
 from .memory import (
@@ -346,10 +353,13 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
                    get_session: Callable[[], Session],
                    briefing_executor: Callable[[Session, str], str] | None,
                    manual: bool = False,
-                   ) -> str | None:
+                   ) -> tuple[str, str] | None:
     """その日の声かけ（朝のまとめ／日報）の文面を決める。
 
-    投稿すべき文面があればそれを返し、無ければ None を返す。
+    投稿すべき文面があれば (文面, フィードの種別) を返し、無ければ
+    None を返す。種別は、朝のまとめの子の文章がそのまま文面に
+    なったときだけ KIND_BRIEFING で、従来の日報の組み立てに
+    倒した場合は KIND_PROACTIVE（フィードへ残すときの区別）。
     朝のまとめで子が「なし」と答えた場合は、確認済みの記録だけを
     残して None を返す（投稿と声かけ枠の消費は呼び出し側の仕事）。
 
@@ -365,9 +375,15 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
     6. 子にまとめさせ、失敗・空応答なら用事がある場合だけ従来の
        日報に倒す。「なし」なら確認済みを記録して何も言わない
     """
+    def daily_fallback() -> tuple[str, str] | None:
+        """従来の日報の組み立てに倒す（種別は能動発信）。"""
+        if not visible_tasks:
+            return None
+        return build_message(visible_tasks, now), KIND_PROACTIVE
+
     briefing_at = _briefing_at(cfg)
     if briefing_at is None:
-        return build_message(visible_tasks, now) if visible_tasks else None
+        return daily_fallback()
     today = now.date().isoformat()
     if now.time() < briefing_at and not manual:
         return None
@@ -375,7 +391,7 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
         return None
     session = get_session()
     if isinstance(session.model, _UnusedModel):
-        return build_message(visible_tasks, now) if visible_tasks else None
+        return daily_fallback()
     if not visible_tasks and not _has_calendar_tool(session):
         return None
     executor = (briefing_executor if briefing_executor is not None
@@ -388,11 +404,11 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
         result = str(result)
     result = result.strip()
     if not result or result.startswith("error:"):
-        return build_message(visible_tasks, now) if visible_tasks else None
+        return daily_fallback()
     if result.rstrip("。") == "なし":
         _record_briefing_checked(user_data_dir, today)
         return None
-    return result
+    return result, KIND_BRIEFING
 
 # 通知コールバックの型: (テナント名, ユーザー名, 投稿文) を受け取る
 NotifyCallback = Callable[[str, str, str], None]
@@ -496,6 +512,7 @@ def run_due_jobs(cfg: Config, now: datetime, get_session: Callable[[], Session],
         finally:
             # 投稿まで進んだら、成否にかかわらず実行済みを記録する
             board.mark_run(job.id, now)
+        append_feed_entry(cfg.user_data_dir, KIND_PROACTIVE, text)
         posted.append(text)
         _notify(notify, cfg.tenant, cfg.user, text)
     return posted
@@ -599,6 +616,7 @@ def check_and_post(cfg: Config, now: datetime | None = None,
         get_session().post_proactive_message(text)
         for task in due:
             board.mark_reminded(task.id)
+        append_feed_entry(user_data_dir, KIND_PROACTIVE, text)
         posted.append(text)
         _notify(notify, cfg.tenant, cfg.user, text)
 
@@ -610,11 +628,13 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     today = now.date().isoformat()
     if (_last_posted_on(user_data_dir) != today
             and not prefs.in_quiet_hours(now)):
-        text = _daily_message(cfg, now, visible_tasks, user_data_dir,
-                              get_session, briefing_executor, manual=manual)
-        if text is not None:
+        daily = _daily_message(cfg, now, visible_tasks, user_data_dir,
+                               get_session, briefing_executor, manual=manual)
+        if daily is not None:
+            text, feed_kind = daily
             get_session().post_proactive_message(text)
             _record_posted(user_data_dir, today)
+            append_feed_entry(user_data_dir, feed_kind, text)
             posted.append(text)
             _notify(notify, cfg.tenant, cfg.user, text)
 

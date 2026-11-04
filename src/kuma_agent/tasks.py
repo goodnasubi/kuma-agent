@@ -9,6 +9,10 @@
 tasks/<部屋名>.json が残っている場合は、本体の読み込み時に
 そのまま tasks.json へ取り込む。壊れた JSON のときは空の一覧
 として始める（例外で落とさない）。
+
+用事の変化（追加と、実際に内容が変わった更新）は、保存が確定した
+時点でフィード（feed.py）にも「用事の進み具合」として残す。
+通知済みの印付け（mark_reminded）は進み具合ではないので残さない。
 """
 from __future__ import annotations
 
@@ -16,6 +20,8 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+from .feed import KIND_TASK, append_feed_entry
 
 
 def _parse_time(raw: str) -> datetime | None:
@@ -39,6 +45,36 @@ def _check_remind_at(remind_at: str) -> None:
     if remind_at and _parse_time(remind_at) is None:
         raise ValueError(
             "通知時刻は ISO 8601 形式で指定してください（例: 2026-11-03T09:00:00）")
+
+
+def _describe_task_added(task: Task) -> str:
+    """用事の追加をフィードへ残す短い文面。"""
+    text = f"用事「{task.title}」を追加しました"
+    if task.remind_at:
+        text += f"（{format_remind_at(task.remind_at)} に通知）"
+    return text
+
+
+def _describe_task_updated(task: Task, old_status: str, old_memo: str,
+                           old_remind_at: str) -> str | None:
+    """用事の更新をフィードへ残す短い文面。実際に変わらなければ None。
+
+    複数が同時に変わった場合は、状態 → 通知時刻 → メモの順で
+    一番大きい変化を 1 件として残す（フィードを水増ししない）。
+    """
+    if task.status != old_status:
+        if task.status == STATUS_DONE:
+            return f"用事「{task.title}」を完了しました"
+        return f"用事「{task.title}」を進行中に戻しました"
+    if task.remind_at != old_remind_at:
+        if not task.remind_at:
+            return f"用事「{task.title}」の通知時刻を取り消しました"
+        verb = "設定" if not old_remind_at else "変更"
+        return (f"用事「{task.title}」の通知時刻を "
+                f"{format_remind_at(task.remind_at)} に{verb}しました")
+    if task.memo != old_memo:
+        return f"用事「{task.title}」のメモを更新しました"
+    return None
 
 
 def format_remind_at(raw: str) -> str:
@@ -219,13 +255,18 @@ class TaskBoard:
         return str(n)
 
     def add(self, title: str, memo: str = "", remind_at: str = "") -> Task:
-        """用事を追加して保存する。remind_at は通知時刻（ISO 8601）。"""
+        """用事を追加して保存する。remind_at は通知時刻（ISO 8601）。
+
+        保存が確定したら、フィードへも「用事の進み具合」として残す。
+        """
         _check_remind_at(remind_at)
         self._tasks = self._load()  # 他のセッションの追加を消さないよう読み直す
         task = Task(id=self._next_id(), title=title, memo=memo,
                     remind_at=remind_at)
         self._tasks.append(task)
         self._save()
+        append_feed_entry(self.data_dir, KIND_TASK,
+                          _describe_task_added(task))
         return task
 
     def get(self, task_id: str) -> Task | None:
@@ -249,6 +290,8 @@ class TaskBoard:
         task = self.get(task_id)
         if task is None:
             return None
+        old_status, old_memo, old_remind_at = (
+            task.status, task.memo, task.remind_at)
         if memo is not None:
             task.memo = memo
         if status is not None:
@@ -260,6 +303,10 @@ class TaskBoard:
             task.reminded_at = ""
         task.updated_at = _now()
         self._save()
+        note = _describe_task_updated(task, old_status, old_memo,
+                                      old_remind_at)
+        if note is not None:
+            append_feed_entry(self.data_dir, KIND_TASK, note)
         return task
 
     def mark_reminded(self, task_id: str) -> Task | None:
