@@ -32,6 +32,13 @@ from .export import (
     save_tenant_backup,
 )
 from .feed import load_feed_entries
+from .ideas import (
+    VISIBLE_STATUSES,
+    IdeaBoard,
+    accept_idea,
+    dismiss_idea,
+    generate_ideas,
+)
 from .line_api import HttpxLineApi, LineBot, line_enabled
 from .line_api import build_proactive_notifier as build_line_proactive_notifier
 from .llm import MAX_ATTACHMENT_BYTES, Attachment, guess_media_type
@@ -226,6 +233,39 @@ _PAGE_TEMPLATE = """\
   .feedRow .ftitle { font-weight: bold; }
   .feedRow .fbody { flex-basis: 100%; white-space: pre-wrap;
                word-break: break-word; line-height: 1.55; }
+  #ideasPanel { background: var(--surface); border: 1px solid var(--line);
+                 border-radius: 6px; padding: 16px 20px;
+                 width: min(880px, calc(100% - 24px)); align-self: center;
+                 margin-top: 12px; }
+  #ideasPanel[hidden] { display: none; }
+  #ideasPanel h2 { font-size: 15px; margin: 0 0 8px; }
+  #ideasPanel .ideasNote { font-size: 13px; margin: 0 0 10px; }
+  .ideaTools { display: flex; gap: 10px; align-items: center;
+               margin-bottom: 4px; }
+  .ideaTools button { padding: 6px 16px; font-size: 14px;
+               background: var(--surface); color: var(--ink);
+               border: 1px solid var(--line); border-radius: 8px;
+               cursor: pointer; }
+  .ideaTools button:disabled { opacity: .6; cursor: default; }
+  #ideaStatus { font-size: 13px; }
+  .ideaRow { padding: 10px 0; border-top: 1px dashed var(--line);
+               font-size: 14px; }
+  .ideaRow .ihead { display: flex; flex-wrap: wrap; gap: 8px;
+               align-items: center; }
+  .ideaRow .ititle { font-weight: bold; }
+  .ideaRow .itime { opacity: .85; font-size: 13px; }
+  .ideaRow .istatus { padding: 1px 9px; font-size: 12px; line-height: 1.6;
+               background: var(--quote-bg); color: var(--ink);
+               border: 1px solid __HONEY__; border-radius: 8px;
+               white-space: nowrap; font-weight: bold; }
+  .ideaRow .ibody { white-space: pre-wrap; word-break: break-word;
+               line-height: 1.55; margin-top: 4px; }
+  .ideaRow .ireason { font-size: 13px; opacity: .85; margin-top: 4px; }
+  .ideaRow .iactions { display: flex; gap: 8px; margin-top: 8px; }
+  .ideaRow .iactions button { padding: 5px 14px; font-size: 13px;
+               background: var(--surface); color: var(--ink);
+               border: 1px solid var(--line); border-radius: 8px;
+               cursor: pointer; }
   #profilePanel { background: var(--surface); border: 1px solid var(--line);
                  border-radius: 6px; padding: 16px 20px;
                  width: min(880px, calc(100% - 24px)); align-self: center;
@@ -321,8 +361,9 @@ _PAGE_TEMPLATE = """\
     #tabBar button.active { background: transparent; color: __HONEY__;
               border: none; }
     #tabBar button svg { width: 24px; height: 24px; }
-    #outputsPanel, #feedPanel, #profilePanel, #usagePanel, #tenantPanel,
-    #approvalPanel, #statusPanel, .tabNote, #adminMenu, #form, #quoteBar {
+    #outputsPanel, #feedPanel, #ideasPanel, #profilePanel, #usagePanel,
+    #tenantPanel, #approvalPanel, #statusPanel, .tabNote, #adminMenu,
+    #form, #quoteBar {
       width: calc(100% - 16px); }
   }
   #tabBar { display: flex; gap: 6px; flex-wrap: nowrap; overflow-x: auto;
@@ -561,9 +602,14 @@ _PAGE_TEMPLATE = """\
   <h2>フィード</h2>
   <div id="feedRows"></div>
 </section>
-<section id="ideasPanel" class="tabNote" hidden>
+<section id="ideasPanel" hidden>
   <h2>アイデア</h2>
-  <p>準備中です。これから、クマからの提案をカードで並べます。</p>
+  <p class="ideasNote">クマからの提案をカードで並べます。提案は「提案をもらう」を押したときだけ考えます。</p>
+  <div class="ideaTools">
+    <button id="ideaGenerate" type="button">提案をもらう</button>
+    <span id="ideaStatus"></span>
+  </div>
+  <div id="ideaRows"></div>
 </section>
 <section id="goalsPanel" class="tabNote" hidden>
   <h2>目標</h2>
@@ -649,14 +695,17 @@ const adminMenu = document.getElementById('adminMenu');
 const feedPanel = document.getElementById('feedPanel');
 const feedRows = document.getElementById('feedRows');
 const ideasPanel = document.getElementById('ideasPanel');
+const ideaRows = document.getElementById('ideaRows');
+const ideaGenerateBtn = document.getElementById('ideaGenerate');
+const ideaStatus = document.getElementById('ideaStatus');
 const goalsPanel = document.getElementById('goalsPanel');
 let activeTab = 'chat';
 let lastApprovals = [];
 
 // タブの切り替え。会話タブだけが会話ログと入力欄を持ち、探すタブは
-// 成果物、フィードタブは能動発信と用事の進み具合の時系列、管理タブは
-// 管理メニューとその配下のパネルを出す。
-// アイデア／目標は器だけで、中身はこれから入れる
+// 成果物、フィードタブは能動発信と用事の進み具合の時系列、アイデア
+// タブは提案カード、管理タブは管理メニューとその配下のパネルを出す。
+// 目標は器だけで、中身はこれから入れる
 function showTab(name) {
   activeTab = name;
   for (const btn of tabBar.querySelectorAll('button')) {
@@ -674,6 +723,7 @@ function showTab(name) {
   feedPanel.hidden = name !== 'feed';
   if (name === 'feed') loadFeed();
   ideasPanel.hidden = name !== 'ideas';
+  if (name === 'ideas') loadIdeas();
   goalsPanel.hidden = name !== 'goals';
   outputsPanel.hidden = name !== 'explore';
   if (name === 'explore') loadOutputs();
@@ -1424,6 +1474,118 @@ async function loadFeed() {
     }
   } catch (e) { /* 一覧が取れなければパネルは空のままにする */ }
 }
+
+// アイデア（クマからの提案カード）。タブを開くたびに /api/ideas で
+// 取り直す。提案の生成は「提案をもらう」ボタンを押したときだけ
+// （/api/ideas/generate）。カードの「やってみる」は用事の一覧への
+// 登録、「やめておく」は一覧から外す（/api/ideas/act）
+function renderIdeas(ideas) {
+  ideaRows.innerHTML = '';
+  if (!ideas.length) {
+    const row = document.createElement('div');
+    row.className = 'ideaRow';
+    row.textContent = 'アイデアはまだありません';
+    ideaRows.appendChild(row);
+    return;
+  }
+  for (const item of ideas) {
+    const card = document.createElement('div');
+    card.className = 'ideaRow';
+    const head = document.createElement('div');
+    head.className = 'ihead';
+    const title = document.createElement('span');
+    title.className = 'ititle';
+    title.textContent = item.title || '';
+    head.appendChild(title);
+    const time = document.createElement('span');
+    time.className = 'itime';
+    time.textContent = item.created_at
+      ? String(item.created_at).replace('T', ' ').slice(0, 16) : '';
+    head.appendChild(time);
+    if (item.status === 'accepted') {
+      const badge = document.createElement('span');
+      badge.className = 'istatus';
+      badge.textContent = '用事にしました';
+      head.appendChild(badge);
+    }
+    card.appendChild(head);
+    const body = document.createElement('div');
+    body.className = 'ibody';
+    body.textContent = item.body || '';
+    card.appendChild(body);
+    if (item.reason) {
+      const reason = document.createElement('div');
+      reason.className = 'ireason';
+      reason.textContent = 'きっかけ: ' + item.reason;
+      card.appendChild(reason);
+    }
+    if (item.status === 'new') {
+      const actions = document.createElement('div');
+      actions.className = 'iactions';
+      const acceptBtn = document.createElement('button');
+      acceptBtn.type = 'button';
+      acceptBtn.textContent = 'やってみる';
+      acceptBtn.addEventListener('click', () => actIdea(item.id, 'accept'));
+      actions.appendChild(acceptBtn);
+      const dismissBtn = document.createElement('button');
+      dismissBtn.type = 'button';
+      dismissBtn.textContent = 'やめておく';
+      dismissBtn.addEventListener('click', () => actIdea(item.id, 'dismiss'));
+      actions.appendChild(dismissBtn);
+      card.appendChild(actions);
+    }
+    ideaRows.appendChild(card);
+  }
+}
+
+async function loadIdeas() {
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser);
+    const res = await fetch('/api/ideas' + query);
+    const data = await res.json();
+    renderIdeas(data.ideas || []);
+  } catch (e) { /* 一覧が取れなければパネルは空のままにする */ }
+}
+
+async function actIdea(id, action) {
+  try {
+    const res = await fetch('/api/ideas/act', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({tenant: currentTenant, user: currentUser,
+                            id: id, action: action}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '操作に失敗しました');
+    renderIdeas(data.ideas || []);
+    ideaStatus.textContent = action === 'accept'
+      ? '用事の一覧に登録しました' : 'やめておきました';
+  } catch (e) {
+    ideaStatus.textContent = '操作に失敗しました: ' + (e.message || e);
+  }
+}
+
+ideaGenerateBtn.addEventListener('click', async () => {
+  ideaGenerateBtn.disabled = true;
+  ideaStatus.textContent = '提案を考えています…';
+  try {
+    const res = await fetch('/api/ideas/generate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({tenant: currentTenant, user: currentUser}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '提案をもらえませんでした');
+    renderIdeas(data.ideas || []);
+    ideaStatus.textContent = data.generation
+      ? (data.generation.message || '') : '';
+  } catch (e) {
+    ideaStatus.textContent = '提案をもらえませんでした: ' + (e.message || e);
+  } finally {
+    ideaGenerateBtn.disabled = false;
+  }
+});
 
 async function loadOutputs() {
   outputRows.innerHTML = '';
@@ -2732,6 +2894,20 @@ def _feed_payload(tenants: TenantStore, tenant: str, user: str,
             "entries": [entry.to_dict() for entry in entries]}
 
 
+def _ideas_payload(tenants: TenantStore, tenant: str, user: str) -> dict:
+    """アイデア API の応答（GET / POST で共通の形）。
+
+    カードはユーザーごとの置き場（ideas.json）にあり、対象は
+    tenant / user で指した組み合わせ。やめておいた（dismissed）
+    カードは出さず、未対応（new）と用事にした（accepted）カードを
+    新しい順に返す。
+    """
+    board = IdeaBoard(user_dir(tenant_dir(tenants.data_dir, tenant), user))
+    ideas = board.list(statuses=VISIBLE_STATUSES)
+    return {"tenant": tenant, "user": user,
+            "ideas": [idea.to_dict() for idea in ideas]}
+
+
 def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     """テナント設定 API の応答（GET / POST で共通の形）。
 
@@ -2992,6 +3168,13 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                     200, _feed_payload(tenants, tenant, user,
                                        _first(query.get("limit")),
                                        _first(query.get("kind"))))
+            elif split.path == "/api/ideas":
+                tenant = normalize_tenant_name(
+                    _first(query.get("tenant")) or tenants.default_tenant)
+                user = normalize_user_name(
+                    _first(query.get("user")) or tenants.default_user)
+                self._send_json(
+                    200, _ideas_payload(tenants, tenant, user))
             elif split.path == "/api/usage":
                 tenant = normalize_tenant_name(
                     _first(query.get("tenant")) or tenants.default_tenant)
@@ -3218,6 +3401,12 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 return
             if path == "/api/reactions":
                 self._toggle_reaction()
+                return
+            if path == "/api/ideas/generate":
+                self._generate_ideas()
+                return
+            if path == "/api/ideas/act":
+                self._act_idea()
                 return
             if path != "/api/chat":
                 self._send_json(404, {"error": "not found"})
@@ -3549,6 +3738,70 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 if "rid" in payload and "user_rid" in payload:
                     break
             self._send_json(200, payload)
+
+        def _generate_ideas(self) -> None:
+            """アイデアの提案を生成する（POST /api/ideas/generate）。
+
+            押されたときだけ、その利用者の文脈（進行中の用事・最近の
+            フィード・プロフィール）を材料に、委任の子へ提案を考え
+            させてカードとして保存する。親セッションはその組み合わせ
+            の main を使う。応答は一覧（_ideas_payload）に、生成の
+            結果（作られた件数と利用者向けの説明）を generation と
+            して添えたもの。提案が無い・失敗のときも 200 で返し、
+            画面が generation.message で利用者へ伝えられるようにする。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            tenant = normalize_tenant_name(
+                data.get("tenant") or tenants.default_tenant)
+            user = normalize_user_name(
+                data.get("user") or tenants.default_user)
+            session = tenants.store(tenant, user).get(None)
+            target_dir = user_dir(tenant_dir(tenants.data_dir, tenant), user)
+            result = generate_ideas(session, target_dir)
+            payload = _ideas_payload(tenants, tenant, user)
+            payload["generation"] = {
+                "outcome": result.outcome,
+                "message": result.message,
+                "created": len(result.ideas),
+            }
+            self._send_json(200, payload)
+
+        def _act_idea(self) -> None:
+            """アイデアカードへの操作（POST /api/ideas/act）。
+
+            本文は tenant / user / id / action。action は accept
+            （やってみる: 用事の一覧へ登録して accepted に、二度押し
+            でも二重登録しない）か dismiss（やめておく: dismissed に
+            して一覧から外す）。対象のカードが無ければ 404、それ
+            以外の action は 400。応答は操作後の一覧。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            tenant = normalize_tenant_name(
+                data.get("tenant") or tenants.default_tenant)
+            user = normalize_user_name(
+                data.get("user") or tenants.default_user)
+            idea_id = data.get("id")
+            action = data.get("action")
+            if not isinstance(idea_id, str) or not idea_id:
+                self._send_json(400, {"error": "id を指定してください"})
+                return
+            if action not in ("accept", "dismiss"):
+                self._send_json(400, {
+                    "error": "action は accept か dismiss で指定してください"})
+                return
+            target_dir = user_dir(tenant_dir(tenants.data_dir, tenant), user)
+            handled = (accept_idea(target_dir, idea_id) if action == "accept"
+                       else dismiss_idea(target_dir, idea_id))
+            if handled is None:
+                self._send_json(404, {"error": "アイデアが見つかりません"})
+                return
+            self._send_json(200, _ideas_payload(tenants, tenant, user))
 
         def _toggle_reaction(self) -> None:
             """発話へのリアクションを付け外しする。
