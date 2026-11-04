@@ -449,6 +449,16 @@ class Memory:
         """
         return self.conversations_dir / f"{self.session_id}.reactions.json"
 
+    @property
+    def agent_reactions_file(self) -> Path:
+        """クマ（相棒）自身のリアクションの保存ファイル。
+
+        利用者のリアクションとは別のファイルに置く。利用者側の
+        ファイルだけを読む・直す処理の影響を受けず、混ざらない。
+        キーは記録での位置で、値は絵文字1つ。
+        """
+        return self.conversations_dir / f"{self.session_id}.agent-reactions.json"
+
     def load_long_term(self) -> str:
         if self.memory_file.exists():
             return self.memory_file.read_text(encoding="utf-8")
@@ -537,13 +547,57 @@ class Memory:
                 reactions[index] = emojis
         return reactions
 
+    def load_agent_reactions(self) -> dict[int, str]:
+        """クマのリアクションを {記録の位置: 絵文字} で返す。
+
+        壊れた内容や許可外の絵文字は読み飛ばす（表示側を壊さない）。
+        """
+        if not self.agent_reactions_file.exists():
+            return {}
+        try:
+            raw = json.loads(
+                self.agent_reactions_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        reactions: dict[int, str] = {}
+        if not isinstance(raw, dict):
+            return reactions
+        for key, value in raw.items():
+            try:
+                index = int(key)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(value, str) and value in REACTION_EMOJIS:
+                reactions[index] = value
+        return reactions
+
+    def _sync_agent_reaction(self, record_index: int,
+                             current: list[str]) -> None:
+        """クマのリアクションを利用者の並びに追従させる（リアクション返し）。
+
+        クマの分は、その発話に利用者のリアクションが1つ以上ある
+        間だけ存在し、内容は最後に付けられた利用者の絵文字と同じ
+        ものにする。全部外れたらクマの分も消える。
+        """
+        agent = self.load_agent_reactions()
+        if current:
+            agent[record_index] = current[-1]
+        else:
+            agent.pop(record_index, None)
+        self.conversations_dir.mkdir(parents=True, exist_ok=True)
+        payload = {str(k): v for k, v in sorted(agent.items())}
+        self.agent_reactions_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=1) + "\n",
+            encoding="utf-8")
+
     def toggle_reaction(self, record_index: int, emoji: str) -> list[str]:
         """1 発話へのリアクションを付け外しし、その発話の現在値を返す。
 
         絵文字は REACTION_EMOJIS の範囲だけを受け付ける。宛先は
         user / assistant のレコードに限る。どちらも満たさなければ
         ValueError。保存はキー（位置の文字列）→絵文字の並びで、
-        空になった発話のキーは残さない。
+        空になった発話のキーは残さない。あわせてクマのリアクション
+        も追従させる（_sync_agent_reaction）。
         """
         if emoji not in REACTION_EMOJIS:
             raise ValueError("使えない絵文字です")
@@ -567,6 +621,7 @@ class Memory:
         self.reactions_file.write_text(
             json.dumps(payload, ensure_ascii=False, indent=1) + "\n",
             encoding="utf-8")
+        self._sync_agent_reaction(record_index, current)
         return current
 
     def append_summary(self, content: str) -> None:

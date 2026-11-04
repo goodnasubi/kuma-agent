@@ -24,6 +24,7 @@ tasks.json に置く。
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -550,6 +551,31 @@ class Session:
         reply = self._call_model(_SUMMARY_SYSTEM, [prompt], [])
         return reply.content.strip()
 
+    def _with_reaction_notes(self, messages: list[Message]) -> list[Message]:
+        """モデルへ渡す直前に、リアクションの注記を付けた写しを返す。
+
+        利用者が付けたリアクションは、会話記録（JSONL）にも履歴の
+        発話そのものにも混ぜず、モデルへの入力を作るこの一点でのみ
+        「（この発話に利用者が❤️を付けた）」の注記として添える。
+        履歴表示（/api/history は履歴の発話を読む）には出ない。
+        リアクションの付いていない発話はそのまま（写しを作らない）。
+        """
+        reactions = self.memory.load_reactions()
+        if not reactions:
+            return messages
+        annotated: list[Message] = []
+        for msg in messages:
+            emojis = (reactions.get(msg.record_index)
+                      if msg.record_index is not None else None)
+            if emojis and msg.role in ("user", "assistant"):
+                note = ("（この発話に利用者が"
+                        + "と".join(emojis) + "を付けた）")
+                annotated.append(
+                    replace(msg, content=msg.content + "\n" + note))
+            else:
+                annotated.append(msg)
+        return annotated
+
     def _call_model(self, system_prompt: str, messages: list[Message],
                     tools: list[dict]) -> Message:
         """モデルを 1 回呼び、使用量を記録してから応答を返す。
@@ -560,7 +586,8 @@ class Session:
         記録は応答のたび（道具の往復で複数回呼ぶ場合は呼び出し
         ごと）に行い、失敗しても会話には影響しない。
         """
-        reply = self.model.chat(system_prompt, messages, tools)
+        reply = self.model.chat(
+            system_prompt, self._with_reaction_notes(messages), tools)
         record_usage(self.cfg.user_data_dir, self.cfg.provider,
                      _model_name(self.model),
                      getattr(reply, "usage", None), self.session_id)

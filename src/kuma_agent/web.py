@@ -271,6 +271,11 @@ _PAGE_TEMPLATE = """\
             background: var(--quote-bg); color: var(--ink);
             border: 1px solid var(--line); border-radius: 8px;
             cursor: pointer; }
+  .reactionChip.agentChip { display: inline-flex; align-items: center;
+            gap: 3px; border-color: __HONEY__; cursor: default; }
+  .reactionChip.agentChip .agentMark { display: inline-flex; }
+  .reactionChip.agentChip .agentMark svg { width: 14px; height: 14px;
+            display: block; }
   #reactionPalette { position: fixed; z-index: 60; display: flex; gap: 2px;
             background: var(--surface); border: 1px solid var(--line);
             border-radius: 8px; padding: 6px;
@@ -701,7 +706,7 @@ function clearQuote() {
 clearQuoteBtn.addEventListener('click', clearQuote);
 
 function addMsg(role, text, quote = null, quoteSource = null,
-                rid = null, reactions = []) {
+                rid = null, reactions = [], agentReaction = null) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
   if (quote) {
@@ -732,7 +737,7 @@ function addMsg(role, text, quote = null, quoteSource = null,
   }
   div.appendChild(actions);
   if (rid !== null && rid !== undefined) {
-    attachReactions(div, rid, reactions);
+    attachReactions(div, rid, reactions, agentReaction);
   }
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
@@ -744,7 +749,7 @@ function addMsg(role, text, quote = null, quoteSource = null,
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '🎉', '🙏'];
 let reactionPalette = null;
 
-function renderReactionChips(box, rid, reactions) {
+function renderReactionChips(box, rid, reactions, agentReaction) {
   box.innerHTML = '';
   for (const emoji of reactions) {
     const chip = document.createElement('button');
@@ -756,10 +761,25 @@ function renderReactionChips(box, rid, reactions) {
     chip.addEventListener('click', () => toggleReaction(rid, emoji, box));
     box.appendChild(chip);
   }
-  box.hidden = reactions.length === 0;
+  if (agentReaction) {
+    // クマのリアクション返し。アバターの印とブランド色の縁取りで
+    // 利用者のチップと見分けられるようにし、クリックでは外れない
+    const chip = document.createElement('span');
+    chip.className = 'reactionChip agentChip';
+    chip.title = 'クマのリアクション';
+    chip.setAttribute('aria-label', 'クマのリアクション ' + agentReaction);
+    const mark = document.createElement('span');
+    mark.className = 'agentMark';
+    const avatarSvg = document.querySelector('#avatarBtn svg');
+    if (avatarSvg) mark.appendChild(avatarSvg.cloneNode(true));
+    chip.appendChild(mark);
+    chip.appendChild(document.createTextNode(agentReaction));
+    box.appendChild(chip);
+  }
+  box.hidden = reactions.length === 0 && !agentReaction;
 }
 
-function attachReactions(div, rid, reactions) {
+function attachReactions(div, rid, reactions, agentReaction) {
   let row = div.querySelector('.msgActions');
   if (!row) {
     row = document.createElement('div');
@@ -779,7 +799,7 @@ function attachReactions(div, rid, reactions) {
   box.className = 'reactions';
   row.appendChild(box);
   div._reactionBox = box;
-  renderReactionChips(box, rid, reactions || []);
+  renderReactionChips(box, rid, reactions || [], agentReaction || null);
 }
 
 function openReactionPalette(anchor, div, rid) {
@@ -828,7 +848,8 @@ async function toggleReaction(rid, emoji, box) {
     });
     if (!res.ok) throw new Error('reaction failed');
     const data = await res.json();
-    if (box) renderReactionChips(box, rid, data.reactions || []);
+    if (box) renderReactionChips(box, rid, data.reactions || [],
+                                 data.agent_reaction || null);
   } catch (e) { /* 付け外しに失敗したら表示はそのままにする */ }
 }
 
@@ -885,7 +906,8 @@ async function loadHistory() {
       if ((m.role === 'user' || m.role === 'assistant') && (m.content || m.attachments)) {
         const shown = describe(m.content, m.attachments);
         addMsg(m.role, shown, m.quote || null, m.content || shown,
-               (m.rid === undefined ? null : m.rid), m.reactions || []);
+               (m.rid === undefined ? null : m.rid), m.reactions || [],
+               m.agent_reaction || null);
       }
     }
   } catch (e) { /* 履歴が取れなくても会話は続けられる */ }
@@ -2894,6 +2916,7 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                                       _first(query.get("user")))
                 session = store.get(_first(query.get("session")))
                 reactions = session.memory.load_reactions()
+                agent_reactions = session.memory.load_agent_reactions()
                 messages = []
                 for m in session.history:
                     entry: dict = {"role": m.role, "content": m.content}
@@ -2907,6 +2930,9 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                         entry["rid"] = m.record_index
                         if reactions.get(m.record_index):
                             entry["reactions"] = reactions[m.record_index]
+                        if agent_reactions.get(m.record_index):
+                            entry["agent_reaction"] = \
+                                agent_reactions[m.record_index]
                     messages.append(entry)
                 self._send_json(200, {"messages": messages})
             else:
@@ -3434,6 +3460,9 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             本文は tenant / user / session / rid（会話記録での位置）/
             emoji。付け外しと検証（使える絵文字・宛先の発話）は
             Memory.toggle_reaction が担い、その発話の最新の並びを返す。
+            応答にはクマのリアクション（リアクション返し、変化後。
+            無ければ null）も含め、画面が再読み込みなしで反映できる
+            ようにする。
             """
             data = self._read_json_body()
             if data is None:
@@ -3450,10 +3479,12 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             with lock:  # 記録の読み書きを直列化する
                 try:
                     current = session.memory.toggle_reaction(rid, emoji)
+                    agent = session.memory.load_agent_reactions().get(rid)
                 except ValueError as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
-            self._send_json(200, {"rid": rid, "reactions": current})
+            self._send_json(200, {"rid": rid, "reactions": current,
+                                  "agent_reaction": agent})
 
     return Handler
 

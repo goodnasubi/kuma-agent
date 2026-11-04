@@ -105,17 +105,25 @@ def test_reactions_over_http(tmp_path):
         status, data = _post(base, "/api/reactions",
                              {"rid": chat["rid"], "emoji": "🎉"})
         assert status == 200
-        assert data == {"rid": 1, "reactions": ["🎉"]}
+        assert data == {"rid": 1, "reactions": ["🎉"],
+                        "agent_reaction": "🎉"}
 
         history = _get(base, "/api/history")
         by_rid = {m["rid"]: m for m in history["messages"] if "rid" in m}
         assert by_rid[1]["reactions"] == ["🎉"]
+        assert by_rid[1]["agent_reaction"] == "🎉"
         assert "reactions" not in by_rid[0]
+        assert "agent_reaction" not in by_rid[0]
 
         status, data = _post(base, "/api/reactions",
                              {"rid": chat["rid"], "emoji": "🎉"})
         assert status == 200
         assert data["reactions"] == []
+        assert data["agent_reaction"] is None
+
+        history = _get(base, "/api/history")
+        by_rid = {m["rid"]: m for m in history["messages"] if "rid" in m}
+        assert "agent_reaction" not in by_rid[1]
 
         status, _ = _post(base, "/api/reactions",
                           {"rid": chat["rid"], "emoji": "🔥"})
@@ -129,3 +137,53 @@ def test_render_page_has_reaction_ui():
     page = render_page("muse")
     assert "reactionPalette" in page
     assert "👍" in page and "🙏" in page
+    assert "agentChip" in page  # クマのリアクション返しのチップ
+
+
+def test_agent_reaction_follows_user_reactions(tmp_path):
+    """クマの分は利用者の最後の絵文字に追従し、全部外れたら消える。"""
+    mem = _memory(tmp_path)
+    mem.toggle_reaction(1, "👍")
+    assert mem.load_agent_reactions() == {1: "👍"}
+    mem.toggle_reaction(1, "❤️")
+    assert mem.load_agent_reactions() == {1: "❤️"}
+    mem.toggle_reaction(1, "❤️")  # 最後のものを外すと残りに戻る
+    assert mem.load_agent_reactions() == {1: "👍"}
+    # 別ファイルに保存され、読み直しても残る
+    agent_file = tmp_path / "conversations" / "room1.agent-reactions.json"
+    assert json.loads(agent_file.read_text(encoding="utf-8")) == {"1": "👍"}
+    assert Memory(tmp_path, "room1").load_agent_reactions() == {1: "👍"}
+    mem.toggle_reaction(1, "👍")  # 全部外すとクマの分も消える
+    assert mem.load_agent_reactions() == {}
+    # 外したとき（利用者の分が無い操作）は付け直されない
+    mem.toggle_reaction(0, "🙏")  # 利用者自身の発話にも返る
+    assert mem.load_agent_reactions() == {0: "🙏"}
+
+
+class _CaptureModel:
+    """モデルへ渡った発話を記録するスタブ。"""
+
+    def __init__(self):
+        self.seen: list[Message] = []
+
+    def chat(self, system_prompt, messages, tools):
+        self.seen = list(messages)
+        return Message("assistant", "了解です")
+
+
+def test_reaction_note_reaches_model_context_only(tmp_path):
+    """リアクションの注記はモデルへの入力にだけ入り、記録と履歴には残らない。"""
+    cfg = Config(data_dir=tmp_path)
+    model = _CaptureModel()
+    session = Session(cfg, model)
+    session.say("やあ")
+    session.memory.toggle_reaction(1, "❤️")
+    session.say("つづき")
+    by_rid = {m.record_index: m for m in model.seen
+              if m.record_index is not None}
+    assert "（この発話に利用者が❤️を付けた）" in by_rid[1].content
+    assert "付けた" not in by_rid[0].content
+    # 履歴の発話そのものと会話記録には注記が混ざらない
+    assert all("付けた" not in m.content for m in session.history)
+    turns = session.memory.load_turns()
+    assert all("付けた" not in str(t["content"]) for t in turns)
