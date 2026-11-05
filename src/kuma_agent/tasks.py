@@ -103,6 +103,10 @@ class Task:
     remind_at: str = ""
     # 通知済み時刻。空文字列は未通知。通知は 1 回だけにするために持つ
     reminded_at: str = ""
+    # 紐づいた目標の ID（goals.py）。空文字列は未設定。目標タブの
+    # 画面からのみ付け外しし、目標の進み具合の算出に使う。旧データ
+    # にはこのキーが無いので、その場合は未設定として読む
+    goal_id: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -114,6 +118,7 @@ class Task:
             "updated_at": self.updated_at,
             "remind_at": self.remind_at,
             "reminded_at": self.reminded_at,
+            "goal_id": self.goal_id,
         }
 
     @classmethod
@@ -143,6 +148,7 @@ class Task:
             updated_at=str(record.get("updated_at") or _now()),
             remind_at=str(record.get("remind_at") or ""),
             reminded_at=str(record.get("reminded_at") or ""),
+            goal_id=str(record.get("goal_id") or ""),
         )
 
 
@@ -277,12 +283,18 @@ class TaskBoard:
 
     def update(self, task_id: str, memo: str | None = None,
                status: str | None = None,
-               remind_at: str | None = None) -> Task | None:
-        """メモや状態、通知時刻を更新して保存する。対象がなければ None。
+               remind_at: str | None = None,
+               goal_id: str | None = None) -> Task | None:
+        """メモや状態、通知時刻、目標への紐づけを更新して保存する。
+
+        対象がなければ None。
 
         remind_at は None なら変更せず、文字列ならその時刻に設定し、
         空文字列なら通知時刻を取り消す。通知時刻が実際に変わったら
         通知済みの印は消す（新しい時刻で改めて通知できるように）。
+        goal_id は None なら変更せず、文字列ならその目標へ紐づけ、
+        空文字列なら紐づけを外す。紐づけだけの変更は用事自体の
+        進み具合ではないので、フィードには残さない。
         """
         if remind_at is not None:
             _check_remind_at(remind_at)
@@ -301,6 +313,8 @@ class TaskBoard:
         if remind_at is not None and remind_at != task.remind_at:
             task.remind_at = remind_at
             task.reminded_at = ""
+        if goal_id is not None:
+            task.goal_id = goal_id
         task.updated_at = _now()
         self._save()
         note = _describe_task_updated(task, old_status, old_memo,
@@ -338,6 +352,10 @@ class TaskBoard:
     def open_tasks(self) -> list[Task]:
         """進行中（open）の用事の一覧。"""
         return self.list(STATUS_OPEN)
+
+    def list_for_goal(self, goal_id: str) -> list[Task]:
+        """その目標に紐づいた用事の一覧（目標の進み具合の算出用）。"""
+        return [t for t in self.list() if t.goal_id == goal_id]
 
     def prune_done_before(self, cutoff: datetime, *,
                           dry_run: bool = False) -> int:

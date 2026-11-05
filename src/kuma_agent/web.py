@@ -32,6 +32,13 @@ from .export import (
     save_tenant_backup,
 )
 from .feed import load_feed_entries
+from .goals import (
+    GoalBoard,
+    delete_goal,
+    goal_view,
+    link_task,
+    unlink_task,
+)
 from .ideas import (
     VISIBLE_STATUSES,
     IdeaBoard,
@@ -72,6 +79,7 @@ from .proactive import combine_notifiers, run_sweep
 from .profile_files import read_profile_file, save_profile_file
 from .restore import restore_user_data
 from .session import Session
+from .tasks import TaskBoard
 from .telegram import build_proactive_notifier
 from .telegram import start_polling_thread as start_telegram_polling
 from .settings import (
@@ -266,6 +274,54 @@ _PAGE_TEMPLATE = """\
                background: var(--surface); color: var(--ink);
                border: 1px solid var(--line); border-radius: 8px;
                cursor: pointer; }
+  #goalsPanel { background: var(--surface); border: 1px solid var(--line);
+                 border-radius: 6px; padding: 16px 20px;
+                 width: min(880px, calc(100% - 24px)); align-self: center;
+                 margin-top: 12px; }
+  #goalsPanel[hidden] { display: none; }
+  #goalsPanel h2 { font-size: 15px; margin: 0 0 8px; }
+  #goalsPanel h3 { font-size: 14px; margin: 16px 0 6px;
+               border-top: 1px solid var(--line); padding-top: 12px; }
+  #goalsPanel .goalsNote { font-size: 13px; margin: 0 0 10px; }
+  #goalStatus { font-size: 13px; margin: 8px 0 0; }
+  .goalRow { padding: 10px 0; border-top: 1px dashed var(--line);
+               font-size: 14px; }
+  .goalRow .ghead { display: flex; flex-wrap: wrap; gap: 8px;
+               align-items: center; }
+  .goalRow .gtitle { font-weight: bold; }
+  .goalRow.done .gtitle { opacity: .7; }
+  .goalRow .gtime { opacity: .85; font-size: 13px; }
+  .goalRow .gstatus { padding: 1px 9px; font-size: 12px; line-height: 1.6;
+               background: var(--quote-bg); color: var(--ink);
+               border: 1px solid var(--line); border-radius: 8px;
+               white-space: nowrap; }
+  .goalRow .gstatus.done { border-color: __HONEY__; font-weight: bold; }
+  .goalRow .gdesc { white-space: pre-wrap; word-break: break-word;
+               line-height: 1.55; margin-top: 4px; }
+  .goalRow .gprogress { margin-top: 8px; font-size: 13px; }
+  .goalRow .gbar { height: 8px; background: var(--quote-bg);
+               border: 1px solid var(--line); border-radius: 4px;
+               margin-top: 4px; overflow: hidden; }
+  .goalRow .gbarFill { height: 100%; background: __HONEY__; }
+  .goalRow .gtasks, .goalRow .gnotes { margin-top: 8px; font-size: 13px; }
+  .goalRow .gtask, .goalRow .gnote { display: flex; flex-wrap: wrap;
+               gap: 8px; align-items: center; padding: 3px 0; }
+  .goalRow .gtask .tstate { opacity: .85; }
+  .goalRow .gnote .ntime { opacity: .85; }
+  .goalRow .gnote .nbody { white-space: pre-wrap; word-break: break-word; }
+  .goalRow .gtools { display: flex; flex-wrap: wrap; gap: 8px;
+               align-items: center; margin-top: 8px; }
+  .goalRow button, .goalNew button { padding: 5px 14px; font-size: 13px;
+               background: var(--surface); color: var(--ink);
+               border: 1px solid var(--line); border-radius: 8px;
+               cursor: pointer; }
+  .goalRow input, .goalRow select, .goalNew input { padding: 5px 8px;
+               font-size: 13px; background: var(--surface);
+               color: var(--ink); border: 1px solid var(--line);
+               border-radius: 8px; }
+  .goalRow .gedit { display: flex; flex-wrap: wrap; gap: 8px;
+               align-items: center; margin-top: 8px; }
+  .goalNew { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   #profilePanel { background: var(--surface); border: 1px solid var(--line);
                  border-radius: 6px; padding: 16px 20px;
                  width: min(880px, calc(100% - 24px)); align-self: center;
@@ -361,8 +417,9 @@ _PAGE_TEMPLATE = """\
     #tabBar button.active { background: transparent; color: __HONEY__;
               border: none; }
     #tabBar button svg { width: 24px; height: 24px; }
-    #outputsPanel, #feedPanel, #ideasPanel, #profilePanel, #usagePanel,
-    #tenantPanel, #approvalPanel, #statusPanel, .tabNote, #adminMenu,
+    #outputsPanel, #feedPanel, #ideasPanel, #goalsPanel, #profilePanel,
+    #usagePanel, #tenantPanel, #approvalPanel, #statusPanel, .tabNote,
+    #adminMenu,
     #form, #quoteBar {
       width: calc(100% - 16px); }
   }
@@ -611,9 +668,17 @@ _PAGE_TEMPLATE = """\
   </div>
   <div id="ideaRows"></div>
 </section>
-<section id="goalsPanel" class="tabNote" hidden>
+<section id="goalsPanel" hidden>
   <h2>目標</h2>
-  <p>準備中です。これから、長期の目標と進捗をここに残せるようにします。</p>
+  <p class="goalsNote">長期の目標と進捗を残します。進み具合は、紐づけた用事の完了割合で自動で出ます。</p>
+  <div id="goalRows"></div>
+  <h3>目標を立てる</h3>
+  <div class="goalNew">
+    <input id="goalNewTitle" placeholder="目標のタイトル" size="24">
+    <input id="goalNewDesc" placeholder="ひとこと説明（任意）" size="24">
+    <button id="goalCreate" type="button">追加する</button>
+  </div>
+  <p id="goalStatus"></p>
 </section>
 <section id="approvalPanel" hidden>
   <h2>承認の確認</h2>
@@ -699,13 +764,18 @@ const ideaRows = document.getElementById('ideaRows');
 const ideaGenerateBtn = document.getElementById('ideaGenerate');
 const ideaStatus = document.getElementById('ideaStatus');
 const goalsPanel = document.getElementById('goalsPanel');
+const goalRows = document.getElementById('goalRows');
+const goalNewTitle = document.getElementById('goalNewTitle');
+const goalNewDesc = document.getElementById('goalNewDesc');
+const goalCreateBtn = document.getElementById('goalCreate');
+const goalStatus = document.getElementById('goalStatus');
 let activeTab = 'chat';
 let lastApprovals = [];
 
 // タブの切り替え。会話タブだけが会話ログと入力欄を持ち、探すタブは
 // 成果物、フィードタブは能動発信と用事の進み具合の時系列、アイデア
-// タブは提案カード、管理タブは管理メニューとその配下のパネルを出す。
-// 目標は器だけで、中身はこれから入れる
+// タブは提案カード、目標タブは長期の目標と進捗、管理タブは管理
+// メニューとその配下のパネルを出す
 function showTab(name) {
   activeTab = name;
   for (const btn of tabBar.querySelectorAll('button')) {
@@ -725,6 +795,7 @@ function showTab(name) {
   ideasPanel.hidden = name !== 'ideas';
   if (name === 'ideas') loadIdeas();
   goalsPanel.hidden = name !== 'goals';
+  if (name === 'goals') loadGoals();
   outputsPanel.hidden = name !== 'explore';
   if (name === 'explore') loadOutputs();
   adminMenu.hidden = name !== 'admin';
@@ -1585,6 +1656,241 @@ ideaGenerateBtn.addEventListener('click', async () => {
   } finally {
     ideaGenerateBtn.disabled = false;
   }
+});
+
+// 目標（長期の目標と進捗）。タブを開くたびに /api/goals で取り直す。
+// 進み具合は紐づけた用事の完了割合。追加・編集・メモの追加・用事の
+// 紐づけ／解除・削除は /api/goals/act で行い、応答の一覧で画面を
+// 描き直す
+function goalAction(payload, doneMessage) {
+  return fetch('/api/goals/act', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(Object.assign(
+      {tenant: currentTenant, user: currentUser}, payload)),
+  }).then(async (res) => {
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '操作に失敗しました');
+    renderGoals(data);
+    goalStatus.textContent = doneMessage || '';
+    return true;
+  }).catch((e) => {
+    goalStatus.textContent = '操作に失敗しました: ' + (e.message || e);
+    return false;
+  });
+}
+
+function renderGoals(data) {
+  const goals = data.goals || [];
+  const allTasks = data.tasks || [];
+  goalRows.innerHTML = '';
+  if (!goals.length) {
+    const row = document.createElement('div');
+    row.className = 'goalRow';
+    row.textContent = '目標はまだありません';
+    goalRows.appendChild(row);
+    return;
+  }
+  for (const goal of goals) renderGoal(goal, allTasks);
+}
+
+function renderGoal(goal, allTasks) {
+  const card = document.createElement('div');
+  card.className = 'goalRow' + (goal.status === 'done' ? ' done' : '');
+  const head = document.createElement('div');
+  head.className = 'ghead';
+  const title = document.createElement('span');
+  title.className = 'gtitle';
+  title.textContent = goal.title || '';
+  head.appendChild(title);
+  const badge = document.createElement('span');
+  badge.className = 'gstatus' + (goal.status === 'done' ? ' done' : '');
+  badge.textContent = goal.status === 'done' ? '達成' : '進行中';
+  head.appendChild(badge);
+  const time = document.createElement('span');
+  time.className = 'gtime';
+  time.textContent = goal.created_at
+    ? String(goal.created_at).replace('T', ' ').slice(0, 16) : '';
+  head.appendChild(time);
+  card.appendChild(head);
+  if (goal.description) {
+    const desc = document.createElement('div');
+    desc.className = 'gdesc';
+    desc.textContent = goal.description;
+    card.appendChild(desc);
+  }
+  // 進み具合（紐づけた用事の完了割合。用事が無ければ割合なし）
+  const progress = document.createElement('div');
+  progress.className = 'gprogress';
+  const p = goal.progress || {total: 0, done: 0, ratio: null};
+  if (p.total > 0) {
+    const pct = Math.round((p.ratio || 0) * 100);
+    progress.textContent = '進み具合: 用事 ' + p.total + ' 件中 '
+      + p.done + ' 件が完了（' + pct + '%）';
+    const bar = document.createElement('div');
+    bar.className = 'gbar';
+    const fill = document.createElement('div');
+    fill.className = 'gbarFill';
+    fill.style.width = pct + '%';
+    bar.appendChild(fill);
+    card.appendChild(progress);
+    card.appendChild(bar);
+  } else {
+    progress.textContent = '進み具合: 用事がまだ紐づいていません';
+    card.appendChild(progress);
+  }
+  // 紐づいた用事
+  const tasksBox = document.createElement('div');
+  tasksBox.className = 'gtasks';
+  for (const task of goal.tasks || []) {
+    const row = document.createElement('div');
+    row.className = 'gtask';
+    const tTitle = document.createElement('span');
+    tTitle.textContent = task.title || '';
+    row.appendChild(tTitle);
+    const tState = document.createElement('span');
+    tState.className = 'tstate';
+    tState.textContent = task.status === 'done' ? '完了' : '進行中';
+    row.appendChild(tState);
+    const unBtn = document.createElement('button');
+    unBtn.type = 'button';
+    unBtn.textContent = '紐づけを外す';
+    unBtn.addEventListener('click', () => goalAction(
+      {action: 'unlink', task_id: task.id}, '紐づけを外しました'));
+    row.appendChild(unBtn);
+    tasksBox.appendChild(row);
+  }
+  // 紐づけの選択肢（この目標にまだ紐づいていない用事から選ぶ）
+  const candidates = allTasks.filter((t) => t.goal_id !== goal.id);
+  if (candidates.length) {
+    const row = document.createElement('div');
+    row.className = 'gtask';
+    const select = document.createElement('select');
+    for (const task of candidates) {
+      const opt = document.createElement('option');
+      opt.value = task.id;
+      opt.textContent = task.title
+        + (task.goal_id ? '（別の目標に紐づけ中）' : '');
+      select.appendChild(opt);
+    }
+    row.appendChild(select);
+    const linkBtn = document.createElement('button');
+    linkBtn.type = 'button';
+    linkBtn.textContent = 'この用事を紐づける';
+    linkBtn.addEventListener('click', () => goalAction(
+      {action: 'link', id: goal.id, task_id: select.value},
+      '用事を紐づけました'));
+    row.appendChild(linkBtn);
+    tasksBox.appendChild(row);
+  }
+  card.appendChild(tasksBox);
+  // 進捗メモ（新しい順）
+  const notesBox = document.createElement('div');
+  notesBox.className = 'gnotes';
+  for (const note of goal.notes || []) {
+    const row = document.createElement('div');
+    row.className = 'gnote';
+    const nTime = document.createElement('span');
+    nTime.className = 'ntime';
+    nTime.textContent = note.ts
+      ? String(note.ts).replace('T', ' ').slice(0, 16) : '';
+    row.appendChild(nTime);
+    const nBody = document.createElement('span');
+    nBody.className = 'nbody';
+    nBody.textContent = note.body || '';
+    row.appendChild(nBody);
+    notesBox.appendChild(row);
+  }
+  const noteRow = document.createElement('div');
+  noteRow.className = 'gnote';
+  const noteInput = document.createElement('input');
+  noteInput.placeholder = '進捗メモ';
+  noteInput.size = 28;
+  noteRow.appendChild(noteInput);
+  const noteBtn = document.createElement('button');
+  noteBtn.type = 'button';
+  noteBtn.textContent = 'メモを残す';
+  noteBtn.addEventListener('click', () => {
+    if (!noteInput.value.trim()) return;
+    goalAction({action: 'note', id: goal.id, body: noteInput.value},
+               'メモを残しました');
+  });
+  noteRow.appendChild(noteBtn);
+  notesBox.appendChild(noteRow);
+  card.appendChild(notesBox);
+  // 編集・削除
+  const tools = document.createElement('div');
+  tools.className = 'gtools';
+  const editBox = document.createElement('div');
+  editBox.className = 'gedit';
+  editBox.hidden = true;
+  const titleInput = document.createElement('input');
+  titleInput.value = goal.title || '';
+  titleInput.size = 20;
+  editBox.appendChild(titleInput);
+  const descInput = document.createElement('input');
+  descInput.value = goal.description || '';
+  descInput.placeholder = 'ひとこと説明（任意）';
+  descInput.size = 20;
+  editBox.appendChild(descInput);
+  const statusSelect = document.createElement('select');
+  for (const [value, label] of [['active', '進行中'], ['done', '達成']]) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    if (goal.status === value) opt.selected = true;
+    statusSelect.appendChild(opt);
+  }
+  editBox.appendChild(statusSelect);
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.textContent = '保存する';
+  saveBtn.addEventListener('click', () => goalAction(
+    {action: 'update', id: goal.id, title: titleInput.value,
+     description: descInput.value, status: statusSelect.value},
+    '目標を更新しました'));
+  editBox.appendChild(saveBtn);
+  const editBtn = document.createElement('button');
+  editBtn.type = 'button';
+  editBtn.textContent = '編集';
+  editBtn.addEventListener('click', () => { editBox.hidden = !editBox.hidden; });
+  tools.appendChild(editBtn);
+  const deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
+  deleteBtn.textContent = '削除';
+  deleteBtn.addEventListener('click', () => {
+    if (!window.confirm('目標「' + (goal.title || '')
+        + '」を削除します。紐づけた用事は残ります。よろしいですか？')) {
+      return;
+    }
+    goalAction({action: 'delete', id: goal.id}, '目標を削除しました');
+  });
+  tools.appendChild(deleteBtn);
+  card.appendChild(tools);
+  card.appendChild(editBox);
+  goalRows.appendChild(card);
+}
+
+async function loadGoals() {
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser);
+    const res = await fetch('/api/goals' + query);
+    const data = await res.json();
+    renderGoals(data);
+  } catch (e) { /* 一覧が取れなければパネルは空のままにする */ }
+}
+
+goalCreateBtn.addEventListener('click', () => {
+  if (!goalNewTitle.value.trim()) {
+    goalStatus.textContent = 'タイトルを入力してください';
+    return;
+  }
+  goalAction({action: 'create', title: goalNewTitle.value,
+              description: goalNewDesc.value}, '目標を追加しました')
+    .then((ok) => {
+      if (ok) { goalNewTitle.value = ''; goalNewDesc.value = ''; }
+    });
 });
 
 async function loadOutputs() {
@@ -2908,6 +3214,24 @@ def _ideas_payload(tenants: TenantStore, tenant: str, user: str) -> dict:
             "ideas": [idea.to_dict() for idea in ideas]}
 
 
+def _goals_payload(tenants: TenantStore, tenant: str, user: str) -> dict:
+    """目標 API の応答（GET / POST で共通の形）。
+
+    目標はユーザーごとの置き場（goals.json）にあり、対象は
+    tenant / user で指した組み合わせ。各目標には進み具合（紐づいた
+    用事の完了割合）と紐づいた用事、進捗メモ（新しい順）を含める。
+    あわせて、その利用者の用事すべて（紐づけの選択肢用に id・
+    タイトル・状態・goal_id）を tasks として返す。
+    """
+    target_dir = user_dir(tenant_dir(tenants.data_dir, tenant), user)
+    tasks = TaskBoard(target_dir).list()
+    goals = GoalBoard(target_dir).list()
+    return {"tenant": tenant, "user": user,
+            "goals": [goal_view(goal, tasks) for goal in goals],
+            "tasks": [{"id": t.id, "title": t.title, "status": t.status,
+                       "goal_id": t.goal_id} for t in tasks]}
+
+
 def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     """テナント設定 API の応答（GET / POST で共通の形）。
 
@@ -3175,6 +3499,13 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                     _first(query.get("user")) or tenants.default_user)
                 self._send_json(
                     200, _ideas_payload(tenants, tenant, user))
+            elif split.path == "/api/goals":
+                tenant = normalize_tenant_name(
+                    _first(query.get("tenant")) or tenants.default_tenant)
+                user = normalize_user_name(
+                    _first(query.get("user")) or tenants.default_user)
+                self._send_json(
+                    200, _goals_payload(tenants, tenant, user))
             elif split.path == "/api/usage":
                 tenant = normalize_tenant_name(
                     _first(query.get("tenant")) or tenants.default_tenant)
@@ -3407,6 +3738,9 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 return
             if path == "/api/ideas/act":
                 self._act_idea()
+                return
+            if path == "/api/goals/act":
+                self._act_goal()
                 return
             if path != "/api/chat":
                 self._send_json(404, {"error": "not found"})
@@ -3802,6 +4136,120 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 self._send_json(404, {"error": "アイデアが見つかりません"})
                 return
             self._send_json(200, _ideas_payload(tenants, tenant, user))
+
+        def _act_goal(self) -> None:
+            """目標への操作（POST /api/goals/act）。
+
+            本文は tenant / user / action と、操作ごとの項目。
+            action は次の 6 つ:
+            - create: 目標を追加（title、任意で description）
+            - update: 目標を編集（id と title / description /
+              status のうち変えるもの）
+            - note: 進捗メモを追加（id と body）
+            - link: 用事を目標へ紐づける（id と task_id）
+            - unlink: 用事の紐づけを外す（task_id）
+            - delete: 目標を削除（id。用事は消さず紐づけだけ外す）
+            対象の目標・用事が無ければ 404、入力の不備は 400。
+            応答は操作後の目標一覧（_goals_payload）。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            tenant = normalize_tenant_name(
+                data.get("tenant") or tenants.default_tenant)
+            user = normalize_user_name(
+                data.get("user") or tenants.default_user)
+            target_dir = user_dir(tenant_dir(tenants.data_dir, tenant),
+                                  user)
+            action = data.get("action")
+            goal_id = data.get("id")
+            task_id = data.get("task_id")
+
+            def needs_goal() -> bool:
+                if not isinstance(goal_id, str) or not goal_id:
+                    self._send_json(400, {"error": "id を指定してください"})
+                    return False
+                return True
+
+            try:
+                if action == "create":
+                    title = data.get("title")
+                    if not isinstance(title, str) or not title.strip():
+                        self._send_json(
+                            400, {"error": "タイトルを指定してください"})
+                        return
+                    description = data.get("description")
+                    GoalBoard(target_dir).add(
+                        title, description if isinstance(
+                            description, str) else "")
+                elif action == "update":
+                    if not needs_goal():
+                        return
+                    fields: dict = {}
+                    for key in ("title", "description", "status"):
+                        value = data.get(key)
+                        if value is not None:
+                            if not isinstance(value, str):
+                                self._send_json(
+                                    400, {"error": f"{key} は文字列で"
+                                                   "指定してください"})
+                                return
+                            fields[key] = value
+                    if GoalBoard(target_dir).update(
+                            goal_id, **fields) is None:
+                        self._send_json(
+                            404, {"error": "目標が見つかりません"})
+                        return
+                elif action == "note":
+                    if not needs_goal():
+                        return
+                    body = data.get("body")
+                    if not isinstance(body, str) or not body.strip():
+                        self._send_json(
+                            400, {"error": "メモの本文を指定してください"})
+                        return
+                    if GoalBoard(target_dir).add_note(
+                            goal_id, body) is None:
+                        self._send_json(
+                            404, {"error": "目標が見つかりません"})
+                        return
+                elif action == "link":
+                    if not needs_goal():
+                        return
+                    if not isinstance(task_id, str) or not task_id:
+                        self._send_json(
+                            400, {"error": "task_id を指定してください"})
+                        return
+                    if link_task(target_dir, goal_id, task_id) is None:
+                        self._send_json(
+                            404, {"error": "目標か用事が見つかりません"})
+                        return
+                elif action == "unlink":
+                    if not isinstance(task_id, str) or not task_id:
+                        self._send_json(
+                            400, {"error": "task_id を指定してください"})
+                        return
+                    if unlink_task(target_dir, task_id) is None:
+                        self._send_json(
+                            404, {"error": "用事が見つかりません"})
+                        return
+                elif action == "delete":
+                    if not needs_goal():
+                        return
+                    if not delete_goal(target_dir, goal_id):
+                        self._send_json(
+                            404, {"error": "目標が見つかりません"})
+                        return
+                else:
+                    self._send_json(400, {
+                        "error": "action は create / update / note / link / "
+                                 "unlink / delete で指定してください"})
+                    return
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            self._send_json(200, _goals_payload(tenants, tenant, user))
 
         def _toggle_reaction(self) -> None:
             """発話へのリアクションを付け外しする。
