@@ -63,6 +63,16 @@ def _prompt_of(model: _ExtractingModel, index: int = 0) -> str:
     return model.calls[index][1][0].content
 
 
+def _extract_call_count(model: _ExtractingModel) -> int:
+    """抽出の呼び出しだけを数える。
+
+    巡回では手順書の自動学習（skill_learn）も同じモデルを呼ぶ
+    ため、抽出の回数は指示文で区別して数える。
+    """
+    return sum(1 for system, _messages, _tools in model.calls
+               if "抽出者" in system)
+
+
 # ---------------------------------------------------------------- 抽出の本体
 
 def test_extract_appends_bullets_and_backs_up(tmp_path: Path):
@@ -264,7 +274,7 @@ def test_sweep_extracts_once_a_day(tmp_path: Path):
     # 巡回では投稿はせず、抽出だけが静かに働く
     assert check_and_post(cfg, now=NOW,
                           session_provider=lambda: session) is None
-    assert len(model.calls) == 1
+    assert _extract_call_count(model) == 1
     assert "- 猫を飼っている" in \
         (tmp_path / "MEMORY.md").read_text(encoding="utf-8")
     state = _state(tmp_path)
@@ -275,12 +285,12 @@ def test_sweep_extracts_once_a_day(tmp_path: Path):
     _write_conversation(tmp_path, [("user", "犬も飼いたいな")])
     check_and_post(cfg, now=NOW + timedelta(hours=2),
                    session_provider=lambda: session)
-    assert len(model.calls) == 1
+    assert _extract_call_count(model) == 1
 
     # 翌日になれば再び抽出される
     check_and_post(cfg, now=NOW + timedelta(days=1),
                    session_provider=lambda: session)
-    assert len(model.calls) == 2
+    assert _extract_call_count(model) == 2
 
 
 def test_sweep_without_model_does_not_extract(tmp_path: Path):
@@ -303,7 +313,9 @@ def test_sweep_extract_disabled_by_env(monkeypatch, tmp_path: Path):
     session = Session(cfg, model)
     assert check_and_post(cfg, now=NOW,
                           session_provider=lambda: session) is None
-    assert model.calls == []
+    # 抽出の呼び出しは無い（手順書の自動学習は別スイッチで、
+    # ここでは対象にしない）
+    assert _extract_call_count(model) == 0
     assert not (tmp_path / "MEMORY.md").exists()
     assert not (tmp_path / STATE_FILENAME).exists()
 

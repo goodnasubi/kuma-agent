@@ -117,6 +117,7 @@ from .memory_tidy import auto_tidy_memory
 from .notify_prefs import load_notify_prefs, parse_hhmm
 from .session import Session
 from .settings import proactive_enabled_for
+from .skill_learn import auto_learn_skills
 from .tasks import Task, TaskBoard
 from .watches import Watch, WatchBoard, check_watch
 from .watches import is_due as watch_is_due
@@ -696,6 +697,16 @@ def check_and_post(cfg: Config, now: datetime | None = None,
         auto_extract_memory(user_data_dir, extract_model, now=now)
     except Exception:
         pass  # 抽出の失敗で巡回全体は落とさない
+
+    # 手順書の自動学習（skill_learn）: 前回の学習以降に増えた
+    # 会話があれば、1 日 1 回まで実モデルに学習させて新しい
+    # 手順書として保存する。会話への投稿はせず、保存したら
+    # フィードにだけ残す。モデルの引き方は自動抽出と同じ
+    try:
+        auto_learn_skills(cfg.data_dir, user_data_dir, extract_model,
+                          now=now)
+    except Exception:
+        pass  # 学習の失敗で巡回全体は落とさない
 
     # 定期ジョブは用事とは独立の仕組みで、モードも静かな時間帯も
     # 問わず、期限が来ていれば先に実行して結果を投稿する

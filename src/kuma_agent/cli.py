@@ -359,6 +359,42 @@ def _run_memory_extract(cfg: Config, client, dry_run: bool = False) -> int:
     return 0
 
 
+def _run_skill_learn(cfg: Config, client, dry_run: bool = False) -> int:
+    """会話から手順書（スキル）を学習する（運用者向けコマンドの本体）。
+
+    対象は cfg が指すテナント×ユーザーの会話で、保存先はデータ
+    置き場ルートの skills/（全テナント共通）。前回の学習以降に
+    増えた会話の発話から、モデルに「再利用できる手順」を候補
+    として出させ、新しい手順書としてだけ保存する（既存の手順書
+    は上書きしない。モデルが要るため API キー必須のコマンドと
+    して配置する）。--dry-run では本体も状態も変更せず、候補
+    だけを表示する。学習は明示的な実行なので、自動学習の
+    無効化（KUMA_SKILL_LEARN=0）や 1 日 1 回の上限は適用しない。
+    """
+    from .skill_learn import learn_skills
+
+    result = learn_skills(cfg.data_dir, cfg.user_data_dir, client,
+                          dry_run=dry_run)
+    if result.reason == "no_new_turns":
+        print("新しい会話がありませんでした")
+        return 0
+    if result.reason == "model_failed":
+        print("学習に失敗したため、手順書は変更していません")
+        return 0
+    if result.reason == "nothing":
+        print("新しく覚える手順はありませんでした")
+        return 0
+    if dry_run:
+        print("提案される手順書:")
+        for candidate in result.candidates:
+            print(f"- {candidate['name']}: {candidate['description']}")
+        print("（dry-run のため、手順書は保存していません）")
+        return 0
+    names = "、".join(f"「{name}」" for name in result.learned)
+    print(f"手順書 {names} を新しく覚えました")
+    return 0
+
+
 def _run_memory_search(cfg: Config, query: str, limit: int = 5) -> int:
     """長期記憶（MEMORY.md）のキーワード検索（コマンドの本体）。
 
@@ -506,6 +542,14 @@ def main(argv: list[str] | None = None) -> int:
                                        help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     memory_extract_parser.add_argument("--dry-run", action="store_true",
                                        help="本体を変更せず、提案される箇条書きだけを表示する")
+    skill_learn_parser = sub.add_parser(
+        "skill-learn", help="新しい会話から手順書（スキル）を学習する")
+    skill_learn_parser.add_argument("--tenant", default=None,
+                                    help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
+    skill_learn_parser.add_argument("--user", default=None,
+                                    help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
+    skill_learn_parser.add_argument("--dry-run", action="store_true",
+                                    help="本体を変更せず、提案される手順書の候補だけを表示する")
     jobs_parser = sub.add_parser("jobs", help="定期ジョブの一覧を表示する")
     jobs_parser.add_argument("--tenant", default=None,
                              help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
@@ -581,6 +625,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_memory_tidy(cfg, client, dry_run=args.dry_run)
     if args.command == "memory-extract":  # 抽出にモデルが要るため API キー必須
         return _run_memory_extract(cfg, client, dry_run=args.dry_run)
+    if args.command == "skill-learn":  # 学習にモデルが要るため API キー必須
+        return _run_skill_learn(cfg, client, dry_run=args.dry_run)
     if args.command == "web":
         from .web import serve
 
