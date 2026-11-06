@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from .llm import ChatModel
     from .memory import Memory
     from .outputs import OutputBoard
+    from .spaces import Space, SpaceStore
     from .tasks import Task, TaskBoard
     from .watches import Watch, WatchBoard
     from .worksteps import WorkSteps
@@ -74,6 +75,10 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "list_watches": "見張りを確認中",
     "delete_watch": "見張りを記録中",
     "set_watch_enabled": "見張りを記録中",
+    "create_space": "画面を作成中",
+    "update_space": "画面を更新中",
+    "list_spaces": "画面を確認中",
+    "delete_space": "画面を削除中",
     "deliver_file": "成果物を用意しています",
     "generate_image": "画像を作っています",
 }
@@ -165,7 +170,8 @@ class ToolBox:
                  chat_model: ChatModel | None = None,
                  output_board: OutputBoard | None = None,
                  work_steps: WorkSteps | None = None,
-                 watch_board: WatchBoard | None = None) -> None:
+                 watch_board: WatchBoard | None = None,
+                 space_store: SpaceStore | None = None) -> None:
         self.work_dir = work_dir.resolve()
         self.task_board = task_board
         # 作業の手順（エージェント自身の作業メモ）。用事系と違い、
@@ -176,6 +182,10 @@ class ToolBox:
         # 同じく、見張りの道具はモードを問わず登録するため、
         # Session は常にこれを渡す。None の間は登録しない
         self.watch_board = watch_board
+        # 小さな画面の置き場（ユーザーごとの spaces.json + spaces/）。
+        # 見張りと同じく、画面の道具はモードを問わず登録するため、
+        # Session は常にこれを渡す。None の間は登録しない
+        self.space_store = space_store
         self.memory = memory
         # 成果物の置き場（ユーザーごとの outputs/）。定期ジョブと
         # 同じく、成果物の道具はモードを問わず登録するため、
@@ -216,6 +226,8 @@ class ToolBox:
             self._register_job_tools()
         if watch_board is not None:
             self._register_watch_tools()
+        if space_store is not None:
+            self._register_space_tools()
         if output_board is not None:
             self._register_output_tools()
             self._register_image_tool()
@@ -690,6 +702,112 @@ class ToolBox:
             return f"error: 見張り「{watch}」が見つかりません"
         state = "ON" if updated.enabled else "OFF"
         return f"更新しました: #{updated.id} {updated.title}（{state}）"
+
+    def _register_space_tools(self) -> None:
+        # 小さな画面の道具はモードを問わず登録する（置き場は
+        # ユーザーごとの spaces.json + spaces/）。画面は会話が
+        # 終わっても残り、Web UI の「画面」タブから開ける。
+        # 記録表やボードなど「残しておいて後で見る・更新する」
+        # ものに向き、一度きりの成果物（deliver_file）とは分ける
+        self.register(Tool(
+            "create_space",
+            "小さな画面（残しておける HTML ページ）を作る。記録表・"
+            "チェックリスト・ボードなど、後で何度も見たり更新したり"
+            "するものを、title と html（完結した HTML 文書）で作る"
+            "こと。作った画面は Web UI の「画面」タブに残り、"
+            "update_space で中身を更新できる。1 件の報告や文書を"
+            "渡すだけなら deliver_file を使うこと。",
+            {"type": "object", "properties": {
+                "title": {"type": "string",
+                          "description": "画面のタイトル"},
+                "html": {"type": "string",
+                         "description": "画面の HTML（完結した文書）"}},
+             "required": ["title", "html"]},
+            self._create_space,
+        ))
+        self.register(Tool(
+            "update_space",
+            "小さな画面の中身を更新する。space にはタイトルまたは "
+            "ID を入れること。html を渡すと本文を丸ごと差し替え、"
+            "title を渡すとタイトルだけ変える（両方も可）。",
+            {"type": "object", "properties": {
+                "space": {"type": "string",
+                          "description": "更新する画面のタイトルまたは ID"},
+                "title": {"type": "string",
+                          "description": "新しいタイトル（任意）"},
+                "html": {"type": "string",
+                         "description": "新しい HTML（任意）"}},
+             "required": ["space"]},
+            self._update_space,
+        ))
+        self.register(Tool(
+            "list_spaces",
+            "作った小さな画面を、タイトルと更新日時つきですべて返す。",
+            {"type": "object", "properties": {}},
+            self._list_spaces,
+        ))
+        self.register(Tool(
+            "delete_space",
+            "小さな画面を削除する。space にはタイトルまたは ID を"
+            "入れること。",
+            {"type": "object", "properties": {
+                "space": {"type": "string",
+                          "description": "削除する画面のタイトルまたは ID"}},
+             "required": ["space"]},
+            self._delete_space,
+        ))
+
+    def _format_spaces(self, spaces: list[Space]) -> str:
+        if not spaces:
+            return "画面はまだありません"
+        lines = []
+        for s in spaces:
+            stamp = s.updated_at.replace("T", " ") if s.updated_at else ""
+            lines.append(f"#{s.id} {s.title}（更新: {stamp}）")
+        return "\n".join(lines)
+
+    def _create_space(self, title: str, html: str) -> str:
+        assert self.space_store is not None
+        try:
+            space = self.space_store.create(str(title or ""),
+                                            str(html or ""))
+        except ValueError as exc:
+            return f"error: {exc}"
+        return (f"画面を作りました: #{space.id} {space.title}"
+                "（Web UI の「画面」タブから開けます）")
+
+    def _update_space(self, space: str, title: str | None = None,
+                      html: str | None = None) -> str:
+        assert self.space_store is not None
+        found = self.space_store.find(str(space or ""))
+        if found is None:
+            return f"error: 画面「{space}」が見つかりません"
+        if title is None and html is None:
+            return "error: title か html のどちらかを指定してください"
+        try:
+            updated = self.space_store.update(
+                found.id,
+                title=str(title) if title is not None else None,
+                html=str(html) if html is not None else None)
+        except ValueError as exc:
+            return f"error: {exc}"
+        if updated is None:
+            return f"error: 画面「{space}」が見つかりません"
+        return f"画面を更新しました: #{updated.id} {updated.title}"
+
+    def _list_spaces(self) -> str:
+        assert self.space_store is not None
+        return self._format_spaces(self.space_store.list())
+
+    def _delete_space(self, space: str) -> str:
+        assert self.space_store is not None
+        found = self.space_store.find(str(space or ""))
+        if found is None:
+            return f"error: 画面「{space}」が見つかりません"
+        removed = self.space_store.delete(found.id)
+        if removed is None:
+            return f"error: 画面「{space}」が見つかりません"
+        return f"削除しました: #{removed.id} {removed.title}"
 
     def _register_output_tools(self) -> None:
         # 成果物の道具はモードを問わず登録する（置き場はユーザー

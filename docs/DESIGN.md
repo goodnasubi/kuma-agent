@@ -22,6 +22,7 @@ src/kuma_agent/
   memory_tidy.py 長期記憶の整理（機械的な重複除去とモデルによる統合）
   memory_extract.py 長期記憶の自動抽出（新しい会話からモデルが抽出）
   skill_learn.py 手順書の自動学習（新しい会話からモデルが候補を出す）
+  spaces.py    小さな画面（残しておける HTML ページ）の置き場
   tools.py     道具の登録と実行（ファイル、シェル、時刻など）
   tasks.py     用事の一覧（ユーザーごとに tasks.json へ保存）
   settings.py  テナントごとの設定（settings.json、能動発信の ON/OFF）
@@ -706,6 +707,29 @@ rid と現在のリアクションを返し、/api/chat の応答にも rid を
 LINE・Telegram は対象外。
 
 今後の候補: アバター管理（画像の変更。保存先と形式は未定）。
+
+## 小さな画面（2026-11-07 追加）
+
+会話の中で作った小さな画面（記録表・ボードなどの HTML ページ）
+を、会話が終わっても残しておき、Web UI からいつでも開ける
+仕組み（`spaces.py`。Muse の Spaces の考え方を取り入れた）:
+
+- **置き場**: ユーザーごと。目次（タイトルと作成・更新日時）は
+  ユーザーの置き場の `spaces.json`、本文の HTML は
+  `spaces/<id>.html` に分けて持つ（一覧では本文を読まない）。
+  件数は最大 50 件、タイトルと本文にも長さの上限を設ける。
+  古いものを自動では消さない。
+- **道具**: `create_space` / `update_space` / `list_spaces` /
+  `delete_space` を両モードで登録する（見張りと同じ流儀）。
+  一度きりの成果物（`deliver_file`）とは役割を分け、こちらは
+  「残しておいて後で見て、更新していくもの」専用にする。
+- **Web UI**: 「画面」タブ（目標と探すの間）に一覧を出し、
+  本文は `/api/spaces/content` で取って **sandbox の iframe**
+  （`allow-scripts` のみ、`allow-same-origin` は付けない）に
+  入れて表示する。画面の中身は利用者とエージェントが作った
+  HTML そのもので、本体の画面やログイン状態とは隔離する。
+  タブから直接の作成・編集・削除もできる
+  （`/api/spaces/act` の create / update / delete）。
 
 ## 人格の設計
 

@@ -48,6 +48,7 @@ from .outputs import OutputBoard
 from .persona import load_persona
 from .settings import approvals_enabled_for
 from .skills import load_skills
+from .spaces import SpaceStore
 from .tasks import TaskBoard, format_remind_at
 from .tools import Tool, ToolBox, activity_label
 from .usage import record_usage
@@ -180,6 +181,10 @@ class Session:
         # 見張りもユーザーごとに 1 つ（watches.json）だけを使う。
         # 定期ジョブと同じく、道具はモードを問わず登録する
         self.watch_board = WatchBoard(data_dir)
+        # 小さな画面もユーザーごとに 1 つの置き場（spaces.json +
+        # spaces/）を使う。見張りと同じく、道具はモードを問わず
+        # 登録する
+        self.space_store = SpaceStore(data_dir)
         # スレッドモードでは用事の一覧を無効にする: 道具に用事系を登録せず、
         # 進行中の用事もプロンプトへ注入しない。長期記憶の検索道具も
         # 用事系と同じ条件（相棒モードのときだけ）で出す。
@@ -195,7 +200,8 @@ class Session:
             chat_model=model,
             output_board=self.output_board,
             work_steps=self.work_steps,
-            watch_board=self.watch_board)
+            watch_board=self.watch_board,
+            space_store=self.space_store)
         # MCP サーバーの道具を組み込み道具と並べて登録する。接続は
         # 実効の設定の置き場単位で共有する（テナントの置き場に
         # mcp.json があればその置き場、無ければデータ置き場ルート。

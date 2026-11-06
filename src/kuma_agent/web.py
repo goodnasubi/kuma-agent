@@ -79,6 +79,7 @@ from .proactive import combine_notifiers, run_sweep
 from .profile_files import read_profile_file, save_profile_file
 from .restore import restore_user_data
 from .session import Session
+from .spaces import SpaceStore, validate_space
 from .tasks import TaskBoard
 from .worksteps import WorkSteps
 from .telegram import build_proactive_notifier
@@ -323,6 +324,35 @@ _PAGE_TEMPLATE = """\
   .goalRow .gedit { display: flex; flex-wrap: wrap; gap: 8px;
                align-items: center; margin-top: 8px; }
   .goalNew { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  #spacesPanel { background: var(--surface); border: 1px solid var(--line);
+                 border-radius: 6px; padding: 16px 20px;
+                 width: min(880px, calc(100% - 24px)); align-self: center;
+                 margin-top: 12px; }
+  #spacesPanel[hidden] { display: none; }
+  #spacesPanel h2 { font-size: 15px; margin: 0 0 8px; }
+  #spacesPanel h3 { font-size: 14px; margin: 16px 0 6px;
+               border-top: 1px solid var(--line); padding-top: 12px; }
+  #spacesPanel .spacesNote { font-size: 13px; margin: 0 0 10px; }
+  #spaceStatus { font-size: 13px; margin: 8px 0 0; }
+  .spaceRow { padding: 10px 0; border-top: 1px dashed var(--line);
+               font-size: 14px; }
+  .spaceRow .shead { display: flex; flex-wrap: wrap; gap: 8px;
+               align-items: center; }
+  .spaceRow .stitle { font-weight: bold; }
+  .spaceRow .stime { opacity: .85; font-size: 13px; }
+  .spaceRow button, .spaceEdit button { padding: 5px 14px; font-size: 13px;
+               background: var(--surface); color: var(--ink);
+               border: 1px solid var(--line); border-radius: 8px;
+               cursor: pointer; }
+  #spaceFrame { width: 100%; height: 480px; background: #fff;
+               border: 1px solid var(--line); border-radius: 8px; }
+  .spaceEdit { display: flex; flex-direction: column; gap: 8px; }
+  .spaceEdit input, .spaceEdit textarea { padding: 5px 8px;
+               font-size: 13px; background: var(--surface);
+               color: var(--ink); border: 1px solid var(--line);
+               border-radius: 8px; }
+  .spaceEditTools { display: flex; flex-wrap: wrap; gap: 8px;
+               align-items: center; }
   #profilePanel { background: var(--surface); border: 1px solid var(--line);
                  border-radius: 6px; padding: 16px 20px;
                  width: min(880px, calc(100% - 24px)); align-self: center;
@@ -595,6 +625,7 @@ _PAGE_TEMPLATE = """\
   <button type="button" data-tab="feed" title="フィード" aria-label="フィード"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h13v14H6a2 2 0 0 1-2-2zM17 8h3v9a2 2 0 0 1-2 2M7 9h7M7 13h7"/></svg><span class="tabLabel">フィード</span></button>
   <button type="button" data-tab="ideas" title="アイデア" aria-label="アイデア"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 1 4 12.7c-.7.6-1 1-1.2 2.3H9.2C9 15.7 8.4 15.3 8 14.7A7 7 0 0 1 12 2z"/></svg><span class="tabLabel">アイデア</span></button>
   <button type="button" data-tab="goals" title="目標" aria-label="目標"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg><span class="tabLabel">目標</span></button>
+  <button type="button" data-tab="spaces" title="画面" aria-label="画面"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg><span class="tabLabel">画面</span></button>
   <button type="button" data-tab="explore" title="探す" aria-label="探す"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><span class="tabLabel">探す</span></button>
   <button type="button" data-tab="admin" title="管理" aria-label="管理"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8h9M19 8h1M4 16h3M13 16h7"/><circle cx="16" cy="8" r="2"/><circle cx="10" cy="16" r="2"/></svg><span class="tabLabel">管理</span></button>
 </nav>
@@ -686,6 +717,25 @@ _PAGE_TEMPLATE = """\
   </div>
   <p id="goalStatus"></p>
 </section>
+<section id="spacesPanel" hidden>
+  <h2>画面</h2>
+  <p class="spacesNote">会話の中で作った小さな画面（記録表やボードなど）が残ります。クマに頼んで作る・更新するほか、ここで直接作ることもできます。</p>
+  <div id="spaceRows"></div>
+  <div id="spaceView" hidden>
+    <h3 id="spaceViewTitle"></h3>
+    <iframe id="spaceFrame" sandbox="allow-scripts" title="画面の内容"></iframe>
+  </div>
+  <h3 id="spaceEditHead">画面を作る</h3>
+  <div class="spaceEdit">
+    <input id="spaceNewTitle" placeholder="画面のタイトル" size="24">
+    <textarea id="spaceNewHtml" placeholder="HTML（完結した文書）" rows="6"></textarea>
+    <div class="spaceEditTools">
+      <button id="spaceSave" type="button">保存する</button>
+      <button id="spaceEditCancel" type="button" hidden>編集をやめる</button>
+    </div>
+  </div>
+  <p id="spaceStatus"></p>
+</section>
 <section id="approvalPanel" hidden>
   <h2>承認の確認</h2>
   <div id="approvalRows"></div>
@@ -775,13 +825,25 @@ const goalNewTitle = document.getElementById('goalNewTitle');
 const goalNewDesc = document.getElementById('goalNewDesc');
 const goalCreateBtn = document.getElementById('goalCreate');
 const goalStatus = document.getElementById('goalStatus');
+const spacesPanel = document.getElementById('spacesPanel');
+const spaceRows = document.getElementById('spaceRows');
+const spaceView = document.getElementById('spaceView');
+const spaceViewTitle = document.getElementById('spaceViewTitle');
+const spaceFrame = document.getElementById('spaceFrame');
+const spaceEditHead = document.getElementById('spaceEditHead');
+const spaceNewTitle = document.getElementById('spaceNewTitle');
+const spaceNewHtml = document.getElementById('spaceNewHtml');
+const spaceSaveBtn = document.getElementById('spaceSave');
+const spaceEditCancelBtn = document.getElementById('spaceEditCancel');
+const spaceStatus = document.getElementById('spaceStatus');
+let spaceEditingId = null;
 let activeTab = 'chat';
 let lastApprovals = [];
 
 // タブの切り替え。会話タブだけが会話ログと入力欄を持ち、探すタブは
 // 成果物、フィードタブは能動発信と用事の進み具合の時系列、アイデア
-// タブは提案カード、目標タブは長期の目標と進捗、管理タブは管理
-// メニューとその配下のパネルを出す
+// タブは提案カード、目標タブは長期の目標と進捗、画面タブは残して
+// おける小さな画面、管理タブは管理メニューとその配下のパネルを出す
 function showTab(name) {
   activeTab = name;
   for (const btn of tabBar.querySelectorAll('button')) {
@@ -802,6 +864,8 @@ function showTab(name) {
   if (name === 'ideas') loadIdeas();
   goalsPanel.hidden = name !== 'goals';
   if (name === 'goals') loadGoals();
+  spacesPanel.hidden = name !== 'spaces';
+  if (name === 'spaces') loadSpaces();
   outputsPanel.hidden = name !== 'explore';
   if (name === 'explore') loadOutputs();
   adminMenu.hidden = name !== 'admin';
@@ -1925,6 +1989,162 @@ goalCreateBtn.addEventListener('click', () => {
       if (ok) { goalNewTitle.value = ''; goalNewDesc.value = ''; }
     });
 });
+
+// 小さな画面（残しておける HTML ページ）。タブを開くたびに
+// /api/spaces で目次を取り直し、開くときに本文を
+// /api/spaces/content で取って隔離した枠（sandbox の iframe）に
+// 入れる。作成・編集・削除は /api/spaces/act で行い、応答の
+// 一覧で画面を描き直す
+function spaceAction(payload, doneMessage) {
+  return fetch('/api/spaces/act', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(Object.assign(
+      {tenant: currentTenant, user: currentUser}, payload)),
+  }).then(async (res) => {
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '操作に失敗しました');
+    renderSpaces(data);
+    spaceStatus.textContent = doneMessage || '';
+    return true;
+  }).catch((e) => {
+    spaceStatus.textContent = '操作に失敗しました: ' + (e.message || e);
+    return false;
+  });
+}
+
+function renderSpaces(data) {
+  const spaces = data.spaces || [];
+  spaceRows.innerHTML = '';
+  if (!spaces.length) {
+    const row = document.createElement('div');
+    row.className = 'spaceRow';
+    row.textContent = '画面はまだありません';
+    spaceRows.appendChild(row);
+    return;
+  }
+  for (const space of spaces) {
+    const card = document.createElement('div');
+    card.className = 'spaceRow';
+    const head = document.createElement('div');
+    head.className = 'shead';
+    const title = document.createElement('span');
+    title.className = 'stitle';
+    title.textContent = space.title || '';
+    head.appendChild(title);
+    const time = document.createElement('span');
+    time.className = 'stime';
+    time.textContent = space.updated_at
+      ? '更新: ' + String(space.updated_at).replace('T', ' ').slice(0, 16)
+      : '';
+    head.appendChild(time);
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.textContent = '開く';
+    openBtn.addEventListener('click', () => openSpace(space));
+    head.appendChild(openBtn);
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.textContent = '編集';
+    editBtn.addEventListener('click', () => editSpace(space));
+    head.appendChild(editBtn);
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.textContent = '削除';
+    delBtn.addEventListener('click', () => {
+      if (!confirm('画面「' + (space.title || '') + '」を削除しますか？')) {
+        return;
+      }
+      spaceAction({action: 'delete', id: space.id}, '画面を削除しました')
+        .then((ok) => {
+          if (ok && spaceView.dataset.spaceId === space.id) {
+            spaceView.hidden = true;
+            spaceFrame.srcdoc = '';
+            spaceView.dataset.spaceId = '';
+          }
+        });
+    });
+    head.appendChild(delBtn);
+    card.appendChild(head);
+    spaceRows.appendChild(card);
+  }
+}
+
+async function openSpace(space) {
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser)
+      + '&id=' + encodeURIComponent(space.id);
+    const res = await fetch('/api/spaces/content' + query);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '開けませんでした');
+    spaceViewTitle.textContent = data.title || '';
+    spaceFrame.srcdoc = data.html || '';
+    spaceView.dataset.spaceId = space.id;
+    spaceView.hidden = false;
+    spaceStatus.textContent = '';
+  } catch (e) {
+    spaceStatus.textContent = '操作に失敗しました: ' + (e.message || e);
+  }
+}
+
+async function editSpace(space) {
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser)
+      + '&id=' + encodeURIComponent(space.id);
+    const res = await fetch('/api/spaces/content' + query);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '開けませんでした');
+    spaceEditingId = space.id;
+    spaceNewTitle.value = data.title || '';
+    spaceNewHtml.value = data.html || '';
+    spaceEditHead.textContent = '画面を編集';
+    spaceEditCancelBtn.hidden = false;
+    spaceStatus.textContent = '';
+  } catch (e) {
+    spaceStatus.textContent = '操作に失敗しました: ' + (e.message || e);
+  }
+}
+
+function resetSpaceEditor() {
+  spaceEditingId = null;
+  spaceNewTitle.value = '';
+  spaceNewHtml.value = '';
+  spaceEditHead.textContent = '画面を作る';
+  spaceEditCancelBtn.hidden = true;
+}
+
+spaceSaveBtn.addEventListener('click', () => {
+  if (!spaceNewTitle.value.trim()) {
+    spaceStatus.textContent = 'タイトルを入力してください';
+    return;
+  }
+  if (!spaceNewHtml.value.trim()) {
+    spaceStatus.textContent = 'HTML を入力してください';
+    return;
+  }
+  const payload = spaceEditingId
+    ? {action: 'update', id: spaceEditingId,
+       title: spaceNewTitle.value, html: spaceNewHtml.value}
+    : {action: 'create',
+       title: spaceNewTitle.value, html: spaceNewHtml.value};
+  spaceAction(payload, spaceEditingId ? '画面を更新しました'
+                                      : '画面を作りました')
+    .then((ok) => { if (ok) resetSpaceEditor(); });
+});
+
+spaceEditCancelBtn.addEventListener('click', resetSpaceEditor);
+
+async function loadSpaces() {
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser);
+    const res = await fetch('/api/spaces' + query);
+    const data = await res.json();
+    renderSpaces(data);
+  } catch (e) { /* 一覧が取れなければパネルは空のままにする */ }
+}
 
 async function loadOutputs() {
   outputRows.innerHTML = '';
@@ -3265,6 +3485,20 @@ def _goals_payload(tenants: TenantStore, tenant: str, user: str) -> dict:
                        "goal_id": t.goal_id} for t in tasks]}
 
 
+def _spaces_payload(tenants: TenantStore, tenant: str, user: str) -> dict:
+    """小さな画面 API の応答（GET / POST で共通の形）。
+
+    画面はユーザーごとの置き場（spaces.json + spaces/）にあり、
+    対象は tenant / user で指した組み合わせ。一覧は目次
+    （タイトルと日時）だけを新しく更新した順に返し、本文の
+    HTML は /api/spaces/content で別に取る。
+    """
+    store = SpaceStore(user_dir(tenant_dir(tenants.data_dir, tenant),
+                                 user))
+    return {"tenant": tenant, "user": user,
+            "spaces": [s.to_dict() for s in store.list()]}
+
+
 def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     """テナント設定 API の応答（GET / POST で共通の形）。
 
@@ -3544,6 +3778,30 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                     _first(query.get("user")) or tenants.default_user)
                 self._send_json(
                     200, _goals_payload(tenants, tenant, user))
+            elif split.path == "/api/spaces":
+                tenant = normalize_tenant_name(
+                    _first(query.get("tenant")) or tenants.default_tenant)
+                user = normalize_user_name(
+                    _first(query.get("user")) or tenants.default_user)
+                self._send_json(
+                    200, _spaces_payload(tenants, tenant, user))
+            elif split.path == "/api/spaces/content":
+                tenant = normalize_tenant_name(
+                    _first(query.get("tenant")) or tenants.default_tenant)
+                user = normalize_user_name(
+                    _first(query.get("user")) or tenants.default_user)
+                store = SpaceStore(user_dir(
+                    tenant_dir(tenants.data_dir, tenant), user))
+                space_id = _first(query.get("id")) or ""
+                space = store.get(space_id)
+                html = store.read_html(space_id)
+                if space is None or html is None:
+                    self._send_json(
+                        404, {"error": "画面が見つかりません"})
+                else:
+                    self._send_json(200, {"id": space.id,
+                                          "title": space.title,
+                                          "html": html})
             elif split.path == "/api/usage":
                 tenant = normalize_tenant_name(
                     _first(query.get("tenant")) or tenants.default_tenant)
@@ -3779,6 +4037,9 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 return
             if path == "/api/goals/act":
                 self._act_goal()
+                return
+            if path == "/api/spaces/act":
+                self._act_space()
                 return
             if path != "/api/chat":
                 self._send_json(404, {"error": "not found"})
@@ -4288,6 +4549,78 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 self._send_json(400, {"error": str(exc)})
                 return
             self._send_json(200, _goals_payload(tenants, tenant, user))
+
+        def _act_space(self) -> None:
+            """小さな画面への操作（POST /api/spaces/act）。
+
+            本文は tenant / user / action と、操作ごとの項目。
+            action は次の 3 つ:
+            - create: 画面を追加（title と html）
+            - update: 画面を編集（id と、変える title / html）
+            - delete: 画面を削除（id）
+            対象の画面が無ければ 404、入力の不備は 400。
+            応答は操作後の画面一覧（_spaces_payload）。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            tenant = normalize_tenant_name(
+                data.get("tenant") or tenants.default_tenant)
+            user = normalize_user_name(
+                data.get("user") or tenants.default_user)
+            target_dir = user_dir(tenant_dir(tenants.data_dir, tenant),
+                                  user)
+            store = SpaceStore(target_dir)
+            action = data.get("action")
+            space_id = data.get("id")
+
+            def needs_space() -> bool:
+                if not isinstance(space_id, str) or not space_id:
+                    self._send_json(400, {"error": "id を指定してください"})
+                    return False
+                return True
+
+            try:
+                if action == "create":
+                    store.create(data.get("title"), data.get("html"))
+                elif action == "update":
+                    if not needs_space():
+                        return
+                    fields: dict = {}
+                    for key in ("title", "html"):
+                        value = data.get(key)
+                        if value is not None:
+                            if not isinstance(value, str):
+                                self._send_json(
+                                    400, {"error": f"{key} は文字列で"
+                                                   "指定してください"})
+                                return
+                            fields[key] = value
+                    if not fields:
+                        self._send_json(
+                            400, {"error": "変える項目を指定してください"})
+                        return
+                    if store.update(space_id, **fields) is None:
+                        self._send_json(
+                            404, {"error": "画面が見つかりません"})
+                        return
+                elif action == "delete":
+                    if not needs_space():
+                        return
+                    if store.delete(space_id) is None:
+                        self._send_json(
+                            404, {"error": "画面が見つかりません"})
+                        return
+                else:
+                    self._send_json(400, {
+                        "error": "action は create / update / delete で"
+                                 "指定してください"})
+                    return
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            self._send_json(200, _spaces_payload(tenants, tenant, user))
 
         def _toggle_reaction(self) -> None:
             """発話へのリアクションを付け外しする。
