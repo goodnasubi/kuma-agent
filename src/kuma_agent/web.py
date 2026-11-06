@@ -80,6 +80,7 @@ from .profile_files import read_profile_file, save_profile_file
 from .restore import restore_user_data
 from .session import Session
 from .tasks import TaskBoard
+from .worksteps import WorkSteps
 from .telegram import build_proactive_notifier
 from .telegram import start_polling_thread as start_telegram_polling
 from .settings import (
@@ -372,6 +373,10 @@ _PAGE_TEMPLATE = """\
   #statusPanel h2 { font-size: 15px; margin: 0 0 8px; }
   #statusPanel .statusLine { font-size: 14px; margin: 0 0 6px; }
   #statusFacts { margin: 6px 0 0; padding-left: 1.4em; font-size: 14px; }
+  #statusSteps h3 { font-size: 14px; margin: 12px 0 6px; }
+  #statusSteps ul { margin: 0; padding-left: 1.4em; font-size: 14px; }
+  #statusSteps li.doing { font-weight: bold; }
+  #statusSteps li.done { opacity: 0.65; }
   .iconBtn { width: 38px; height: 38px; padding: 0; display: grid;
              place-items: center; background: var(--surface);
              color: var(--ink); border: 1px solid var(--line);
@@ -632,6 +637,7 @@ _PAGE_TEMPLATE = """\
   <h2>いまの状況</h2>
   <p class="statusLine">状態: <span id="statusNowText">待機中</span></p>
   <ul id="statusFacts"></ul>
+  <div id="statusSteps"></div>
 </section>
 <section id="tenantPanel" hidden>
   <h2>テナント管理</h2>
@@ -1272,7 +1278,34 @@ async function refreshStatusPanel() {
       li.textContent = fact;
       statusFacts.appendChild(li);
     }
+    renderStatusSteps(data.steps || []);
   } catch (e) { /* 状態が取れなければ前回の表示のままにする */ }
+}
+
+// 作業の手順（エージェントの作業メモ）を状況パネルに出す。
+// 手順が無いときは何も出さない。状態の印は文字で表し、進行中の
+// 手順は太字、終わった手順は薄くする
+const stepMarks = {completed: '✓', in_progress: '▶', pending: '○',
+                   blocked: '!', cancelled: '―'};
+
+function renderStatusSteps(steps) {
+  const box = document.getElementById('statusSteps');
+  box.innerHTML = '';
+  if (!steps.length) return;
+  const h = document.createElement('h3');
+  h.textContent = '作業の手順';
+  box.appendChild(h);
+  const ul = document.createElement('ul');
+  for (const step of steps) {
+    const li = document.createElement('li');
+    if (step.status === 'in_progress') li.className = 'doing';
+    if (step.status === 'completed' || step.status === 'cancelled') {
+      li.className = 'done';
+    }
+    li.textContent = (stepMarks[step.status] || '○') + ' ' + step.text;
+    ul.appendChild(li);
+  }
+  box.appendChild(ul);
 }
 
 function toggleStatusPanel() {
@@ -3464,11 +3497,16 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 user = normalize_user_name(
                     _first(query.get("user")) or tenants.default_user)
                 store = tenants.store(tenant, user)
-                t_all, t_open = _count_tasks_file(
-                    user_dir(tenant_dir(tenants.data_dir, tenant), user))
+                udir = user_dir(tenant_dir(tenants.data_dir, tenant), user)
+                t_all, t_open = _count_tasks_file(udir)
+                steps = WorkSteps(
+                    udir, normalize_session_id(
+                        _first(query.get("session")))).items()
                 self._send_json(200, {
                     "status": store.status(_first(query.get("session"))),
-                    "tasks": {"total": t_all, "open": t_open}})
+                    "tasks": {"total": t_all, "open": t_open},
+                    "steps": [{"text": s.text, "status": s.status}
+                              for s in steps]})
             elif split.path == "/api/approvals":
                 tenant = normalize_tenant_name(_first(query.get("tenant")))
                 user = normalize_user_name(_first(query.get("user")))

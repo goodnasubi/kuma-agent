@@ -25,6 +25,7 @@ from .skills import is_valid_skill_name, load_skill
 from .skills import save_skill as save_skill_file
 from .tasks import format_remind_at
 from .webtools import fetch_page, web_search
+from .worksteps import format_steps
 
 if TYPE_CHECKING:
     from .jobs import Job, JobBoard
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from .memory import Memory
     from .outputs import OutputBoard
     from .tasks import Task, TaskBoard
+    from .worksteps import WorkSteps
 
 
 # 道具名 → 「今なにをしているか」の表示名（UI の作業中表示用）。
@@ -49,6 +51,7 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "list_tasks": "用事を確認中",
     "create_task": "用事を記録中",
     "update_task": "用事を記録中",
+    "set_work_steps": "作業の手順を記録中",
     "remember": "記憶に書き留め中",
     "write_memory": "記憶に書き留め中",
     "save_memory": "記憶に書き留め中",
@@ -154,9 +157,14 @@ class ToolBox:
                  data_dir: Path | None = None,
                  job_board: JobBoard | None = None,
                  chat_model: ChatModel | None = None,
-                 output_board: OutputBoard | None = None) -> None:
+                 output_board: OutputBoard | None = None,
+                 work_steps: WorkSteps | None = None) -> None:
         self.work_dir = work_dir.resolve()
         self.task_board = task_board
+        # 作業の手順（エージェント自身の作業メモ）。用事系と違い、
+        # モードを問わず登録するため、Session は常にこれを渡す。
+        # None の間は登録しない
+        self.work_steps = work_steps
         self.memory = memory
         # 成果物の置き場（ユーザーごとの outputs/）。定期ジョブと
         # 同じく、成果物の道具はモードを問わず登録するため、
@@ -184,6 +192,8 @@ class ToolBox:
         # 配線は Session の仕事）
         self.approval_check: Callable[[str, dict], bool] | None = None
         self._register_defaults()
+        if work_steps is not None:
+            self._register_work_step_tools()
         if task_board is not None:
             self._register_task_tools()
             self._register_notify_tools()
@@ -249,6 +259,56 @@ class ToolBox:
 
     def _fetch_page(self, url: str) -> str:
         return fetch_page(url)
+
+    def _register_work_step_tools(self) -> None:
+        # 作業の手順は自分の作業メモであり、利用者の用事の一覧とは
+        # 別物。モードを問わず出す（置き場は会話ごとに分かれる）
+        self.register(Tool(
+            "set_work_steps",
+            "自分の作業の手順（作業メモ）を丸ごと設定する。手順が "
+            "3 つ以上ある作業では、始める前に手順を書き出し、進む"
+            "たびに状態を更新して呼び直すこと。状態は pending"
+            "（未着手）/ in_progress（進行中。同時に 1 つだけ）/ "
+            "blocked（進めない）/ completed（完了）/ cancelled"
+            "（中止）。作業が終わったら、完了の印を付けた一覧にする"
+            "か、空の一覧を渡して消すこと。短い作業では使わない。"
+            "用事の一覧（利用者の頼み事）とは別物で、こちらには"
+            "自分の作業の進め方だけを書く。",
+            {"type": "object", "properties": {
+                "steps": {"type": "array",
+                          "description": "手順の一覧（最大 25 件）",
+                          "items": {"type": "object", "properties": {
+                              "text": {"type": "string",
+                                       "description": "手順の文面"},
+                              "status": {"type": "string",
+                                         "enum": ["pending", "in_progress",
+                                                  "blocked", "completed",
+                                                  "cancelled"],
+                                         "description": "状態（省略時は pending）"}},
+                              "required": ["text"]}}},
+             "required": ["steps"]},
+            self._set_work_steps,
+        ))
+
+    def _set_work_steps(self, steps: object) -> str:
+        assert self.work_steps is not None
+        if not isinstance(steps, list):
+            return "error: steps は手順の一覧（配列）で指定してください"
+        pairs: list[tuple[str, str]] = []
+        for item in steps:
+            if not isinstance(item, dict):
+                return "error: 手順は {text, status} の形で指定してください"
+            status = item.get("status") or "pending"
+            if not isinstance(status, str):
+                return "error: 手順の状態は文字列で指定してください"
+            pairs.append((str(item.get("text") or ""), status))
+        try:
+            saved = self.work_steps.set_items(pairs)
+        except ValueError as e:
+            return f"error: {e}"
+        if not saved:
+            return "作業の手順を消しました"
+        return "作業の手順を記録しました:\n" + format_steps(saved)
 
     def _register_task_tools(self) -> None:
         guidance = (

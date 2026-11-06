@@ -51,6 +51,7 @@ from .skills import load_skills
 from .tasks import TaskBoard, format_remind_at
 from .tools import Tool, ToolBox, activity_label
 from .usage import record_usage
+from .worksteps import WorkSteps, format_steps
 
 # 曜日（月曜始まり、datetime.weekday() の並び）
 _WEEKDAYS_JA = ("月", "火", "水", "木", "金", "土", "日")
@@ -170,6 +171,11 @@ class Session:
         # 成果物の置き場もユーザーごとに 1 つ（outputs/）だけを使う。
         # 定期ジョブと同じく、成果物の道具はモードを問わず登録する
         self.output_board = OutputBoard(data_dir)
+        # 作業の手順（エージェント自身の作業メモ）は会話ごとに持つ。
+        # 相棒モードではセッションが main に固定されるため利用者
+        # ごとに 1 冊になり、スレッドモードではスレッドごとに
+        # 分かれる。用事系と違い、道具はモードを問わず登録する
+        self.work_steps = WorkSteps(data_dir, self.session_id)
         # スレッドモードでは用事の一覧を無効にする: 道具に用事系を登録せず、
         # 進行中の用事もプロンプトへ注入しない。長期記憶の検索道具も
         # 用事系と同じ条件（相棒モードのときだけ）で出す。
@@ -183,7 +189,8 @@ class Session:
             data_dir=None if self.mode == "wall" else cfg.data_dir,
             job_board=self.job_board,
             chat_model=model,
-            output_board=self.output_board)
+            output_board=self.output_board,
+            work_steps=self.work_steps)
         # MCP サーバーの道具を組み込み道具と並べて登録する。接続は
         # 実効の設定の置き場単位で共有する（テナントの置き場に
         # mcp.json があればその置き場、無ければデータ置き場ルート。
@@ -233,6 +240,9 @@ class Session:
             skills_text = self._skills_catalog_text()
             if skills_text:
                 self.system_prompt += f"\n\n# 使える手順書\n{skills_text}"
+        steps_text = self._work_steps_text()
+        if steps_text:
+            self.system_prompt += f"\n\n# 作業の手順（前回の続き）\n{steps_text}"
         if delegate_child:
             # 子には「委ねられた仕事の担当である」ことを伝え、
             # 最後の応答が依頼元への報告になるようにする
@@ -358,6 +368,21 @@ class Session:
                 line += f"（{format_remind_at(task.remind_at)} に通知）"
             lines.append(line)
         return "\n".join(lines)
+
+    def _work_steps_text(self) -> str:
+        """前回までの作業の手順をシステムプロンプト用に組み立てる。
+
+        終わっていない手順が残っている場合だけ節を出す（全部
+        終わった手順は過去の記録なので出さない）。続きの作業
+        なら引き継ぎ、別の用事なら置き換えるよう案内を添える。
+        """
+        if not self.work_steps.has_open():
+            return ""
+        return (
+            "前回の作業で残した、自分の作業手順です。続きの作業なら"
+            "この手順を引き継ぎ、別の用事なら set_work_steps 道具で"
+            "新しい手順に置き換えてください。\n"
+            + format_steps(self.work_steps.items()))
 
     def _restore_history(self) -> list[Message]:
         """このセッションの過去の発話を記録から履歴へ復元する。
