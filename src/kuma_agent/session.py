@@ -51,6 +51,7 @@ from .skills import load_skills
 from .tasks import TaskBoard, format_remind_at
 from .tools import Tool, ToolBox, activity_label
 from .usage import record_usage
+from .watches import WatchBoard
 from .worksteps import WorkSteps, format_steps
 
 # 曜日（月曜始まり、datetime.weekday() の並び）
@@ -176,6 +177,9 @@ class Session:
         # ごとに 1 冊になり、スレッドモードではスレッドごとに
         # 分かれる。用事系と違い、道具はモードを問わず登録する
         self.work_steps = WorkSteps(data_dir, self.session_id)
+        # 見張りもユーザーごとに 1 つ（watches.json）だけを使う。
+        # 定期ジョブと同じく、道具はモードを問わず登録する
+        self.watch_board = WatchBoard(data_dir)
         # スレッドモードでは用事の一覧を無効にする: 道具に用事系を登録せず、
         # 進行中の用事もプロンプトへ注入しない。長期記憶の検索道具も
         # 用事系と同じ条件（相棒モードのときだけ）で出す。
@@ -190,7 +194,8 @@ class Session:
             job_board=self.job_board,
             chat_model=model,
             output_board=self.output_board,
-            work_steps=self.work_steps)
+            work_steps=self.work_steps,
+            watch_board=self.watch_board)
         # MCP サーバーの道具を組み込み道具と並べて登録する。接続は
         # 実効の設定の置き場単位で共有する（テナントの置き場に
         # mcp.json があればその置き場、無ければデータ置き場ルート。

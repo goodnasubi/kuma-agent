@@ -118,6 +118,8 @@ from .notify_prefs import load_notify_prefs, parse_hhmm
 from .session import Session
 from .settings import proactive_enabled_for
 from .tasks import Task, TaskBoard
+from .watches import Watch, WatchBoard, check_watch
+from .watches import is_due as watch_is_due
 
 STATE_FILENAME = "proactive_state.json"
 
@@ -518,9 +520,113 @@ def run_due_jobs(cfg: Config, now: datetime, get_session: Callable[[], Session],
     return posted
 
 
+def build_watch_prompt(watch: Watch, old_summary: str,
+                       new_summary: str) -> str:
+    """変化を知らせる文を作らせるための、委任の子への指示文。
+
+    前回と今回の要約を材料として渡し、変化の要点だけを短く
+    知らせる文を作らせる。対象そのものの取得は巡回側で済んで
+    いるため、子は取得をやり直さなくてよい。
+    """
+    lines = [
+        f"見張り「{watch.title}」の対象に変化がありました。",
+        f"対象: {watch.target}",
+        f"前回の内容: {old_summary or '（記録なし）'}",
+        f"今回の内容: {new_summary}",
+        "変化の要点を短くまとめ、利用者への知らせ文を作ってください。",
+    ]
+    if watch.note:
+        lines.append(f"利用者からの指示: {watch.note}")
+    return "\n".join(lines)
+
+
+def build_watch_message(watch: Watch, result: str) -> str:
+    """見張りの知らせ文を組み立てる（変化があったとき）。"""
+    body = result.strip()
+    heading = f"見張り「{watch.title}」で変化がありました。"
+    return f"{heading}\n{body}" if body else heading
+
+
+def build_watch_failure_message(watch: Watch, result: str) -> str:
+    """見張りの知らせ文を作れなかったときの短い知らせ。"""
+    detail = result.removeprefix("error:").strip()
+    text = f"見張り「{watch.title}」で変化がありましたが、知らせ文を作れませんでした。"
+    if detail:
+        if len(detail) > _MAX_JOB_ERROR_CHARS:
+            detail = detail[:_MAX_JOB_ERROR_CHARS] + "…"
+        text += f"\n（{detail}）"
+    return text
+
+
+def run_due_watches(cfg: Config, now: datetime,
+                    get_session: Callable[[], Session],
+                    watch_executor: Callable[[Session, str], str] | None = None,
+                    notify: NotifyCallback | None = None,
+                    ) -> list[str]:
+    """間隔の来た見張りを確認し、変化があったら知らせを投稿する。
+
+    確認はモデルを使わない（対象のハッシュの比較だけ）。最初の
+    確認は基準の記録だけで知らせない。確認に失敗したら理由を
+    記録して次回に回す（知らせはしない）。変化があったとき
+    だけ、知らせ文の作成を watch_executor（既定は委任の仕組み）
+    へ頼み、結果を main の会話へ投稿する。投稿した文面の一覧を
+    返す。モデルなしの一時 Session の経路では、変化を消費せず
+    実行できる経路（Web の巡回など）に委ねる（定期ジョブと同じ）。
+    """
+    board = WatchBoard(cfg.user_data_dir)
+    due = [w for w in board.list() if watch_is_due(w, now)]
+    if not due:
+        return []
+    executor = watch_executor if watch_executor is not None \
+        else run_delegated_task
+    posted: list[str] = []
+    for watch in due:
+        try:
+            new_hash, new_summary = check_watch(watch, Path.cwd())
+        except Exception as e:  # 確認の失敗で巡回全体は落とさない
+            board.mark_checked(watch.id, now, error=str(e)[:200])
+            continue
+        if not watch.last_hash:
+            # 最初の確認は基準の記録だけ
+            board.mark_checked(watch.id, now, hash=new_hash,
+                               summary=new_summary)
+            continue
+        if new_hash == watch.last_hash:
+            board.mark_checked(watch.id, now, hash=new_hash,
+                               summary=new_summary)
+            continue
+        session = get_session()
+        if isinstance(session.model, _UnusedModel):
+            # モデルなしの経路では知らせ文を作れない。変化を
+            # 消費せず、実行できる経路の巡回に委ねる
+            return posted
+        prompt = build_watch_prompt(watch, watch.last_summary, new_summary)
+        try:
+            result = executor(session, prompt)
+        except Exception as e:  # 作成の失敗で巡回全体は落とさない
+            result = f"error: {e}"
+        if not isinstance(result, str):
+            result = str(result)
+        if result.startswith("error:"):
+            text = build_watch_failure_message(watch, result)
+        else:
+            text = build_watch_message(watch, result)
+        try:
+            session.post_proactive_message(text)
+        finally:
+            # 投稿まで進んだら、成否にかかわらず確認済みを記録する
+            board.mark_checked(watch.id, now, hash=new_hash,
+                               summary=new_summary, changed=True)
+        append_feed_entry(cfg.user_data_dir, KIND_PROACTIVE, text)
+        posted.append(text)
+        _notify(notify, cfg.tenant, cfg.user, text)
+    return posted
+
+
 def check_and_post(cfg: Config, now: datetime | None = None,
                    session_provider: Callable[[], Session] | None = None,
                    job_executor: Callable[[Session, str], str] | None = None,
+                   watch_executor: Callable[[Session, str], str] | None = None,
                    notify: NotifyCallback | None = None,
                    briefing_executor: Callable[[Session, str], str] | None = None,
                    manual: bool = False,
@@ -534,7 +640,9 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     既存の Session を引くための関数で、投稿すると決まったときだけ
     呼ばれる。無ければ一時的に Session を作って追記し、破棄する。
     job_executor は定期ジョブの実行関数の差し替え（テスト用）で、
-    既定は委任の仕組み（run_due_jobs を参照）。briefing_executor は
+    既定は委任の仕組み（run_due_jobs を参照）。watch_executor は
+    見張りの知らせ文の作成関数の差し替え（テスト用）で、既定は
+    同じく委任の仕組み（run_due_watches を参照）。briefing_executor は
     朝のまとめの実行関数の差し替え（テスト用）で、既定は同じく
     委任の仕組み。notify があれば、投稿した文面をその都度通知
     コールバックへも渡す（Telegram への配信など。渡すのはこの
@@ -542,9 +650,9 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     （CLI の手動実行）は、朝のまとめの時刻より前でも日報を出す
     （自動巡回は時刻まで待つ。手動で今すぐ出す判断を優先する）。
 
-    定期ジョブはモードを問わず実行する。用事のリマインダーと日報
-    は従来どおり相棒モード（ledger）だけが対象で、スレッドモード
-    ではジョブの分だけを返す。
+    定期ジョブと見張りはモードを問わず実行する。用事のリマインダー
+    と日報は従来どおり相棒モード（ledger）だけが対象で、スレッド
+    モードではジョブと見張りの分だけを返す。
     """
     now = now or datetime.now()
     if not proactive_enabled_for(cfg.data_dir, cfg.tenant):
@@ -593,6 +701,12 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     # 問わず、期限が来ていれば先に実行して結果を投稿する
     posted.extend(run_due_jobs(cfg, now, get_session,
                                job_executor=job_executor, notify=notify))
+
+    # 見張りも定期ジョブと同じくモードを問わず、間隔が来ていれば
+    # 確認し、変化があった分だけ知らせを投稿する
+    posted.extend(run_due_watches(cfg, now, get_session,
+                                  watch_executor=watch_executor,
+                                  notify=notify))
 
     if normalize_mode(cfg.mode) != "ledger":
         # スレッドモードでは用事を使わないため、残りは発言しない

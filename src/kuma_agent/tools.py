@@ -24,6 +24,7 @@ from .notify_prefs import (
 from .skills import is_valid_skill_name, load_skill
 from .skills import save_skill as save_skill_file
 from .tasks import format_remind_at
+from .watches import KIND_LABELS, validate_watch
 from .webtools import fetch_page, web_search
 from .worksteps import format_steps
 
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from .memory import Memory
     from .outputs import OutputBoard
     from .tasks import Task, TaskBoard
+    from .watches import Watch, WatchBoard
     from .worksteps import WorkSteps
 
 
@@ -68,6 +70,10 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "list_jobs": "定期ジョブを確認中",
     "delete_job": "定期ジョブを記録中",
     "set_job_enabled": "定期ジョブを記録中",
+    "create_watch": "見張りを記録中",
+    "list_watches": "見張りを確認中",
+    "delete_watch": "見張りを記録中",
+    "set_watch_enabled": "見張りを記録中",
     "deliver_file": "成果物を用意しています",
     "generate_image": "画像を作っています",
 }
@@ -158,13 +164,18 @@ class ToolBox:
                  job_board: JobBoard | None = None,
                  chat_model: ChatModel | None = None,
                  output_board: OutputBoard | None = None,
-                 work_steps: WorkSteps | None = None) -> None:
+                 work_steps: WorkSteps | None = None,
+                 watch_board: WatchBoard | None = None) -> None:
         self.work_dir = work_dir.resolve()
         self.task_board = task_board
         # 作業の手順（エージェント自身の作業メモ）。用事系と違い、
         # モードを問わず登録するため、Session は常にこれを渡す。
         # None の間は登録しない
         self.work_steps = work_steps
+        # 見張りの置き場（ユーザーごとの watches.json）。定期ジョブと
+        # 同じく、見張りの道具はモードを問わず登録するため、
+        # Session は常にこれを渡す。None の間は登録しない
+        self.watch_board = watch_board
         self.memory = memory
         # 成果物の置き場（ユーザーごとの outputs/）。定期ジョブと
         # 同じく、成果物の道具はモードを問わず登録するため、
@@ -203,6 +214,8 @@ class ToolBox:
             self._register_skill_tools()
         if job_board is not None:
             self._register_job_tools()
+        if watch_board is not None:
+            self._register_watch_tools()
         if output_board is not None:
             self._register_output_tools()
             self._register_image_tool()
@@ -556,6 +569,125 @@ class ToolBox:
         updated = self.job_board.set_enabled(job, enabled)
         if updated is None:
             return f"error: 定期ジョブ「{job}」が見つかりません"
+        state = "ON" if updated.enabled else "OFF"
+        return f"更新しました: #{updated.id} {updated.title}（{state}）"
+
+    def _register_watch_tools(self) -> None:
+        # 見張りの道具は定期ジョブと同じくモードを問わず登録する
+        # （置き場はユーザーごとの watches.json）。確認と変化の
+        # 検出は能動発信の巡回が担い、道具は登録と管理だけを持つ
+        self.register(Tool(
+            "create_watch",
+            "見張りを登録する。対象の状態が変わったら、巡回が検出"
+            "して会話へ知らせる。kind は web（ページの本文の変化）"
+            "/ search（Web 検索の結果の変化）/ file（作業ディレク"
+            "トリ内のファイルの出現・変化）のいずれかで、target "
+            "には種別に応じた URL / 検索語 / 相対パスを入れる。"
+            "interval_hours は確認の間隔（時間、省略時は 1）。"
+            "知らせ方に希望があれば note に入れる（例: 価格が"
+            "下がっていたら金額も添えて）。登録直後の最初の確認は"
+            "基準の記録だけで、知らせはしない。",
+            {"type": "object", "properties": {
+                "title": {"type": "string",
+                          "description": "見張りの名前"},
+                "kind": {"type": "string",
+                         "enum": ["web", "search", "file"],
+                         "description": "対象の種別"},
+                "target": {"type": "string",
+                           "description": "対象（URL / 検索語 / 相対パス）"},
+                "interval_hours": {"type": "integer",
+                                   "description": "確認の間隔（時間、省略時は 1）"},
+                "note": {"type": "string",
+                         "description": "知らせるときの指示（任意）"}},
+             "required": ["title", "kind", "target"]},
+            self._create_watch,
+        ))
+        self.register(Tool(
+            "list_watches",
+            "登録した見張りを、対象・間隔・ON/OFF・前回確認と"
+            "前回変化つきですべて返す。",
+            {"type": "object", "properties": {}},
+            self._list_watches,
+        ))
+        self.register(Tool(
+            "delete_watch",
+            "見張りを削除する。watch には名前または ID を入れること。",
+            {"type": "object", "properties": {
+                "watch": {"type": "string",
+                          "description": "削除する見張りの名前または ID"}},
+             "required": ["watch"]},
+            self._delete_watch,
+        ))
+        self.register(Tool(
+            "set_watch_enabled",
+            "見張りの ON/OFF を切り替える。watch には名前または "
+            "ID を、enabled には有効にするかどうかを入れること。",
+            {"type": "object", "properties": {
+                "watch": {"type": "string",
+                          "description": "切り替える見張りの名前または ID"},
+                "enabled": {"type": "boolean",
+                            "description": "有効にするなら true、止めるなら false"}},
+             "required": ["watch", "enabled"]},
+            self._set_watch_enabled,
+        ))
+
+    def _create_watch(self, title: str, kind: str, target: str,
+                      interval_hours: int | None = None,
+                      note: str = "") -> str:
+        assert self.watch_board is not None
+        title = str(title or "").strip()
+        if not title:
+            return "error: 見張りの名前が空です"
+        try:
+            kind_name, target_text, hours = validate_watch(
+                kind, target, interval_hours)
+        except ValueError as e:
+            return f"error: {e}"
+        watch = self.watch_board.add(title, kind_name, target_text,
+                                     interval_hours=hours,
+                                     note=str(note or ""))
+        return (f"登録しました: #{watch.id} {watch.title}"
+                f"（{KIND_LABELS[watch.kind]}: {watch.target}、"
+                f"{watch.interval_hours} 時間ごと）。"
+                "最初の確認は基準の記録だけで、変化があったら知らせます")
+
+    def _format_watches(self, watches: list[Watch]) -> str:
+        if not watches:
+            return "（見張りはありません）"
+        lines = []
+        for w in watches:
+            state = "ON" if w.enabled else "OFF"
+            checked = w.last_checked_at or "まだ"
+            changed = w.last_changed_at or "なし"
+            lines.append(
+                f"#{w.id} {w.title}"
+                f"（{KIND_LABELS.get(w.kind, w.kind)}: {w.target}、"
+                f"{w.interval_hours} 時間ごと、{state}、"
+                f"前回確認: {checked}、前回変化: {changed}）")
+            if w.note:
+                lines.append(f"  指示: {w.note}")
+            if w.last_error:
+                lines.append(f"  前回の確認に失敗: {w.last_error}")
+        return "\n".join(lines)
+
+    def _list_watches(self) -> str:
+        assert self.watch_board is not None
+        return self._format_watches(self.watch_board.list())
+
+    def _delete_watch(self, watch: str) -> str:
+        assert self.watch_board is not None
+        removed = self.watch_board.delete(watch)
+        if removed is None:
+            return f"error: 見張り「{watch}」が見つかりません"
+        return f"削除しました: #{removed.id} {removed.title}"
+
+    def _set_watch_enabled(self, watch: str, enabled: bool) -> str:
+        assert self.watch_board is not None
+        if not isinstance(enabled, bool):
+            return "error: enabled は true / false で指定してください"
+        updated = self.watch_board.set_enabled(watch, enabled)
+        if updated is None:
+            return f"error: 見張り「{watch}」が見つかりません"
         state = "ON" if updated.enabled else "OFF"
         return f"更新しました: #{updated.id} {updated.title}（{state}）"
 
