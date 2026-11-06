@@ -31,6 +31,7 @@ from .export import (
     default_export_filename,
     save_tenant_backup,
 )
+from .avatar import AvatarStore
 from .feed import load_feed_entries
 from .goals import (
     GoalBoard,
@@ -171,6 +172,8 @@ _PAGE_TEMPLATE = """\
            border-bottom: 1px solid var(--line); }
   header .avatar { width: 40px; height: 40px; flex: none; cursor: pointer; }
   header .avatar svg { width: 100%; height: 100%; display: block; }
+  header .avatar img { width: 100%; height: 100%; display: block;
+               border-radius: 50%; object-fit: cover; }
   header h1 { font-size: 17px; margin: 0; }
   header .provider { font-size: 12px; color: var(--muted); }
   .sessions { display: flex; gap: 6px; align-items: center; margin-left: auto;
@@ -372,6 +375,25 @@ _PAGE_TEMPLATE = """\
                margin-top: 8px; }
   .profileActions button { padding: 6px 16px; font-size: 14px; }
   #profileStatus { font-size: 13px; }
+  #profilePanel h3 { font-size: 14px; margin: 16px 0 6px;
+               border-top: 1px solid var(--line); padding-top: 12px; }
+  .avatarBox { display: flex; gap: 14px; align-items: flex-start; }
+  .avatarPreview { width: 64px; height: 64px; border-radius: 50%;
+               object-fit: cover; border: 1px solid var(--line);
+               background: var(--surface); flex: none; }
+  #avatarRows { display: flex; flex-direction: column; gap: 6px; }
+  .avatarRow { display: flex; gap: 8px; align-items: center;
+               font-size: 13px; }
+  .avatarRow img { width: 32px; height: 32px; border-radius: 50%;
+               object-fit: cover; border: 1px solid var(--line); }
+  .avatarRow button { padding: 3px 10px; font-size: 12px;
+               background: var(--surface); color: var(--ink);
+               border: 1px solid var(--line); border-radius: 8px;
+               cursor: pointer; }
+  .avatarRow .nowBadge { padding: 1px 8px; font-size: 12px;
+               border: 1px solid __HONEY__; border-radius: 8px;
+               font-weight: bold; }
+  #avatarStatus { font-size: 13px; }
   #usagePanel { background: var(--surface); border: 1px solid var(--line);
                  border-radius: 6px; padding: 16px 20px;
                  width: min(880px, calc(100% - 24px)); align-self: center;
@@ -425,7 +447,9 @@ _PAGE_TEMPLATE = """\
   .reactionChip.agentChip { display: inline-flex; align-items: center;
             gap: 3px; border-color: __HONEY__; cursor: default; }
   .reactionChip.agentChip .agentMark { display: inline-flex; }
-  .reactionChip.agentChip .agentMark svg { width: 14px; height: 14px;
+  .reactionChip.agentChip .agentMark svg,
+  .reactionChip.agentChip .agentMark img { width: 14px; height: 14px;
+               border-radius: 50%; object-fit: cover;
             display: block; }
   #reactionPalette { position: fixed; z-index: 60; display: flex; gap: 2px;
             background: var(--surface); border: 1px solid var(--line);
@@ -655,6 +679,18 @@ _PAGE_TEMPLATE = """\
     <button id="profileSave" type="button" class="iconBtn sm" title="保存" aria-label="保存"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg></button>
     <span id="profileStatus"></span>
   </div>
+  <h3>アバター</h3>
+  <p class="profileNote">クマの顔に使う画像です。アップロードした画像が、そのまま今のアバターになります（PNG / JPEG / GIF / WebP / SVG、2MB まで）。</p>
+  <div class="avatarBox">
+    <img id="avatarPreview" class="avatarPreview" alt="今のアバター">
+    <div id="avatarRows"></div>
+  </div>
+  <div class="profileActions">
+    <input id="avatarFile" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" hidden>
+    <button id="avatarUpload" type="button">画像をアップロード</button>
+    <button id="avatarReset" type="button">元に戻す</button>
+    <span id="avatarStatus"></span>
+  </div>
 </section>
 <section id="usagePanel" hidden>
   <h2>使用量</h2>
@@ -797,6 +833,12 @@ const profileTabs = document.getElementById('profileTabs');
 const profileText = document.getElementById('profileText');
 const profileSaveBtn = document.getElementById('profileSave');
 const profileStatus = document.getElementById('profileStatus');
+const avatarPreview = document.getElementById('avatarPreview');
+const avatarRows = document.getElementById('avatarRows');
+const avatarFileInput = document.getElementById('avatarFile');
+const avatarUploadBtn = document.getElementById('avatarUpload');
+const avatarResetBtn = document.getElementById('avatarReset');
+const avatarStatus = document.getElementById('avatarStatus');
 const profileFiles = [
   {name: 'SOUL.md', label: '性格（SOUL.md）'},
   {name: 'IDENTITY.md', label: '自己紹介（IDENTITY.md）'},
@@ -984,8 +1026,8 @@ function renderReactionChips(box, rid, reactions, agentReaction) {
     chip.setAttribute('aria-label', 'クマのリアクション ' + agentReaction);
     const mark = document.createElement('span');
     mark.className = 'agentMark';
-    const avatarSvg = document.querySelector('#avatarBtn svg');
-    if (avatarSvg) mark.appendChild(avatarSvg.cloneNode(true));
+    const avatarFace = document.querySelector('#avatarBtn img, #avatarBtn svg');
+    if (avatarFace) mark.appendChild(avatarFace.cloneNode(true));
     chip.appendChild(mark);
     chip.appendChild(document.createTextNode(agentReaction));
     box.appendChild(chip);
@@ -1164,6 +1206,7 @@ async function applyUser(name) {
   userSelect.value = name;
   await loadSessions();
   applySession(currentSession);
+  refreshAvatarFace();
 }
 
 async function loadUsers() {
@@ -1194,6 +1237,7 @@ async function applyTenant(name) {
   await loadUsers();
   await loadSessions();
   applySession(currentSession);
+  refreshAvatarFace();
 }
 
 async function loadTenants() {
@@ -1412,7 +1456,121 @@ outputsBtn.addEventListener('click', () => {
 // 新しい会話から反映される（パネル内の案内文のとおり）
 profileBtn.addEventListener('click', () => {
   profilePanel.hidden = !profilePanel.hidden;
-  if (!profilePanel.hidden) loadProfileFile(currentProfileFile);
+  if (!profilePanel.hidden) {
+    loadProfileFile(currentProfileFile);
+    loadAvatar();
+  }
+});
+
+// アバターの管理（人格・記憶パネルの下段）。候補の一覧と
+// 「今のアバター」は /api/avatar、アップロードは添付と同じ
+// base64 の形で /api/avatar/upload、切り替え・削除・既定への
+// 復帰は /api/avatar/act。変わったらヘッダーの顔も読み直す
+function avatarAction(payload, doneMessage) {
+  return fetch('/api/avatar/act', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(Object.assign(
+      {tenant: currentTenant, user: currentUser}, payload)),
+  }).then(async (res) => {
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '操作に失敗しました');
+    renderAvatar(data);
+    refreshAvatarFace();
+    avatarStatus.textContent = doneMessage || '';
+    return true;
+  }).catch((e) => {
+    avatarStatus.textContent = '操作に失敗しました: ' + (e.message || e);
+    return false;
+  });
+}
+
+function renderAvatar(data) {
+  avatarPreview.src = avatarImageUrl('');
+  const items = data.items || [];
+  const currentId = data.current ? data.current.id : null;
+  avatarRows.innerHTML = '';
+  if (!items.length) {
+    const row = document.createElement('div');
+    row.className = 'avatarRow';
+    row.textContent = data.current ? '' : '今は既定の顔です';
+    avatarRows.appendChild(row);
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement('div');
+    row.className = 'avatarRow';
+    const thumb = document.createElement('img');
+    thumb.src = avatarImageUrl('&id=' + encodeURIComponent(item.id));
+    thumb.alt = '';
+    row.appendChild(thumb);
+    const time = document.createElement('span');
+    time.textContent = item.uploaded_at
+      ? String(item.uploaded_at).replace('T', ' ').slice(0, 16) : '';
+    row.appendChild(time);
+    if (item.id === currentId) {
+      const badge = document.createElement('span');
+      badge.className = 'nowBadge';
+      badge.textContent = '使用中';
+      row.appendChild(badge);
+    } else {
+      const useBtn = document.createElement('button');
+      useBtn.type = 'button';
+      useBtn.textContent = '選ぶ';
+      useBtn.addEventListener('click', () => {
+        avatarAction({action: 'select', id: item.id},
+                     'アバターを切り替えました');
+      });
+      row.appendChild(useBtn);
+    }
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.textContent = '削除';
+    delBtn.addEventListener('click', () => {
+      if (!confirm('この画像を削除しますか？')) return;
+      avatarAction({action: 'delete', id: item.id}, '削除しました');
+    });
+    row.appendChild(delBtn);
+    avatarRows.appendChild(row);
+  }
+}
+
+async function loadAvatar() {
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser);
+    const res = await fetch('/api/avatar' + query);
+    const data = await res.json();
+    renderAvatar(data);
+  } catch (e) { /* 取れなければパネルは空のままにする */ }
+}
+
+avatarUploadBtn.addEventListener('click', () => avatarFileInput.click());
+
+avatarFileInput.addEventListener('change', async () => {
+  const file = avatarFileInput.files && avatarFileInput.files[0];
+  avatarFileInput.value = '';
+  if (!file) return;
+  try {
+    const data = await readAttachment(file);
+    const res = await fetch('/api/avatar/upload', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(Object.assign(
+        {tenant: currentTenant, user: currentUser}, data)),
+    });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload.error || 'アップロードに失敗しました');
+    renderAvatar(payload);
+    refreshAvatarFace();
+    avatarStatus.textContent = 'アバターを変更しました';
+  } catch (e) {
+    avatarStatus.textContent = '操作に失敗しました: ' + (e.message || e);
+  }
+});
+
+avatarResetBtn.addEventListener('click', () => {
+  avatarAction({action: 'reset'}, '既定の顔に戻しました');
 });
 
 // 使用量パネル。現在のテナント×ユーザーの頭脳の使用量（呼び出し
@@ -2768,8 +2926,23 @@ async function loadMeta() {
   await loadTenants();
   await loadUsers();
   await loadSessions();
+  refreshAvatarFace();
   loadHistory();
 })();
+
+// アバター（クマの顔）。ヘッダーの顔は /api/avatar/image から
+// 読むので、テナント×ユーザーが変わったら読み直す。キャッシュ
+// を避けるため、URL に時刻を混ぜる
+function avatarImageUrl(extra) {
+  return '/api/avatar/image?tenant=' + encodeURIComponent(currentTenant)
+    + '&user=' + encodeURIComponent(currentUser)
+    + (extra || '') + '&v=' + Date.now();
+}
+
+function refreshAvatarFace() {
+  const img = document.getElementById('avatarImg');
+  if (img) img.src = avatarImageUrl('');
+}
 const themeBtn = document.getElementById("themeBtn");
 const THEME_ORDER = ["light", "dark", "system", "pixel"];
 const THEME_NAMES = { light: "昼", dark: "夜", system: "システム",
@@ -2843,6 +3016,14 @@ input.focus();
 """
 
 
+# ヘッダーのアバターの差し込み（画像の配信経路を指す <img>）。
+# アバター管理で差し替えられるよう、顔は /api/avatar/image から
+# 読む。avatar_svg を明示された場合（テストや代替表示）は従来
+# どおり SVG を直接埋め込む
+_AVATAR_IMG_HTML = ('<img id="avatarImg" class="avatarFace" '
+                    'src="/api/avatar/image" alt="">')
+
+
 def render_page(provider: str, avatar_svg: str | None = None,
                 web_auth: bool = False) -> str:
     """チャット画面の HTML を組み立てる。
@@ -2852,7 +3033,8 @@ def render_page(provider: str, avatar_svg: str | None = None,
     """
     return (
         _PAGE_TEMPLATE
-        .replace("__AVATAR__", avatar_svg if avatar_svg is not None else load_avatar_svg())
+        .replace("__AVATAR__", avatar_svg if avatar_svg is not None
+                 else _AVATAR_IMG_HTML)
         .replace("__PROVIDER__", provider)
         .replace("__LOGOUT_BUTTON__",
                  _LOGOUT_BUTTON_HTML if web_auth else "")
@@ -3485,6 +3667,21 @@ def _goals_payload(tenants: TenantStore, tenant: str, user: str) -> dict:
                        "goal_id": t.goal_id} for t in tasks]}
 
 
+def _avatar_payload(tenants: TenantStore, tenant: str, user: str) -> dict:
+    """アバター API の応答（GET / POST で共通の形）。
+
+    アバターはユーザーごとの置き場（avatars.json + avatars/）に
+    あり、対象は tenant / user で指した組み合わせ。current が
+    null のときは既定の顔（assets/avatar.svg）を使っている。
+    """
+    store = AvatarStore(user_dir(tenant_dir(tenants.data_dir, tenant),
+                                 user))
+    current = store.current_item()
+    return {"tenant": tenant, "user": user,
+            "current": current.to_dict() if current else None,
+            "items": [i.to_dict() for i in store.list()]}
+
+
 def _spaces_payload(tenants: TenantStore, tenant: str, user: str) -> dict:
     """小さな画面 API の応答（GET / POST で共通の形）。
 
@@ -3778,6 +3975,36 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                     _first(query.get("user")) or tenants.default_user)
                 self._send_json(
                     200, _goals_payload(tenants, tenant, user))
+            elif split.path == "/api/avatar":
+                tenant = normalize_tenant_name(
+                    _first(query.get("tenant")) or tenants.default_tenant)
+                user = normalize_user_name(
+                    _first(query.get("user")) or tenants.default_user)
+                self._send_json(
+                    200, _avatar_payload(tenants, tenant, user))
+            elif split.path == "/api/avatar/image":
+                tenant = normalize_tenant_name(
+                    _first(query.get("tenant")) or tenants.default_tenant)
+                user = normalize_user_name(
+                    _first(query.get("user")) or tenants.default_user)
+                store = AvatarStore(user_dir(
+                    tenant_dir(tenants.data_dir, tenant), user))
+                item_id = _first(query.get("id"))
+                found = (store.read_item(item_id) if item_id
+                         else store.read_current())
+                if found is not None:
+                    body, media_type = found
+                elif item_id:
+                    self._send_json(
+                        404, {"error": "アバターが見つかりません"})
+                    return
+                else:
+                    # 既定の顔（assets/avatar.svg）をそのまま流す
+                    body = load_avatar_svg().encode("utf-8")
+                    media_type = "image/svg+xml"
+                self._send(200, body, media_type,
+                           {"Cache-Control": "no-cache",
+                            "Content-Security-Policy": "sandbox"})
             elif split.path == "/api/spaces":
                 tenant = normalize_tenant_name(
                     _first(query.get("tenant")) or tenants.default_tenant)
@@ -4040,6 +4267,12 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 return
             if path == "/api/spaces/act":
                 self._act_space()
+                return
+            if path == "/api/avatar/upload":
+                self._upload_avatar()
+                return
+            if path == "/api/avatar/act":
+                self._act_avatar()
                 return
             if path != "/api/chat":
                 self._send_json(404, {"error": "not found"})
@@ -4621,6 +4854,79 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 self._send_json(400, {"error": str(exc)})
                 return
             self._send_json(200, _spaces_payload(tenants, tenant, user))
+
+        def _avatar_store(self, data: dict) -> tuple[str, str, AvatarStore]:
+            """アバター API 共通の対象解決（tenant / user / 置き場）。"""
+            tenant = normalize_tenant_name(
+                data.get("tenant") or tenants.default_tenant)
+            user = normalize_user_name(
+                data.get("user") or tenants.default_user)
+            store = AvatarStore(user_dir(
+                tenant_dir(tenants.data_dir, tenant), user))
+            return tenant, user, store
+
+        def _upload_avatar(self) -> None:
+            """アバターのアップロード（POST /api/avatar/upload）。
+
+            本文は tenant / user と、添付と同じ形の画像
+            （name / media_type / data_base64）。種別の判定と
+            大きさの検証は AvatarStore が中身で行う（media_type
+            は信用しない）。アップロードした画像がそのまま
+            今のアバターになる。応答は _avatar_payload。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            tenant, user, store = self._avatar_store(data)
+            try:
+                raw = base64.b64decode(str(data.get("data_base64") or ""),
+                                       validate=True)
+            except (binascii.Error, ValueError):
+                self._send_json(400, {"error": "画像の base64 が不正です"})
+                return
+            try:
+                store.add(raw)
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            self._send_json(200, _avatar_payload(tenants, tenant, user))
+
+        def _act_avatar(self) -> None:
+            """アバターへの操作（POST /api/avatar/act）。
+
+            本文は tenant / user / action と id。action は次の 3 つ:
+            - select: 候補を今のアバターにする（id）
+            - delete: 候補を削除する（id。今のアバターなら既定に戻る）
+            - reset: 既定の顔に戻す（候補は残す）
+            対象の候補が無ければ 404、入力の不備は 400。
+            応答は操作後の _avatar_payload。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            tenant, user, store = self._avatar_store(data)
+            action = data.get("action")
+            item_id = data.get("id")
+            if action == "reset":
+                store.reset()
+            elif action in ("select", "delete"):
+                if not isinstance(item_id, str) or not item_id:
+                    self._send_json(400, {"error": "id を指定してください"})
+                    return
+                done = (store.select(item_id) if action == "select"
+                        else store.delete(item_id))
+                if done is None:
+                    self._send_json(
+                        404, {"error": "アバターが見つかりません"})
+                    return
+            else:
+                self._send_json(400, {
+                    "error": "action は select / delete / reset で"
+                             "指定してください"})
+                return
+            self._send_json(200, _avatar_payload(tenants, tenant, user))
 
         def _toggle_reaction(self) -> None:
             """発話へのリアクションを付け外しする。

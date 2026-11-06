@@ -23,6 +23,7 @@ src/kuma_agent/
   memory_extract.py 長期記憶の自動抽出（新しい会話からモデルが抽出）
   skill_learn.py 手順書の自動学習（新しい会話からモデルが候補を出す）
   spaces.py    小さな画面（残しておける HTML ページ）の置き場
+  avatar.py    アバター（クマの顔画像）の管理
   tools.py     道具の登録と実行（ファイル、シェル、時刻など）
   tasks.py     用事の一覧（ユーザーごとに tasks.json へ保存）
   settings.py  テナントごとの設定（settings.json、能動発信の ON/OFF）
@@ -730,6 +731,32 @@ LINE・Telegram は対象外。
   HTML そのもので、本体の画面やログイン状態とは隔離する。
   タブから直接の作成・編集・削除もできる
   （`/api/spaces/act` の create / update / delete）。
+
+## アバター管理（2026-11-07 追加）
+
+Web UI のヘッダーや会話に表示されるクマの顔を、利用者が
+差し替えられる仕組み（`avatar.py`）:
+
+- **置き場**: ユーザーごと。候補の一覧と「今のアバター」は
+  ユーザーの置き場の `avatars.json`、画像の実体は
+  `avatars/<id>.<拡張子>` に持つ。人格・記憶パネルと同じ
+  対象（現在のテナント×ユーザー）で管理する。
+- **形式と検証**: PNG / JPEG / GIF / WebP / SVG（2MB まで）。
+  種別はファイル名や申告ではなく中身の先頭バイトで判定する。
+  SVG は `<svg` を含むものだけを受ける。
+- **操作**: アップロード（そのまま今のアバターになる）・
+  選ぶ・削除（今のアバターを消すと既定に戻る）・元に戻す
+  （候補は残して既定の顔＝`assets/avatar.svg` に戻る）。
+  API は `GET /api/avatar`、`GET /api/avatar/image`
+  （`id` 指定で候補単体、今のアバター／既定も同じ経路）、
+  `POST /api/avatar/upload`（添付と同じ base64 の形）、
+  `POST /api/avatar/act`。
+- **表示の経路**: 顔はページへ埋め込まず、`<img>` で
+  `/api/avatar/image` から読む（テナント×ユーザーの切り替え
+  で読み直す）。SVG を含め画像として表示する経路でのみ使い、
+  配信には `Content-Security-Policy: sandbox` を添えて、
+  直接開かれた場合にスクリプトが動かないようにする。
+  ログイン画面は従来どおり既定の SVG を埋め込む。
 
 ## 人格の設計
 
