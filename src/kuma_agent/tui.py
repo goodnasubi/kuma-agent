@@ -227,6 +227,96 @@ def approval_prompt_text(request: dict) -> str:
     return text + " ─ 許可は y、却下は n を入力して Enter"
 
 
+class TuiResponder:
+    """TUI 用の応答者。say のワーカースレッドから呼ばれ、画面の入力を待つ。
+
+    選択肢での質問（ask_choice、AF-4）の受け皿で、承認者
+    （TuiApprover）と並ぶ仕組み。質問待ちの間は pending() が
+    質問と選択肢を返し、画面側は入力欄の文字列を answer() に
+    渡して答える。番号ならその選択肢のラベルを、文章での回答を
+    許した質問ではそれ以外の文字列を文章の答えとして受け取る
+    （解釈できない入力は受け付けず、待ち続ける）。timeout 秒
+    （None で無制限）以内に答えが無ければ時間切れで「答えなし」
+    （None）にする。同時に扱える質問待ちは 1 件だけ（2 件目は
+    即「答えなし」）。
+    """
+
+    def __init__(self, timeout: float | None = None) -> None:
+        self._timeout = timeout
+        self._lock = threading.Lock()
+        self._current: dict | None = None
+
+    def __call__(self, question: str, options: list,
+                 allow_text: bool) -> str | None:
+        request = {
+            "question": question,
+            "options": options,
+            "allow_text": bool(allow_text),
+            "event": threading.Event(),
+            "answer": None,
+        }
+        with self._lock:
+            if self._current is not None:
+                return None  # 質問待ちが重なったら「答えなし」に倒す
+            self._current = request
+        try:
+            request["event"].wait(self._timeout)
+            return request["answer"]
+        finally:
+            with self._lock:
+                if self._current is request:
+                    self._current = None
+
+    def pending(self) -> dict | None:
+        """質問待ちの内容（{"question", "options", "allow_text"}）。
+
+        無ければ None。
+        """
+        with self._lock:
+            if self._current is None:
+                return None
+            return {"question": self._current["question"],
+                    "options": self._current["options"],
+                    "allow_text": self._current["allow_text"]}
+
+    def answer(self, text: str) -> bool:
+        """入力された文字列で質問に答える。待ちが無ければ False。
+
+        番号は選択肢のラベルに読み替える。文章での回答を許して
+        いない質問への番号以外の入力は受け付けず False を返す
+        （画面側は入力を残して待ち続ける）。
+        """
+        with self._lock:
+            request = self._current
+        if request is None:
+            return False
+        raw = text.strip()
+        options = request["options"]
+        answer: str | None = None
+        if raw.isdigit():
+            index = int(raw)
+            if 1 <= index <= len(options):
+                answer = str(options[index - 1]["label"])
+        elif request["allow_text"] and raw:
+            answer = raw
+        if answer is None:
+            return False
+        request["answer"] = answer
+        request["event"].set()
+        return True
+
+
+def choice_prompt_text(request: dict) -> str:
+    """質問待ちの間に状態行へ出す文言（質問と選択肢と答え方）。"""
+    parts = [f"{index}. {opt['label']}"
+             for index, opt in enumerate(request["options"], start=1)]
+    text = f"質問: {request['question']}（{' / '.join(parts)}）"
+    text += " ─ 番号を入力して Enter"
+    if request["allow_text"]:
+        text += "（文章でも答えられます）"
+    return text
+
+
 def status_dots(frame: int) -> str:
     """作業中表示の点。フレームが進むたびに 0〜3 個を繰り返す。"""
     return "." * (frame % 4)
@@ -310,6 +400,10 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
     # 決めるまで待つ（時間切れは却下）
     approver = TuiApprover(timeout=session.cfg.approval_timeout_seconds)
     session.approver = approver
+    # 応答者: say のワーカーが選択肢での質問待ちになると、入力欄の
+    # 番号（または文章）で答えるまで待つ（時間切れは「答えなし」）
+    responder = TuiResponder(timeout=session.cfg.approval_timeout_seconds)
+    session.responder = responder
     frame = 0  # 作業中表示の点のアニメーション用カウンタ
 
     def notice(text: str) -> None:
@@ -349,6 +443,7 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
 
         busy = bool(status["busy"])
         approval = approver.pending()
+        choice = responder.pending()
         # 作業中表示の行（入力欄の上）を出す間はログを 1 行短くする
         log_height = max(0, height - 4 - (1 if busy else 0))
         lines = format_log(session.history, width - 2)
@@ -364,6 +459,11 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
             if approval is not None:
                 # 承認待ちの間は、対象と答え方を状態行に出す
                 prompt_text = approval_prompt_text(approval)
+                _safe_addstr(stdscr, height - 2, 0,
+                             prompt_text[: max(0, width - 1)])
+            elif choice is not None:
+                # 質問待ちの間は、質問と選択肢と答え方を状態行に出す
+                prompt_text = choice_prompt_text(choice)
                 _safe_addstr(stdscr, height - 2, 0,
                              prompt_text[: max(0, width - 1)])
             else:
@@ -407,6 +507,20 @@ def _tui_loop(stdscr: object, session: Session, provider: str) -> None:
                 if key in ("\n", "\r"):
                     approver.answer(buffer)
                     buffer = ""
+                elif isinstance(key, str) and key in ("\x7f", "\b"):
+                    buffer = buffer[:-1]
+                elif key == curses.KEY_BACKSPACE:
+                    buffer = buffer[:-1]
+                elif isinstance(key, str) and key.isprintable():
+                    buffer += key
+                continue
+            if responder.pending() is not None:
+                # 質問待ちの間は、入力欄を番号（または文章）の
+                # 回答欄として使う。解釈できない入力は受け付けず
+                # 入力を残して待ち続ける
+                if key in ("\n", "\r"):
+                    if responder.answer(buffer):
+                        buffer = ""
                 elif isinstance(key, str) and key in ("\x7f", "\b"):
                     buffer = buffer[:-1]
                 elif key == curses.KEY_BACKSPACE:

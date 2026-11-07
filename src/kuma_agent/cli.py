@@ -458,6 +458,42 @@ def _cli_approver(name: str, args: dict) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
+def _cli_responder(question: str, options: list, allow_text: bool) -> str | None:
+    """プレーンな対話ループ用の応答者（標準入力で選択肢を尋ねる）。
+
+    質問と番号付きの選択肢を示し、番号の入力で選ぶ。文章での
+    回答を許した質問（allow_text）では、番号以外の入力をその
+    まま文章の答えとして受け取る。範囲外の番号・空入力・入力の
+    終わり（EOF）は「答えなし」（None）として扱い、会話側が
+    文章での質問に切り替える。承認者と同じく、端末の前に人が
+    いてプロンプト自体が待ちになるため、この経路に時間切れは
+    設けない。
+    """
+    print()  # 作業中表示の同じ行上書きを区切ってから尋ねる
+    print(f"質問: {question}")
+    for index, opt in enumerate(options, start=1):
+        line = f"  {index}. {opt['label']}"
+        if opt.get("note"):
+            line += f"（{opt['note']}）"
+        print(line)
+    prompt = "番号を入力してください"
+    if allow_text:
+        prompt += "（番号の代わりに文章で答えることもできます）"
+    try:
+        raw = input(prompt + ": ")
+    except EOFError:
+        return None
+    raw = raw.strip()
+    if raw.isdigit():
+        index = int(raw)
+        if 1 <= index <= len(options):
+            return str(options[index - 1]["label"])
+        return None
+    if allow_text and raw:
+        return raw
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kuma-agent")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -647,6 +683,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_tui(session, cfg.provider)
     session.on_status = _show_status
     session.approver = _cli_approver
+    session.responder = _cli_responder
     print("クマです。話しかけてください（終了は Ctrl-D）")
     try:
         while True:

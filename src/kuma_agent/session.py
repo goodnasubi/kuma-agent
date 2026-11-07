@@ -112,6 +112,54 @@ def approval_waiting_text(name: str) -> str:
     return f"承認を待っています（{name}）"
 
 
+# 選択肢での質問（AF-4）の待ち表示と、モデルへ返す結果の文言。
+# 承認（安全のための可否確認）とは役割が違う: こちらは進め方の
+# 選択を利用者に尋ねるもの。使えない経路・答えが無かった場合は、
+# 例外や error ではなく「文章で質問し直す」方向の結果文字列に
+# して、モデルが聞き方を切り替えられるようにする
+CHOICE_WAITING = "回答を待っています"
+CHOICE_UNAVAILABLE_RESULT = (
+    "（選択肢での質問は、この会話の経路では使えません。"
+    "文章で質問してください）")
+CHOICE_NO_ANSWER_RESULT = (
+    "（時間内に答えがありませんでした。"
+    "選択肢ではなく、文章で質問し直してください）")
+
+# 応答者（ask_choice の受け皿）の型: （質問文, 選択肢, 文章での
+# 回答を許すか）を受け取り、利用者の答え（選んだ選択肢のラベル
+# か、文章の答え）を返す。時間切れなどで答えが得られない場合は
+# None を返す。選択肢は {"label": ..., "note": ...} の dict の
+# 並び（note は任意）で正規化済みのものが渡る
+ChoiceResponder = Callable[[str, list, bool], str | None]
+
+
+def _normalize_choice_options(options: object) -> list[dict] | None:
+    """ask_choice の選択肢を検証し、正規化した並びを返す。
+
+    選択肢は 2〜4 個で、各々に短いラベルが要る（文字列だけの
+    項目はラベルとして扱う。補足 note は任意）。形が違う場合は
+    None を返す（呼び出し側が error の結果文字列にする）。
+    """
+    if not isinstance(options, list) or not 2 <= len(options) <= 4:
+        return None
+    normalized: list[dict] = []
+    for item in options:
+        if isinstance(item, str):
+            label, note = item.strip(), ""
+        elif isinstance(item, dict):
+            label = str(item.get("label") or "").strip()
+            note = str(item.get("note") or "").strip()
+        else:
+            return None
+        if not label:
+            return None
+        entry: dict = {"label": label}
+        if note:
+            entry["note"] = note
+        normalized.append(entry)
+    return normalized
+
+
 # 立て直しの促し（AF-2）: 道具が失敗したとき、モデルへ返す結果の
 # 末尾に足す短い一文。モデル任せにせず仕組みとして足すことで、
 # 頭脳の種類や大小による「詰まったときの粘り」のばらつきをならす
@@ -181,7 +229,8 @@ class Session:
                  mcp_manager: McpManager | None = None,
                  approver: Callable[[str, dict], bool] | None = None,
                  delegate_child: bool = False,
-                 cancel_event: threading.Event | None = None) -> None:
+                 cancel_event: threading.Event | None = None,
+                 responder: ChoiceResponder | None = None) -> None:
         self.cfg = cfg
         self.model = model
         # 作業中表示のコールバック。対話ループの各段階で「今なにを
@@ -195,6 +244,14 @@ class Session:
         # して常に却下になる（_check_approval）。属性として差し
         # 替えも可。
         self.approver = approver
+        # UI 側の応答者: 選択肢での質問（ask_choice 道具、AF-4）の
+        # 受け皿。承認者と並ぶ差し込み口で、UI（Web / CLI / TUI）
+        # が属性として差し込む。差し込まれた時点で ask_choice 道具
+        # が登録される（responder プロパティの setter が担う）。
+        # 受け皿の無い経路（能動発信・委任の子・Telegram / LINE
+        # など、利用者と対面していない経路）では差し込まれない
+        # ため、道具自体が出ない。実体は _responder に持つ
+        self._responder: ChoiceResponder | None = None
         # 委任で作られた子セッションかどうか。子は会話を親と混ぜ
         # ないため、相棒モードでも部屋の固定（main）の対象にせず、
         # delegate- で始まる自分のセッション ID をそのまま使う。
@@ -292,6 +349,11 @@ class Session:
         # 会話記録の横断検索は、用事や長期記憶の仕組みとは独立
         # （対象は会話記録そのもの）なため、モードを問わず登録する
         self._register_history_search_tool()
+        # 応答者が生成時に渡されていれば差し込む（setter が
+        # ask_choice 道具の登録まで担う）。UI が後から属性として
+        # 差し込む場合も同じ setter を通る
+        if responder is not None:
+            self.responder = responder
         self.history: list[Message] = self._restore_history()
         memory_text = self.memory.load_long_term()
         # AM-1（関連する記憶の差し込み）用に、記憶の全文と「一部だけ
@@ -330,6 +392,98 @@ class Session:
             # 子には「委ねられた仕事の担当である」ことを伝え、
             # 最後の応答が依頼元への報告になるようにする
             self.system_prompt += f"\n\n# 委任された作業\n{DELEGATE_NOTICE}"
+
+    # -------------------------------------------------- 選択肢での質問
+
+    @property
+    def responder(self) -> ChoiceResponder | None:
+        """選択肢での質問（ask_choice）の応答者。"""
+        return self._responder
+
+    @responder.setter
+    def responder(self, value: ChoiceResponder | None) -> None:
+        self._responder = value
+        if value is not None:
+            self._register_ask_choice_tool()
+
+    def _register_ask_choice_tool(self) -> None:
+        """選択肢での質問（ask_choice、AF-4）の道具を登録する。
+
+        応答者（利用者と対面する UI の受け皿）がある場合だけ
+        登録する。委任の子には登録しない（子は利用者と対面して
+        いない経路のため。承認者が親から子へ配線されるのとは
+        扱いが違う）。頭脳が CLI 系の場合は道具の実行が外部 CLI
+        の側で行われるため、この道具自体がそもそも呼ばれない
+        （DESIGN.md に明記した限界）。
+        """
+        if self.delegate_child:
+            return
+        self.tools.register(Tool(
+            "ask_choice",
+            "利用者に選択肢で質問し、答えを待つ。成果物の形式や"
+            "送り先、時刻の候補など、答えによって進め方が変わる"
+            "分岐でのみ使うこと。文章で聞ける軽い確認には使わない"
+            "（その場合は普通に文章で質問すること）。危ない操作の"
+            "実行許可を取るための道具ではない（許可は承認の仕組み"
+            "が担う）。選択肢は 2〜4 個で、各々に短いラベルを付け、"
+            "必要なら補足（note）を添える。選択肢以外の答えも"
+            "あり得る場合は allow_text を true にする。利用者が"
+            "その場にいない経路（能動発信や委任の子など）では"
+            "使えない。",
+            {"type": "object", "properties": {
+                "question": {"type": "string",
+                             "description": "利用者への質問文"},
+                "options": {"type": "array", "minItems": 2, "maxItems": 4,
+                            "description": "選択肢（2〜4 個）",
+                            "items": {"type": "object", "properties": {
+                                "label": {"type": "string",
+                                          "description": "選択肢の短い表示名"},
+                                "note": {"type": "string",
+                                         "description": "選択肢の補足（任意）"}},
+                                "required": ["label"]}},
+                "allow_text": {"type": "boolean",
+                               "description": "選択肢以外の答えを文章で"
+                                              "もらうことを許すか"
+                                              "（省略時は false）"}},
+             "required": ["question", "options"]},
+            self._ask_choice))
+
+    def _ask_choice(self, question: str, options: object,
+                    allow_text: bool = False) -> str:
+        """利用者に選択肢で質問し、答えを道具の結果として返す。
+
+        応答者がいない経路・委任の子では、道具自体が登録されて
+        いないのが通常だが、直接呼ばれた場合も安全側に倒して
+        「使えない」結果を返す。時間切れなどで答えが得られな
+        かった場合も、会話を止め続けず「答えが無かった」結果を
+        返し、モデルが文章での質問に切り替えられるようにする。
+        答えが得られたら、質問と答えを利用者の発話として会話
+        記録に残す（後から「なぜこの進め方になったか」が辿れる
+        ようにするため）。活動の記録へは、通常の道具呼び出しと
+        して say の道具ループが残す（質問は引数の要約、答えは
+        結果の抜粋に入る）。
+        """
+        responder = self._responder
+        if responder is None or self.delegate_child:
+            return CHOICE_UNAVAILABLE_RESULT
+        question = str(question or "").strip()
+        if not question:
+            return "error: 質問文が空です"
+        normalized = _normalize_choice_options(options)
+        if normalized is None:
+            return ("error: 選択肢は 2〜4 個で、各々に短いラベルを"
+                    "付けて指定してください")
+        self._notify(CHOICE_WAITING)
+        try:
+            answer = responder(question, normalized, bool(allow_text))
+        except Exception:
+            answer = None  # 応答側の失敗は「答えが無かった」に倒す
+        if answer is None or not str(answer).strip():
+            return CHOICE_NO_ANSWER_RESULT
+        answer = str(answer).strip()
+        self.memory.append_turn(
+            "user", f"（「{question}」への答え）{answer}")
+        return f"利用者の答え: {answer}"
 
     def _skills_catalog_text(self) -> str:
         """使える手順書の目次をシステムプロンプト用に組み立てる。

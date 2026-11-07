@@ -65,6 +65,7 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "read_skill": "手順書を読んでいます",
     "save_skill": "手順書を書き留め中",
     "delegate": "別のエージェントに作業を頼んでいます",
+    "ask_choice": "利用者に質問を出しています",
     "set_notify_mute": "知らせ方の設定を更新中",
     "clear_notify_mute": "知らせ方の設定を更新中",
     "list_notify_prefs": "知らせ方の設定を確認中",

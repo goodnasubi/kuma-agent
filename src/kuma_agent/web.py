@@ -491,7 +491,7 @@ _PAGE_TEMPLATE = """\
               border: none; }
     #tabBar button svg { width: 24px; height: 24px; }
     #outputsPanel, #feedPanel, #ideasPanel, #goalsPanel, #profilePanel,
-    #usagePanel, #activityPanel, #tenantPanel, #approvalPanel, #statusPanel, .tabNote,
+    #usagePanel, #activityPanel, #tenantPanel, #approvalPanel, #choicePanel, #statusPanel, .tabNote,
     #adminMenu,
     #form, #quoteBar {
       width: calc(100% - 16px); }
@@ -529,6 +529,27 @@ _PAGE_TEMPLATE = """\
   .approvalRow .asummary { flex: 1; min-width: 12em; word-break: break-all; }
   .approvalRow button { padding: 6px 14px; font-size: 13px; }
   .approvalRow button.deny { background: var(--surface); color: var(--ink);
+               border: 1px solid var(--line); }
+  #choicePanel { background: var(--surface); border: 1px solid var(--line);
+                 border-radius: 6px; padding: 16px 20px;
+                 width: min(880px, calc(100% - 24px)); align-self: center;
+                 margin-top: 12px; }
+  #choicePanel[hidden] { display: none; }
+  #choicePanel h2 { font-size: 15px; margin: 0 0 8px; }
+  .choiceCard { padding: 8px 0; border-top: 1px dashed var(--line);
+               font-size: 14px; }
+  .choiceCard .cquestion { font-weight: bold; margin-bottom: 8px;
+               word-break: break-word; }
+  .choiceOptions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .choiceOptions button { padding: 6px 14px; font-size: 13px;
+               text-align: left; }
+  .choiceOptions button .cnote { display: block; font-size: 12px;
+               opacity: .75; }
+  .choiceText { display: flex; gap: 8px; margin-top: 8px; }
+  .choiceText input { flex: 1; min-width: 8em; padding: 6px 8px;
+               font-size: 14px; }
+  .choiceText button { padding: 6px 14px; font-size: 13px;
+               background: var(--surface); color: var(--ink);
                border: 1px solid var(--line); }
   #log { flex: 1; overflow-y: auto; padding: 20px 16px 8px; display: flex;
          flex-direction: column; gap: 20px;
@@ -796,6 +817,10 @@ _PAGE_TEMPLATE = """\
   <h2>承認の確認</h2>
   <div id="approvalRows"></div>
 </section>
+<section id="choicePanel" hidden>
+  <h2>質問</h2>
+  <div id="choiceRows"></div>
+</section>
 <div id="log"></div>
 <div id="dropHint">ファイルを離すと添付します</div>
 <form id="form">
@@ -871,6 +896,7 @@ const profileFiles = [
 let currentProfileFile = 'SOUL.md';
 const tenantRows = document.getElementById('tenantRows');
 const approvalPanel = document.getElementById('approvalPanel');
+const choicePanel = document.getElementById('choicePanel');
 const avatarBtn = document.getElementById('avatarBtn');
 const statusPanel = document.getElementById('statusPanel');
 const statusNowText = document.getElementById('statusNowText');
@@ -904,6 +930,7 @@ const spaceStatus = document.getElementById('spaceStatus');
 let spaceEditingId = null;
 let activeTab = 'chat';
 let lastApprovals = [];
+let lastChoices = [];
 
 // タブの切り替え。会話タブだけが会話ログと入力欄を持ち、探すタブは
 // 成果物、フィードタブは能動発信と用事の進み具合の時系列、アイデア
@@ -920,8 +947,10 @@ function showTab(name) {
   form.hidden = !chat;
   if (chat) {
     renderApprovals(lastApprovals);
+    renderChoices(lastChoices);
   } else {
     approvalPanel.hidden = true;
+    choicePanel.hidden = true;
   }
   feedPanel.hidden = name !== 'feed';
   if (name === 'feed') loadFeed();
@@ -946,6 +975,7 @@ for (const btn of tabBar.querySelectorAll('button')) {
   btn.addEventListener('click', () => showTab(btn.dataset.tab));
 }
 const approvalRows = document.getElementById('approvalRows');
+const choiceRows = document.getElementById('choiceRows');
 const adminNewTenant = document.getElementById('adminNewTenant');
 const adminCreateTenant = document.getElementById('adminCreateTenant');
 const notifyMutedRows = document.getElementById('notifyMutedRows');
@@ -2903,6 +2933,7 @@ async function pollStatus() {
     showStatus(data.status || '');
   } catch (e) { /* 状態が取れなくても会話は続けられる */ }
   pollApprovals();
+  pollChoices();
 }
 
 // 承認の確認: 危険な道具の実行待ちがあれば、内容と許可・却下の
@@ -2960,6 +2991,101 @@ function approvalButton(item, approved, label) {
   return btn;
 }
 
+// 質問（選択肢での聞き返し）: 進め方の選択を尋ねる質問があれば、
+// 質問文と選択肢のボタンをカードで出す。承認（安全の可否）とは
+// 別の仕組みで、こちらは /api/choices と /api/choices/answer で
+// 扱う。ポーリングは承認と同じく状態ポーリングに相乗りする
+async function pollChoices() {
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser);
+    const res = await fetch('/api/choices' + query);
+    const data = await res.json();
+    renderChoices(data.choices || []);
+  } catch (e) { /* 取れなければ前回の表示のままにする */ }
+}
+
+function renderChoices(list) {
+  lastChoices = list;
+  choiceRows.innerHTML = '';
+  choicePanel.hidden = !(list.length && activeTab === 'chat');
+  for (const item of list) {
+    const card = document.createElement('div');
+    card.className = 'choiceCard';
+    const q = document.createElement('div');
+    q.className = 'cquestion';
+    q.textContent = item.question;
+    card.appendChild(q);
+    const options = document.createElement('div');
+    options.className = 'choiceOptions';
+    for (const opt of item.options || []) {
+      options.appendChild(choiceButton(item, opt));
+    }
+    card.appendChild(options);
+    if (item.allow_text) {
+      card.appendChild(choiceTextRow(item));
+    }
+    choiceRows.appendChild(card);
+  }
+}
+
+function choiceButton(item, opt) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  const label = document.createElement('span');
+  label.textContent = opt.label;
+  btn.appendChild(label);
+  if (opt.note) {
+    const note = document.createElement('span');
+    note.className = 'cnote';
+    note.textContent = opt.note;
+    btn.appendChild(note);
+  }
+  btn.addEventListener('click', () => answerChoice(item, opt.label, btn));
+  return btn;
+}
+
+function choiceTextRow(item) {
+  const row = document.createElement('div');
+  row.className = 'choiceText';
+  const textInput = document.createElement('input');
+  textInput.type = 'text';
+  textInput.placeholder = '文章で答える';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = '文章で答える';
+  btn.addEventListener('click', () => {
+    const value = textInput.value.trim();
+    if (value) answerChoice(item, value, btn);
+  });
+  textInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      btn.click();
+    }
+  });
+  row.appendChild(textInput);
+  row.appendChild(btn);
+  return row;
+}
+
+async function answerChoice(item, answer, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/choices/answer', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: item.id, answer,
+                            tenant: currentTenant, user: currentUser}),
+    });
+    if (!res.ok) throw new Error('answer failed');
+  } catch (e) {
+    window.alert('回答の送信に失敗しました');
+    if (btn) btn.disabled = false;
+  }
+  pollChoices();
+}
+
 form.addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const text = input.value.trim();
@@ -3000,6 +3126,7 @@ form.addEventListener('submit', async (ev) => {
     clearInterval(poller);
     showStatus('');
     pollApprovals();
+    pollChoices();
     send.disabled = false;
     input.focus();
   }
@@ -3437,6 +3564,84 @@ class ApprovalBroker:
         return True
 
 
+class ChoiceBroker:
+    """保留中の質問（選択肢での聞き返し）を保持し、回答を待つ。
+
+    承認（ApprovalBroker）とは役割が違う: 承認は安全のための
+    可否確認で、こちらは進め方の選択を利用者に尋ねるもの
+    （AF-4）。会話リクエストのスレッドが request() で回答待ちに
+    入り、画面側が GET /api/choices で保留一覧を見て、
+    POST /api/choices/answer で answer() を呼ぶまで待つ。待ちに
+    は上限（timeout 秒）があり、時間切れは「答えなし」（None）
+    として返す（会話は止め続けず、モデルが文章での質問に切り
+    替える）。保留はテナント×ユーザー単位で分け、一覧と回答は
+    その組み合わせの中だけで効く。答えは、選択肢のラベルの
+    どれか、または文章での回答を許した質問への自由な文章だけ
+    を受け付ける。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pending: dict[str, dict] = {}
+
+    def request(self, tenant: str, user: str, question: str,
+                options: list, allow_text: bool,
+                timeout: float) -> str | None:
+        """質問を 1 件登録し、回答（または時間切れ）まで待つ。"""
+        entry = {
+            "id": uuid.uuid4().hex,
+            "tenant": tenant,
+            "user": user,
+            "question": question,
+            "options": options,
+            "allow_text": bool(allow_text),
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "event": threading.Event(),
+            "answer": None,
+        }
+        with self._lock:
+            self._pending[entry["id"]] = entry
+        try:
+            entry["event"].wait(timeout if timeout and timeout > 0 else None)
+            return entry["answer"]
+        finally:
+            with self._lock:
+                self._pending.pop(entry["id"], None)
+
+    def list_pending(self, tenant: str, user: str) -> list[dict]:
+        """そのテナント×ユーザーの保留一覧（画面に出す項目だけ）。"""
+        with self._lock:
+            entries = [e for e in self._pending.values()
+                       if e["tenant"] == tenant and e["user"] == user]
+        entries.sort(key=lambda e: e["time"])
+        return [{"id": e["id"], "question": e["question"],
+                 "options": e["options"], "allow_text": e["allow_text"],
+                 "time": e["time"]} for e in entries]
+
+    def answer(self, tenant: str, user: str, choice_id: str,
+               answer: str) -> bool:
+        """保留中の質問に回答する。対象が無ければ False。
+
+        答えとして受け付けるのは、選択肢のラベルのどれかと、
+        文章での回答を許した質問（allow_text）への空でない文章
+        だけ。それ以外は False（対象なしと同じ扱い）。
+        """
+        answer = str(answer or "").strip()
+        if not answer:
+            return False
+        with self._lock:
+            entry = self._pending.get(choice_id)
+            if (entry is None or entry["tenant"] != tenant
+                    or entry["user"] != user):
+                return False
+            labels = [opt["label"] for opt in entry["options"]]
+            if answer not in labels and not entry["allow_text"]:
+                return False
+            entry["answer"] = answer
+        entry["event"].set()
+        return True
+
+
 class SessionStore:
     """名前 → Session の対応を管理する（Web UI の部屋の切り替え用）。
 
@@ -3447,7 +3652,8 @@ class SessionStore:
 
     def __init__(self, initial: Session,
                  factory: Callable[[str], Session] | None = None,
-                 approvals: ApprovalBroker | None = None) -> None:
+                 approvals: ApprovalBroker | None = None,
+                 choices: ChoiceBroker | None = None) -> None:
         self._sessions: dict[str, Session] = {}
         self._factory = factory or (
             lambda name: Session(initial.cfg, initial.model, name))
@@ -3455,6 +3661,7 @@ class SessionStore:
         self.user = initial.user
         self._data_dir = initial.cfg.user_data_dir
         self._approvals = approvals
+        self._choices = choices
         self._lock = threading.Lock()
         # 部屋ごとの作業中表示（空文字列は「作業していない」）。
         # Session の状態コールバックをここへ差し込み、/api/status が読む
@@ -3482,6 +3689,21 @@ class SessionStore:
                     _s.cfg.approval_timeout_seconds)
 
             session.approver = approver
+        if self._choices is not None:
+            # 応答者も差し込む: 選択肢での質問（ask_choice）の保留
+            # としてブローカーに登録し、画面の回答を待つ。待ちの
+            # 上限は承認と同じ設定（approval_timeout_seconds）を
+            # 使う。差し込むと Session 側で ask_choice 道具が
+            # 登録される
+            choice_broker = self._choices
+
+            def responder(question: str, options: list, allow_text: bool,
+                          _s: Session = session) -> str | None:
+                return choice_broker.request(
+                    _s.tenant, _s.user, question, options, allow_text,
+                    _s.cfg.approval_timeout_seconds)
+
+            session.responder = responder
 
     def get(self, name: str | None) -> Session:
         session_id = normalize_session_id(name)
@@ -3545,12 +3767,14 @@ class UserStore:
                  default_user: str,
                  make_session: Callable[[str, str], Session],
                  initial: SessionStore | None = None,
-                 approvals: ApprovalBroker | None = None) -> None:
+                 approvals: ApprovalBroker | None = None,
+                 choices: ChoiceBroker | None = None) -> None:
         self.tenant = tenant
         self.default_user = default_user
         self._tenant_data_dir = tenant_data_dir
         self._make_session = make_session
         self._approvals = approvals
+        self._choices = choices
         self._stores: dict[str, SessionStore] = {}
         if initial is not None:
             self._stores[initial.user] = initial
@@ -3562,7 +3786,8 @@ class UserStore:
             store = self._stores.get(name)
             if store is None:
                 initial = self._make_session(name, DEFAULT_SESSION_ID)
-                store = SessionStore(initial, approvals=self._approvals)
+                store = SessionStore(initial, approvals=self._approvals,
+                                     choices=self._choices)
                 self._stores[name] = store
             return store
 
@@ -3609,12 +3834,16 @@ class TenantStore:
         # 承認の保留はサーバー全体で 1 つのブローカーが持ち、
         # 全テナント×ユーザーの Session で共有する
         self.approvals = ApprovalBroker()
+        # 選択肢での質問の保留も、承認と同じくサーバー全体で
+        # 1 つのブローカーが持つ（役割は承認とは分ける）
+        self.choices = ChoiceBroker()
         seeded = UserStore(
             self.default_tenant, initial.cfg.tenant_data_dir,
             self.default_user, self._session_maker(self.default_tenant),
             initial=SessionStore(initial, session_factory,
-                                 approvals=self.approvals),
-            approvals=self.approvals)
+                                 approvals=self.approvals,
+                                 choices=self.choices),
+            approvals=self.approvals, choices=self.choices)
         self._user_stores: dict[str, UserStore] = {self.default_tenant: seeded}
         self._lock = threading.Lock()
 
@@ -3637,7 +3866,8 @@ class TenantStore:
                 cfg = replace(self._cfg, tenant=name)
                 store = UserStore(name, cfg.tenant_data_dir,
                                   self.default_user, self._session_maker(name),
-                                  approvals=self.approvals)
+                                  approvals=self.approvals,
+                                  choices=self.choices)
                 self._user_stores[name] = store
             return store
 
@@ -4202,6 +4432,12 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                     return
                 self._send_json(200, {"approvals": tenants.approvals
                                       .list_pending(*pair)})
+            elif split.path == "/api/choices":
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
+                self._send_json(200, {"choices": tenants.choices
+                                      .list_pending(*pair)})
             elif split.path == "/api/outputs":
                 pair = self._resolve_pair_query(query)
                 if pair is None:
@@ -4514,6 +4750,9 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             if path == "/api/approvals/decide":
                 self._decide_approval()
                 return
+            if path == "/api/choices/answer":
+                self._answer_choice()
+                return
             if path == "/api/reactions":
                 self._toggle_reaction()
                 return
@@ -4767,6 +5006,36 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 self._send_json(404, {"error": "対象の承認が見つかりません"})
                 return
             self._send_json(200, {"decided": True, "approved": approved})
+
+        def _answer_choice(self) -> None:
+            """保留中の質問（選択肢での聞き返し）に回答する。
+
+            対象は本文の tenant / user（無ければ起動時の組み合わせ）
+            の保留だけ。回答すると、回答待ちで止まっていた会話
+            リクエストのスレッドが先へ進む。答えとして受け付ける
+            のは選択肢のラベルのどれか、または文章での回答を許した
+            質問への文章だけ。対象が見つからない・答えが合わない
+            場合は 404（すでに時間切れ・回答済みのものを含む）。
+            """
+            data = self._read_json_body()
+            if data is None:
+                self._send_json(400, {"error": "リクエストが不正です"})
+                return
+            choice_id = data.get("id")
+            answer = data.get("answer")
+            if not isinstance(choice_id, str) or not choice_id \
+                    or not isinstance(answer, str) or not answer.strip():
+                self._send_json(400, {
+                    "error": "id と answer（空でない文字列）を指定してください"})
+                return
+            pair = self._resolve_pair_body(data)
+            if pair is None:
+                return
+            tenant, user = pair
+            if not tenants.choices.answer(tenant, user, choice_id, answer):
+                self._send_json(404, {"error": "対象の質問が見つかりません"})
+                return
+            self._send_json(200, {"answered": True, "answer": answer.strip()})
 
         def _create_tenant(self) -> None:
             """テナントの置き場を新規作成する。
