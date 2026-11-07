@@ -2584,9 +2584,9 @@ Web UI のヘッダー「人格・記憶」ボタンから開く編集パネル�
   動作）。キーを書き忘れたまま compose で起動すると、再起動を
   繰り返すので、まず `.env` を確認すること。
 - **CLI 系の頭脳はコンテナでは使えない**: `claude-code` /
-  `gemini-cli` / `codex` はコンテナ内に各 CLI 本体が無く、ログイン
-  もできないため使えない。コンテナでは API 系（`muse` /
-  `claude` / `gemini`）から選ぶ。
+  `gemini-cli` / `codex` / `antigravity-cli` はコンテナ内に各 CLI
+  本体が無く、ログインもできないため使えない。コンテナでは
+  API 系（`muse` / `claude` / `gemini`）から選ぶ。
 - **待ち受けと認証なしの注意**: コンテナ外から届くよう `--host
   0.0.0.0` で待ち受ける。Web UI は認証を持たない単一ユーザー前提
   なので、ポートを外のネットワークへ開ける場合は、認証付きの
@@ -2607,7 +2607,7 @@ Web UI のヘッダー「人格・記憶」ボタンから開く編集パネル�
 
 ## LLM バックエンド（決定済み）
 
-頭脳は差し替え可能にし、6 種を用意する。選択は環境変数
+頭脳は差し替え可能にし、7 種を用意する。選択は環境変数
 `KUMA_LLM_PROVIDER`（既定 muse）、モデルは `KUMA_LLM_MODEL`。
 候補一覧の正は `brain.py` の `ALL_PROVIDERS`（`llm.PROVIDERS`
 はその写しで、codex も含む）。
@@ -2620,8 +2620,16 @@ API 系（kuma-agent が道具ループを回す）:
 CLI 系（相手側が道具ループを持つ。文脈をプロンプトで渡し、作業
 ディレクトリでヘッドレス実行する。認証は各 CLI のログインを使う）:
 - `claude-code`: Claude Code CLI（`claude -p`）
-- `gemini-cli`: Gemini CLI（`gemini -p`）
+- `gemini-cli`: Gemini CLI（`gemini -p`）。個人向けの Google
+  ログインは Google 側で提供終了になったため、Google アカウント
+  の枠では使えない（API キー経由の利用は可能）。Google アカ
+  ウントの枠で使う場合は後継の `antigravity-cli` を使う
 - `codex`: OpenAI Codex CLI（`codex exec`、workspace-write サンドボックス）
+- `antigravity-cli`: Antigravity CLI（`agy -p`、0.91.0 で追加）。
+  Gemini CLI の後継で、Google アカウントの枠で使う CLI 系の
+  入口。モデル ID には推論の強さが埋め込まれている（既定は
+  `gemini-4-argon-medium`）。会話の継続は agy 側の
+  `--conversation` を使わず、履歴はプロンプトで渡す
 
 CLI 系の安全上の扱い（公開前チェックの指摘1）:
 - **kuma-agent 側の歯止めは効かない**: CLI 系では道具の実行が
@@ -2646,6 +2654,21 @@ CLI 系の安全上の扱い（公開前チェックの指摘1）:
   （空白区切り、全 CLI 共通。Codex ではプロンプトの直前、その他
   では引数列の末尾へ追加）で運用者が生の引数を渡せる。使うか
   どうかは導入先で CLI のヘルプを確認して決める前提。
+- **Antigravity CLI の権限モード（0.91.0 で実測）**: `--mode`
+  等を付けない素の `agy -p` の振る舞いを agy 1.5.3・サイン
+  イン済みの環境で実測した（2026-11-08）。作業ディレクトリ
+  内のファイル作成は確認なしにそのまま実行された（他の CLI
+  系の既定と同水準）。一方、シェルコマンドの実行は、ヘッド
+  レスでは権限の確認を出せないため自動で拒否された（権限
+  待ちで止まることはない）。拒否された場合は終了コード 0 の
+  まま標準出力が空になり、理由は標準エラーへ出る（そのため
+  会話では空の返事になることがある）。以上から、kuma-agent
+  の既定では何も指定せず（Codex 型の明示固定にも寄せず）、
+  シェル実行まで許可したい運用者は agy 側の設定
+  （permissions.allow）か `KUMA_CLI_EXTRA_ARGS` で
+  `--dangerously-skip-permissions` を自己責任で足す形とした。
+  `--dangerously-skip-permissions` を kuma-agent の既定で
+  付けることはしない。
 
 既定モデルは 2026-11 時点の最新に合わせている（Claude Sonnet 5.5 /
 Opus 5.5、Gemini 3.8 Flash / 4 Argon）。モデルは移り変わりが速いので、
@@ -2733,8 +2756,10 @@ Opus 5.5、Gemini 3.8 Flash / 4 Argon）。モデルは移り変わりが速い�
 
 ### テナントごとの頭脳: CLI 系（0.83.0、第3段・最終段）
 
-CLI 系の頭脳（claude-code / gemini-cli / codex）もテナント
-ごとに指定できるようにする。これでテナントごとの頭脳の
+CLI 系の頭脳（claude-code / gemini-cli / codex。0.91.0 からは
+antigravity-cli も、候補の正である `CLI_PROVIDERS` への登録
+だけで自動的に対象になる）もテナントごとに指定できるように
+する。これでテナントごとの頭脳の
 3段（プロバイダ／モデル名 → API キー → CLI 系）がそろう。
 
 - **運用者スイッチ**: CLI 系のテナント別指定は、環境変数

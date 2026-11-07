@@ -125,7 +125,8 @@ def test_tenant_brain_providers_range():
     assert tenant_brain_providers(False) == ("muse", "claude", "gemini")
     allowed = tenant_brain_providers(True)
     assert allowed[:3] == ("muse", "claude", "gemini")
-    assert set(allowed[3:]) == {"claude-code", "gemini-cli", "codex"}
+    assert set(allowed[3:]) == {"claude-code", "gemini-cli", "codex",
+                                "antigravity-cli"}
 
 
 # ------------------------------------------------------- 解決（brain.py）
@@ -166,6 +167,26 @@ def test_resolve_brain_creates_cli_client_only_when_allowed(tmp_path: Path):
     cfg, model = resolve_brain(on, "acme", fallback_model=fallback)
     assert isinstance(model, CliAgentClient)
     assert cfg.provider == "claude-code"
+
+
+def test_antigravity_follows_switch_without_brain_change(tmp_path: Path):
+    # 0.91.0: antigravity-cli も CLI_PROVIDERS への登録だけで、
+    # brain.py 無変更のままスイッチの枠組みに入る
+    from kuma_agent.agent_cli import AntigravityCliClient
+
+    set_brain_setting(tmp_path, "acme", "antigravity-cli", None)
+    off = Config(data_dir=tmp_path)
+    assert tenant_brain_setting(tmp_path, "acme") == {}
+    # 全体の既定（muse）に従い、既定モデル名が補完される
+    assert effective_brain(off, "acme") == ("muse", "muse-wonder-1.0", False)
+    on = Config(data_dir=tmp_path, allow_tenant_brain_cli=True)
+    assert effective_brain(on, "acme") == ("antigravity-cli", "", True)
+    scoped = scoped_config(on, "acme")
+    assert scoped.provider == "antigravity-cli"
+    assert scoped.is_cli_provider is True
+    _cfg, model = resolve_brain(on, "acme", fallback_model=_EchoModel())
+    assert isinstance(model, AntigravityCliClient)
+    assert cli_brain_tenants(tmp_path) == ["acme"]
 
 
 def test_global_cli_default_not_blocked_by_switch(tmp_path: Path):
@@ -217,7 +238,8 @@ def test_save_cli_brain_rejected_when_switch_off(server_off):
     assert status == 200
     # 候補に CLI 系は出ない
     assert data["brain_providers"] == ["muse", "claude", "gemini"]
-    for provider in ("claude-code", "gemini-cli", "codex"):
+    for provider in ("claude-code", "gemini-cli", "codex",
+                     "antigravity-cli"):
         status, _data = _post(base + "/api/tenant_settings",
                               {"tenant": "acme",
                                "brain": {"provider": provider}})

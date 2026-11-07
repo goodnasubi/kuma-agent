@@ -53,7 +53,7 @@ Muse を頭脳にした、対話型の相棒エージェント。人格と記憶
 
 ### 運用と管理
 
-- **選べる頭脳**: 6 種の LLM バックエンドから選べます
+- **選べる頭脳**: 7 種の LLM バックエンドから選べます
 - **使用量の見える化**: 頭脳の利用量（呼び出し回数とトークン数）を記録し、Web UI の「使用量」パネルと `kuma-agent usage` で確認できます（CLI 系の頭脳は回数のみ）
 - **データの書き出しと復元**: ユーザーごとのデータを ZIP で書き出せます（Web UI の「書き出し」ボタン、`kuma-agent export`）。書き出した ZIP からデータの復元もできます（Web UI の「復元」ボタン、`kuma-agent import`。置き換え方式で、復元前に現在のデータの控えが自動で取られます）
 
@@ -79,8 +79,10 @@ kuma-agent web           # Web UI を http://127.0.0.1:8765 で起動する
 | `claude-code` | Claude Code CLI | 不要（CLI のログインを使う） |
 | `gemini-cli` | Gemini CLI | 不要（CLI のログインを使う） |
 | `codex` | Codex CLI | 不要（CLI のログインを使う） |
+| `antigravity-cli` | Antigravity CLI | 不要（CLI のログインを使う） |
 
-CLI 系の頭脳（`claude-code` / `gemini-cli` / `codex`）では、道具の
+CLI 系の頭脳（`claude-code` / `gemini-cli` / `codex` /
+`antigravity-cli`）では、道具の
 実行は外部 CLI の側で行われます。kuma-agent 側の承認確認や道具の
 制限は効かないので、その前提で選んでください。Codex のサンド
 ボックスは `KUMA_CODEX_SANDBOX` で指定できます（既定は
@@ -88,6 +90,12 @@ CLI 系の頭脳（`claude-code` / `gemini-cli` / `codex`）では、道具の
 CLI へ渡す追加の引数は `KUMA_CLI_EXTRA_ARGS`（空白区切り、全 CLI
 共通）で指定できます。指定できる引数は導入先の CLI のバージョン
 によるので、CLI のヘルプで確認してから入れてください。
+
+Antigravity CLI は Gemini CLI の後継です。Gemini CLI の個人向け
+Google ログインは提供終了になったため、Google アカウントの枠で
+使う場合は `antigravity-cli` を選んでください（Gemini CLI は
+API キー経由では引き続き使えます）。Antigravity CLI のモデル名
+は強さまで含めて指定します（例: `gemini-4-argon-medium`）。
 
 #### テナントごとの頭脳（0.81.0〜0.83.0）
 

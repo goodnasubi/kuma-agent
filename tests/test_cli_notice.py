@@ -86,8 +86,9 @@ def test_note_only_when_cli_available(monkeypatch: pytest.MonkeyPatch,
 def test_note_for_each_cli_provider(monkeypatch: pytest.MonkeyPatch,
                                     tmp_path: Path):
     monkeypatch.setattr(shutil, "which",
-                        _which_only("claude", "gemini", "codex"))
-    for provider in ("claude-code", "gemini-cli", "codex"):
+                        _which_only("claude", "gemini", "codex", "agy"))
+    for provider in ("claude-code", "gemini-cli", "codex",
+                     "antigravity-cli"):
         cfg = Config(data_dir=tmp_path, provider=provider)
         assert cli_provider_note(cfg) is not None
 
@@ -133,7 +134,8 @@ def test_serve_prints_cli_note(monkeypatch: pytest.MonkeyPatch,
 # ---------------------------------------------------------- 画面の注意書き
 
 def test_page_note_only_for_cli_providers():
-    for provider in ("claude-code", "gemini-cli", "codex"):
+    for provider in ("claude-code", "gemini-cli", "codex",
+                     "antigravity-cli"):
         html = render_page(provider)
         assert "承認確認や道具の制限は効きません" in html
     for provider in ("muse", "claude", "gemini"):

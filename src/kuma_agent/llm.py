@@ -520,7 +520,8 @@ def create_client(provider: str, api_key: str = "", model: str | None = None, **
     """provider 名からバックエンドを作る。
 
     API 系（muse / claude / gemini）は api_key を使い、CLI 系
-    （claude-code / gemini-cli）は外部 CLI を実行する（キー不要）。
+    （claude-code / gemini-cli / codex / antigravity-cli）は外部
+    CLI を実行する（キー不要）。
     """
     from .agent_cli import CLI_PROVIDERS, create_cli_client
 
@@ -536,7 +537,8 @@ def create_client(provider: str, api_key: str = "", model: str | None = None, **
 # CLI_PROVIDERS で、こちらは循環 import を避けるため写しを持つ
 # （brain.py の ALL_PROVIDERS は両モジュールから組み立てる正の
 # 定義）。以前は codex が漏れていたため、定義し直した
-PROVIDERS = API_PROVIDERS + ("claude-code", "gemini-cli", "codex")
+PROVIDERS = API_PROVIDERS + ("claude-code", "gemini-cli", "codex",
+                             "antigravity-cli")
 
 
 def default_model_name(provider: str) -> str | None:

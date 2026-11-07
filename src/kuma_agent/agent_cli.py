@@ -143,6 +143,42 @@ class GeminiCliClient(CliAgentClient):
         return args
 
 
+class AntigravityCliClient(CliAgentClient):
+    """Antigravity CLI（`agy -p` ヘッドレス実行）。
+
+    Gemini CLI の後継。個人向けの Google ログインが Gemini CLI
+    では提供終了になったため、Google アカウント（AI Pro 等）の
+    枠で使う CLI 系の入口として用意する（Gemini CLI 頭脳は
+    API キー経由の入口として併存）。
+
+    モデル ID には推論の強さ（effort）が埋め込まれている
+    （例: gemini-4-argon-medium）ため、既定モデルは強さつきの
+    ID で持ち、`--effort` は渡さない。会話の継続は agy 側の
+    `--conversation` を使わず、履歴は従来どおりプロンプトへ
+    描いて渡す（履歴の正は kuma-agent 側）。
+
+    権限モードは他の CLI と同じく何も指定しない。素の `agy -p`
+    の実測（1.5.3）では、作業ディレクトリ内のファイル作成は
+    そのまま進み、シェルコマンドの実行はヘッドレスでは確認を
+    出せないため自動で拒否される（止まることはない）。絞り
+    たい運用者は KUMA_CLI_EXTRA_ARGS で `--mode plan` や
+    `--sandbox` を足せる。`--dangerously-skip-permissions` は
+    既定では付けない。
+    """
+
+    COMMAND = "agy"
+    PROVIDER = "antigravity-cli"
+    DEFAULT_MODEL = "gemini-4-argon-medium"  # 強さつきの ID が正（2026-11 時点）
+
+    def build_args(self, prompt: str) -> list[str]:
+        args = [self.command, "-p", prompt]
+        model = self.model or self.DEFAULT_MODEL
+        if model:
+            args += ["--model", model]
+        args += self.extra_args
+        return args
+
+
 class CodexClient(CliAgentClient):
     """OpenAI Codex CLI（`codex exec` ヘッドレス実行）。
 
@@ -181,12 +217,13 @@ class CodexClient(CliAgentClient):
         return args
 
 
-CLI_PROVIDERS = ("claude-code", "gemini-cli", "codex")
+CLI_PROVIDERS = ("claude-code", "gemini-cli", "codex", "antigravity-cli")
 
 _CLI_CLIENTS = {
     "claude-code": ClaudeCodeClient,
     "gemini-cli": GeminiCliClient,
     "codex": CodexClient,
+    "antigravity-cli": AntigravityCliClient,
 }
 
 

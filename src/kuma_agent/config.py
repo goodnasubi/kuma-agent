@@ -78,7 +78,8 @@ class Config:
 
     @property
     def is_cli_provider(self) -> bool:
-        return self.provider in ("claude-code", "gemini-cli", "codex")
+        return self.provider in ("claude-code", "gemini-cli", "codex",
+                                 "antigravity-cli")
 
     def resolve_api_key(self) -> str:
         """プロバイダに応じた環境変数から API キーを引く。"""
@@ -232,7 +233,7 @@ class Config:
             "KUMA_REQUIRE_APPROVALS", "") == "1")
     # テナント別頭脳で CLI 系を選べるようにする運用者スイッチ:
     # "1" のときだけ、テナントの頭脳の指定で CLI 系（claude-code /
-    # gemini-cli / codex）も受け付ける。CLI 系では道具の実行が
+    # gemini-cli / codex / antigravity-cli）も受け付ける。CLI 系では道具の実行が
     # 外部 CLI の側で行われ、kuma-agent 側の承認確認や道具の制限
     # は効かないため、画面操作だけで「承認の効かないテナント」を
     # 作れないよう、解禁は運用者の明示に限る（公開前チェック
