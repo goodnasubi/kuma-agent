@@ -18,6 +18,11 @@ activity.jsonl へ 1 行 1 件で追記する。記録の失敗で会話や送�
 引数は承認画面向けの要約（tools.summarize_tool_args）を再利用し、
 引数全体は記録しない（秘密情報を持ち込む道具があるため）。
 
+道具の失敗は、結果文字列から種類に分けて error_kind としても
+残す（classify_tool_error）。成功した呼び出しには付けない。
+分類は結果の文言頼みで完全ではないため、どれにも当てはまら
+ない失敗は error（その他の例外）に倒す。
+
 保持期限: 記録は行ごとの時刻で切り、期限より古い行は能動発信の
 巡回（proactive.check_and_post）から 1 日 1 回まで
 auto_cleanup_activity が落とす。保持日数は Config の
@@ -32,6 +37,8 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .tools import APPROVAL_DENIED_RESULT, CANCELLED_RESULT
+
 ACTIVITY_FILE = "activity.jsonl"
 CLEANUP_STATE_FILE = "activity_cleanup_state.json"
 
@@ -39,6 +46,49 @@ KIND_TOOL_CALL = "tool_call"
 KIND_APPROVAL = "approval"
 KIND_EXTERNAL_SEND = "external_send"
 KIND_CLI_LAUNCH = "cli_launch"
+
+# 道具の失敗の種類（error_kind）。結果文字列の出どころごとに
+# 分ける（AF-1）。成功した呼び出しの記録には付けない
+ERROR_KIND_APPROVAL_DENIED = "approval_denied"  # 承認されなかった
+ERROR_KIND_CANCELLED = "cancelled"  # キャンセルされた
+ERROR_KIND_NOT_FOUND = "not_found"  # 対象が見つからない
+ERROR_KIND_TIMEOUT = "timeout"  # 時間切れ
+ERROR_KIND_UNKNOWN_TOOL = "unknown_tool"  # 無い道具
+ERROR_KIND_ERROR = "error"  # その他の例外
+
+# 時間切れと分かる結果文の断片。委任の時間切れ（delegate.py）、
+# MCP の応答待ち（mcp_client.py）、道具の subprocess や Web 取得
+# のタイムアウト（例外の文言）で出どころがばらばらのため、
+# 断片の集合で拾う
+_TIMEOUT_MARKERS = (
+    "時間内に終わりませんでした",
+    "以内に応答しませんでした",
+    "timed out",
+)
+
+
+def classify_tool_error(result: str) -> str | None:
+    """道具の結果文字列を失敗の種類に分ける。失敗でなければ None。
+
+    失敗かどうかは従来どおり「error で始まるか」で判定する。
+    分類は文言頼みで完全ではないため、どれにも当てはまらない
+    失敗は ERROR_KIND_ERROR（その他の例外）に倒す。Session の
+    道具ループ（立て直しの促しの出し分け）と活動の記録の両方
+    から使う。
+    """
+    if not result.startswith("error"):
+        return None
+    if result == APPROVAL_DENIED_RESULT:
+        return ERROR_KIND_APPROVAL_DENIED
+    if result == CANCELLED_RESULT:
+        return ERROR_KIND_CANCELLED
+    if result.startswith("error: unknown tool"):
+        return ERROR_KIND_UNKNOWN_TOOL
+    if "見つかりません" in result:
+        return ERROR_KIND_NOT_FOUND
+    if any(marker in result for marker in _TIMEOUT_MARKERS):
+        return ERROR_KIND_TIMEOUT
+    return ERROR_KIND_ERROR
 
 # 一覧で返す件数の既定と上限（feed.py と同じ考え方）
 DEFAULT_LIMIT = 100
@@ -65,6 +115,7 @@ def record_activity(user_data_dir: Path, kind: str, *,
                     tool: str = "", summary: str = "",
                     result: str = "", target: str = "",
                     ok: bool | None = None,
+                    error_kind: str = "",
                     now: datetime | None = None) -> None:
     """活動を 1 件、ユーザーの置き場の activity.jsonl へ追記する。
 
@@ -84,6 +135,8 @@ def record_activity(user_data_dir: Path, kind: str, *,
         entry["target"] = target
     if ok is not None:
         entry["ok"] = ok
+    if error_kind:
+        entry["error_kind"] = error_kind
     try:
         with _write_lock:
             user_data_dir.mkdir(parents=True, exist_ok=True)
@@ -97,11 +150,15 @@ def record_activity(user_data_dir: Path, kind: str, *,
 def record_tool_call(user_data_dir: Path, session_id: str, mode: str,
                      name: str, args_summary: str, result: str,
                      now: datetime | None = None) -> None:
-    """道具の呼び出しを記録する（引数の要約と結果の抜粋）。"""
+    """道具の呼び出しを記録する（引数の要約と結果の抜粋）。
+
+    失敗した呼び出しには、失敗の種類（error_kind）も付ける。
+    """
     record_activity(
         user_data_dir, KIND_TOOL_CALL, session_id=session_id, mode=mode,
         tool=name, summary=args_summary, result=_excerpt(result),
-        ok=not result.startswith("error"), now=now)
+        ok=not result.startswith("error"),
+        error_kind=classify_tool_error(result) or "", now=now)
 
 
 def record_approval(user_data_dir: Path, session_id: str, mode: str,

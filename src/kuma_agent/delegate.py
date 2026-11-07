@@ -10,6 +10,12 @@
 ため、時間切れの後も子が裏で動き続けることはない（実行中の道具
 やモデル呼び出しそのものは止められない）。
 
+委任が失敗したら、失敗の理由を添えて 1 回だけ委ね直す（AF-2 の
+立て直し）。時間切れは委ね直さない（子の作業が途中まで進んで
+いる可能性があり、やり直しで二重に実行される恐れがあるため）。
+能動発信の巡回など、失敗時の受け皿が呼び出し側にある経路では、
+retry=False で立て直しを抑えられる。
+
 Session への import は循環参照を避けるため関数内（遅延）で行う。
 """
 from __future__ import annotations
@@ -89,8 +95,36 @@ def _child_model(parent: Session):
     return parent.model
 
 
-def run_delegated_task(parent: Session, task: str) -> str:
+def run_delegated_task(parent: Session, task: str,
+                       retry: bool = True) -> str:
     """仕事を子エージェントへ委ね、子の最終応答を返す。
+
+    1 回目の委任が失敗（error の結果）したら、失敗の理由を添えた
+    指示文で子を作り直し、1 回だけ委ね直す（AF-2 の立て直し）。
+    委ね直した旨は結果の頭に明記し、親の活動の記録（delegate
+    道具の tool_call）にもその形で残る。時間切れは委ね直さない
+    （子の作業が途中まで進んでいる可能性があり、二重実行の恐れ
+    があるため）。retry=False では立て直し自体をしない（朝の
+    まとめ・定期ジョブ・見張りなど、失敗時の受け皿が呼び出し
+    側にある能動発信の巡回から使う）。
+    """
+    result, timed_out = _run_delegated_once(parent, task)
+    if not retry or timed_out or not result.startswith("error:"):
+        return result
+    retry_task = (
+        f"前回の試みはこう失敗しました: {result}\n"
+        "別の進め方で、同じ目的を果たしてください。\n\n"
+        f"元の依頼:\n{task}")
+    second, _second_timed_out = _run_delegated_once(parent, retry_task)
+    if second.startswith("error:"):
+        return ("error: 委ね直しましたが、再試行も失敗しました。"
+                f"再試行の結果: {second[len('error:'):].strip()}")
+    return ("（1 回目の委任が失敗したため、失敗の理由を伝えて"
+            "委ね直しました）\n" + second)
+
+
+def _run_delegated_once(parent: Session, task: str) -> tuple[str, bool]:
+    """仕事を子エージェントへ 1 回だけ委ね、(結果, 時間切れか) を返す。
 
     承認は親の承認者を子にも配線し、親と同じ仕組みが子の道具でも
     働くようにする。子の実行は別スレッドで行い、制限時間
@@ -148,7 +182,9 @@ def run_delegated_task(parent: Session, task: str) -> str:
         # 破棄され、結果として親へは届かない）
         cancel_event.set()
         return (f"error: 委任先のエージェントが時間内に終わりませんでした"
-                f"（制限 {cfg.delegate_timeout_seconds} 秒）")
+                f"（制限 {cfg.delegate_timeout_seconds} 秒）", True)
     if "error" in outcome:
-        return outcome["error"]
-    return outcome.get("result", "error: 委任先のエージェントから応答がありませんでした")
+        return outcome["error"], False
+    return (outcome.get(
+        "result", "error: 委任先のエージェントから応答がありませんでした"),
+        False)

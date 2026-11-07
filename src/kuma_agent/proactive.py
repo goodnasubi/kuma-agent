@@ -103,6 +103,17 @@ from typing import Callable
 from .activity import auto_cleanup_activity
 from .config import Config, normalize_mode
 from .delegate import run_delegated_task
+
+
+def _sweep_executor(session: Session, prompt: str) -> str:
+    """巡回（朝のまとめ・定期ジョブ・見張り）用の委任の実行役。
+
+    巡回側には失敗時の受け皿（日報への倒し込み・失敗の知らせ・
+    次回の巡回での再確認）が既にあるため、委任の立て直し
+    （AF-2）まで重ねると二重の立て直しになる。retry=False で
+    抑えた形を巡回の既定の実行役にする。
+    """
+    return run_delegated_task(session, prompt, retry=False)
 from .feed import KIND_BRIEFING, KIND_PROACTIVE, append_feed_entry
 from .jobs import Job, JobBoard, is_due
 from .llm import ChatModel
@@ -399,7 +410,7 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
     if not visible_tasks and not _has_calendar_tool(session):
         return None
     executor = (briefing_executor if briefing_executor is not None
-                else run_delegated_task)
+                else _sweep_executor)
     try:
         result = executor(session, build_briefing_prompt(visible_tasks, now))
     except Exception as e:  # 子の失敗で声かけ自体は欠かさない
@@ -492,7 +503,7 @@ def run_due_jobs(cfg: Config, now: datetime, get_session: Callable[[], Session],
     due = [job for job in board.list() if is_due(job, now)]
     if not due:
         return []
-    executor = job_executor if job_executor is not None else run_delegated_task
+    executor = job_executor if job_executor is not None else _sweep_executor
     posted: list[str] = []
     for job in due:
         session = get_session()
@@ -580,7 +591,7 @@ def run_due_watches(cfg: Config, now: datetime,
     if not due:
         return []
     executor = watch_executor if watch_executor is not None \
-        else run_delegated_task
+        else _sweep_executor
     posted: list[str] = []
     for watch in due:
         try:

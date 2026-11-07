@@ -31,7 +31,15 @@ from pathlib import Path
 from typing import Callable
 
 from . import transcribe
-from .activity import record_approval, record_cli_launch, record_tool_call
+from .activity import (
+    ERROR_KIND_APPROVAL_DENIED,
+    ERROR_KIND_CANCELLED,
+    ERROR_KIND_NOT_FOUND,
+    classify_tool_error,
+    record_approval,
+    record_cli_launch,
+    record_tool_call,
+)
 from .config import Config, normalize_mode
 from .delegate import DELEGATE_NOTICE, run_delegated_task
 from .jobs import JobBoard
@@ -102,6 +110,34 @@ APPROVAL_DENIED = "承認されませんでした"
 def approval_waiting_text(name: str) -> str:
     """承認待ちの作業中表示（どの道具の承認待ちか添える）。"""
     return f"承認を待っています（{name}）"
+
+
+# 立て直しの促し（AF-2）: 道具が失敗したとき、モデルへ返す結果の
+# 末尾に足す短い一文。モデル任せにせず仕組みとして足すことで、
+# 頭脳の種類や大小による「詰まったときの粘り」のばらつきをならす
+_FAILURE_HINT = (
+    "（失敗しました。別の方法があれば試し、無ければ利用者に伝えてください）")
+_FAILURE_HINT_NOT_FOUND = (
+    "（見つかりませんでした。名前や条件を変えて探してみてください。"
+    "無ければ、その旨を利用者に伝えてください）")
+
+
+def _with_failure_hint(result: str) -> str:
+    """失敗した道具の結果に、立て直しの促しを足して返す。
+
+    失敗でない結果はそのまま返す。促しは失敗の種類（AF-1 の
+    分類）で出し分ける: 承認の却下とキャンセルには付けない
+    （利用者の意思や打ち切りを、促しで覆す形になるため）。
+    活動の記録には促し前の結果が残る（記録は呼び出し側で
+    促しを足す前に行う）。
+    """
+    kind = classify_tool_error(result)
+    if kind is None or kind in (ERROR_KIND_APPROVAL_DENIED,
+                                ERROR_KIND_CANCELLED):
+        return result
+    hint = (_FAILURE_HINT_NOT_FOUND if kind == ERROR_KIND_NOT_FOUND
+            else _FAILURE_HINT)
+    return f"{result}\n{hint}"
 
 # 要約役に渡す専用プロンプト（人格プロンプトとは分ける）
 _SUMMARY_SYSTEM = (
@@ -551,11 +587,17 @@ class Session:
                     result = self.tools.call(call["name"], args)
                     # 活動の記録: 道具の呼び出しと結果は、モデルの
                     # 応答文とは別に activity.jsonl へ残す（記録の
-                    # 失敗で会話は落とさない。activity 側で握る）
+                    # 失敗で会話は落とさない。activity 側で握る）。
+                    # 記録の結果は立て直しの促しを足す前のものにする
                     record_tool_call(
                         self.cfg.user_data_dir, self.session_id, self.mode,
                         call["name"],
                         summarize_tool_args(call["name"], args), result)
+                    # 立て直しの後押し（AF-2）: 失敗した結果には
+                    # 促しを足してから履歴へ積む。道具自体の自動
+                    # 再試行はしない（冪等でない道具の二重実行を
+                    # 避けるため。別の手を試すかはモデルが決める）
+                    result = _with_failure_hint(result)
                     self.history.append(Message("tool", result, tool_call_id=call.get("id"), tool_name=call["name"]))
             return "（道具の呼び出しが上限に達しました）"
         finally:
