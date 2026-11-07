@@ -2570,6 +2570,15 @@ async function buildTenantRow(name) {
   approvalToggle.checked = settings.approvals_enabled !== false;
   approvalLabel.appendChild(approvalToggle);
   approvalLabel.appendChild(document.createTextNode(' 承認確認'));
+  if (settings.approvals_locked) {
+    // 運用者ロック中は承認を切れない（値は実効値でオン固定）。
+    // 切り替えを無効化し、理由を注記する
+    approvalToggle.checked = true;
+    approvalToggle.disabled = true;
+    const lockNote = document.createElement('span');
+    lockNote.textContent = '（運用者の設定で固定されています）';
+    approvalLabel.appendChild(lockNote);
+  }
   row.appendChild(approvalLabel);
   const retentionLabel = document.createElement('label');
   retentionLabel.appendChild(document.createTextNode('保持期限（日）: '));
@@ -3811,11 +3820,17 @@ def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
 
     retention_days はそのテナントの指定値（未設定なら None）で、
     retention_effective_days は全体の既定まで含めて解決した実効値。
+    approvals_enabled は実効値（運用者ロックが掛かっている間は
+    テナント設定の値によらず True）で、approvals_locked はロック
+    中かどうか（画面が切り替えを無効化して注記を出すために使う）。
     """
+    locked = tenants._cfg.require_approvals
     return {
         "tenant": name,
         "proactive_enabled": proactive_enabled_for(tenants.data_dir, name),
-        "approvals_enabled": approvals_enabled_for(tenants.data_dir, name),
+        "approvals_enabled": (
+            locked or approvals_enabled_for(tenants.data_dir, name)),
+        "approvals_locked": locked,
         "retention_days": load_retention_overrides(tenants.data_dir).get(name),
         "retention_effective_days": retention_days_for(
             tenants.data_dir, name, tenants.retention_days),
@@ -4523,6 +4538,12 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                     self._send_json(400, {
                         "error": "approvals_enabled は true / false で指定してください"})
                     return
+                if tenants._cfg.require_approvals and not enabled:
+                    # 運用者ロック中は、画面（API）から承認を切る
+                    # ことはできない（ロックは合成側の責務）
+                    self._send_json(400, {
+                        "error": "承認確認は運用者の設定で固定されているため、オフにはできません"})
+                    return
                 set_approvals_enabled(tenants.data_dir, name, enabled)
             if "retention_days" in data:
                 days = data["retention_days"]
@@ -5086,6 +5107,36 @@ def _first(values: list[str] | None) -> str | None:
     return values[0] if values else None
 
 
+# ループバック（このマシンの中だけ）と見なすバインド先。
+# これ以外へバインドして起動する場合を「公開」と見なす
+# （公開前チェック直しの共通定義）
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _is_loopback_host(host: str) -> bool:
+    """バインド先がループバックかどうかを返す。"""
+    return host.strip().lower() in _LOOPBACK_HOSTS
+
+
+def startup_guard_warning(host: str, cfg: Config) -> str | None:
+    """起動時ガードの警告文（出す場合だけ返す）。
+
+    Web UI をループバック以外へバインドして起動する（＝公開）うえ
+    パスワード（KUMA_WEB_PASSWORD）が未設定だと、届く範囲の誰でも
+    認証なしに画面と API を使えてしまう。その組み合わせのときだけ
+    強い警告を返す。起動自体は止めない（判断は運用者に残す）。
+    ループバック起動、またはパスワード設定済みなら None。
+    """
+    if _is_loopback_host(host) or cfg.web_password:
+        return None
+    return (
+        "警告: パスワード（環境変数 KUMA_WEB_PASSWORD）が設定されて"
+        f"いないのに、Web UI をこのマシンの外からも届くアドレス"
+        f"（{host}）で起動します。このままでは、届く範囲のだれでも"
+        "認証なしに画面と API を使えます。外に出す場合はパスワードを"
+        "設定してから起動し直してください（起動はこのまま続けます）")
+
+
 def build_server(session: Session, host: str = "127.0.0.1",
                  port: int = 8765,
                  session_factory: Callable[[str], Session] | None = None,
@@ -5170,6 +5221,9 @@ def serve(session: Session, host: str = "127.0.0.1", port: int = 8765) -> None:
               f"部屋の記録 {result.sessions_removed} 件、"
               f"完了した用事 {result.tasks_removed} 件")
     server = build_server(session, host, port)
+    guard_warning = startup_guard_warning(host, cfg)
+    if guard_warning is not None:
+        print(guard_warning)
     if cfg.web_password:
         print("Web UI のログインが有効です（パスワードは環境変数 KUMA_WEB_PASSWORD）")
     _start_proactive_loop(server.tenants, cfg)  # type: ignore[attr-defined]

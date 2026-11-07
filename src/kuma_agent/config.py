@@ -202,6 +202,19 @@ class Config:
         default_factory=lambda: os.environ.get("KUMA_WEB_PASSWORD", ""))
     web_secure_cookie: bool = field(
         default_factory=lambda: os.environ.get("KUMA_WEB_SECURE_COOKIE", "") == "1")
+    # 承認の運用者ロック: "1" の間は、テナント設定（settings.json の
+    # approvals_enabled）で承認を OFF にできず、常に承認を挟む。
+    # 公開時に画面から承認を切られる事故を防ぐための歯止めで、
+    # 合成は Session の承認の配線と Web のテナント設定 API が担う
+    # （settings.py 自体は変えない）
+    require_approvals: bool = field(
+        default_factory=lambda: os.environ.get(
+            "KUMA_REQUIRE_APPROVALS", "") == "1")
+    # shell 道具（run_shell）の有効化: "0" のとき道具自体を登録
+    # しない（モデルの選択肢にも出ない）。既定（未設定を含む）は
+    # 有効＝従来動作
+    shell_enabled: bool = field(
+        default_factory=lambda: os.environ.get("KUMA_SHELL_ENABLED", "") != "0")
 
     @property
     def tenant_data_dir(self) -> Path:

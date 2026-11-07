@@ -62,7 +62,7 @@ def test_tenant_settings_defaults(server):
     status, data = _get(base + "/api/tenant_settings")
     assert status == 200
     assert data == {"tenant": "default", "proactive_enabled": True,
-                    "approvals_enabled": True,
+                    "approvals_enabled": True, "approvals_locked": False,
                     "retention_days": None, "retention_effective_days": 90}
 
     status, data = _get(base + "/api/tenant_settings?tenant=acme")

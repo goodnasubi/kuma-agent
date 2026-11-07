@@ -202,7 +202,8 @@ class Session:
             output_board=self.output_board,
             work_steps=self.work_steps,
             watch_board=self.watch_board,
-            space_store=self.space_store)
+            space_store=self.space_store,
+            shell_enabled=cfg.shell_enabled)
         # MCP サーバーの道具を組み込み道具と並べて登録する。接続は
         # 実効の設定の置き場単位で共有する（テナントの置き場に
         # mcp.json があればその置き場、無ければデータ置き場ルート。
@@ -215,8 +216,16 @@ class Session:
         self._register_mcp_tools()
         # 承認の配線: テナント設定で承認が有効なら、ToolBox の承認
         # フックに _check_approval を差し込む。無効ならフック自体を
-        # 差し込まない（承認者は呼ばれず、従来どおり実行される）
-        self.approvals_enabled = approvals_enabled_for(cfg.data_dir, self.tenant)
+        # 差し込まない（承認者は呼ばれず、従来どおり実行される）。
+        # 運用者ロック（Config.require_approvals、環境変数
+        # KUMA_REQUIRE_APPROVALS）が掛かっている間は、テナント設定
+        # の値によらず承認 ON として配線する。保持期限（テナント
+        # 指定が全体の既定に優先）とは逆向きになるが、「画面から
+        # 緩められない」こと自体がロックの意味のため、合成側で
+        # 強制する（settings.py 自体は変えない）
+        self.approvals_enabled = (
+            cfg.require_approvals
+            or approvals_enabled_for(cfg.data_dir, self.tenant))
         if self.approvals_enabled:
             self.tools.approval_check = self._check_approval
         # 委任（delegate）の道具は、委任で作られた子には登録
