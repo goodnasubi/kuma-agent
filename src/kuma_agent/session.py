@@ -43,6 +43,7 @@ from .memory import (
     format_conversation_hit,
     memory_inject_text,
     normalize_session_id,
+    related_memory_text,
     normalize_tenant_name,
     normalize_user_name,
 )
@@ -257,12 +258,18 @@ class Session:
         self._register_history_search_tool()
         self.history: list[Message] = self._restore_history()
         memory_text = self.memory.load_long_term()
+        # AM-1（関連する記憶の差し込み）用に、記憶の全文と「一部だけ
+        # 載せたか」を保持する。say のたびに、上限で外れた項目から
+        # 発話に関連するものを拾い直して別節で足す
+        self._memory_text = memory_text
+        self._memory_partial = False
         self.system_prompt = load_persona(data_dir)
         if memory_text:
             # 記憶が閾値以下なら全文を、超えたら新しい方の項目だけを
             # 注入する（項目の途中で切らない。memory_inject_text）
             inject_text, partial = memory_inject_text(
                 memory_text, cfg.memory_full_inject_chars)
+            self._memory_partial = partial
             self.system_prompt += f"\n\n# 長期記憶\n{inject_text}"
             if partial:
                 # スレッドモードでは検索道具自体を出さないため、
@@ -467,6 +474,29 @@ class Session:
             "assistant", CANCELLED_REPLY)
         return CANCELLED_REPLY
 
+    def _related_memory_section(self, user_text: str) -> str:
+        """AM-1: この発話に関連する長期記憶の節を組み立てる。
+
+        全文注入の上限を超えて一部しか載っていないときだけ働く
+        （上限以下で全文が載っている間は拾う余地が無い）。上限で
+        外れた項目の中から、発話と関連の強いものを拾い直す
+        （memory.related_memory_text、最大 3 件・合計 800 字）。
+        プロンプト組み立ての共通経路に置くため、相棒モードでも
+        スレッドモードでも効く。関連が無い場合と、拾い直しに
+        失敗した場合は節自体を足さない（空文字列を返す）。
+        """
+        if not self._memory_partial:
+            return ""
+        try:
+            body = related_memory_text(
+                self._memory_text, user_text,
+                self.cfg.memory_full_inject_chars)
+        except Exception:
+            return ""  # 差し込みの失敗で対話を落とさない
+        if not body:
+            return ""
+        return f"# 関連する記憶（前に覚えたこと）\n{body}"
+
     def say(self, user_text: str, attachments: list[Attachment] | None = None,
             quote: str | None = None) -> str:
         """利用者の発話を受け、道具の循環を経て最終応答を返す。
@@ -485,6 +515,9 @@ class Session:
         self.history.append(user_msg)
         user_msg.record_index = self.memory.append_turn(
             "user", _message_text(user_msg), quote=quote_text)
+        # AM-1: この発話に関連する記憶の節（上限超過のときだけ。
+        # 関連が無ければ空で、プロンプトは従来どおりになる）
+        related_section = self._related_memory_section(user_text)
         try:
             for _ in range(self.cfg.max_tool_rounds):
                 # 協調キャンセルの確認点（モデル呼び出しの前）:
@@ -498,6 +531,8 @@ class Session:
                 self._notify(THINKING)
                 prompt = (f"{self.system_prompt}\n\n# 現在日時\n"
                           f"{current_time_text()}")
+                if related_section:
+                    prompt += f"\n\n{related_section}"
                 reply = self._call_model(prompt, self.history, self.tools.schemas())
                 self.history.append(reply)
                 if not reply.tool_calls:

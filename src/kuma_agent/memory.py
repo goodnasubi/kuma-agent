@@ -424,6 +424,53 @@ def memory_inject_text(text: str, full_limit: int) -> tuple[str, bool]:
     return "\n".join(seg.text for seg in picked), True
 
 
+# AM-1（関連する記憶の差し込み）の上限: 拾い直す件数と合計文字数
+RELATED_MEMORY_MAX_ITEMS = 3
+RELATED_MEMORY_MAX_CHARS = 800
+
+
+def related_memory_text(text: str, query: str, full_limit: int,
+                        limit: int = RELATED_MEMORY_MAX_ITEMS,
+                        max_chars: int = RELATED_MEMORY_MAX_CHARS) -> str:
+    """全文注入の上限で外れた項目から、発話に関連するものを拾い直す。
+
+    記憶が full_limit 以下で全文が載る場合は、差し込む余地が無い
+    ため空文字列を返す。超えている場合は、memory_inject_text が
+    載せた項目を除いた残りの項目を対象に、発話文（query）で
+    search_memory_text の点数付けをして、上位から最大 limit 件・
+    合計 max_chars 文字までを返す。上限を超える項目は載せない。
+    関連が無ければ空文字列。拾い直しはキーワードの部分一致頼みで、
+    言い換えは拾えない（設計書 AM-1 の方式 (a)）。
+    """
+    injected, partial = memory_inject_text(text, full_limit)
+    if not partial:
+        return ""
+    # 一括載せで載った項目（本文の多重集合）を差し引いた残りが対象。
+    # 載った項目は再分割で同じ本文になるため、本文で照合できる
+    loaded = [seg.text for seg in split_memory_segments(injected)]
+    remaining: list[MemorySegment] = []
+    for seg in split_memory_segments(text):
+        if seg.text in loaded:
+            loaded.remove(seg.text)
+        else:
+            remaining.append(seg)
+    if not remaining:
+        return ""
+    remainder = "\n".join(seg.text for seg in remaining)
+    hits = search_memory_text(remainder, query, limit=len(remaining))
+    picked: list[str] = []
+    total = 0
+    for hit in hits:
+        if len(picked) >= limit:
+            break
+        cost = len(hit.text) + (1 if picked else 0)  # 結合時の改行分
+        if total + cost > max_chars:
+            continue  # 上限を超える項目は載せない（次の候補は見る）
+        picked.append(hit.text)
+        total += cost
+    return "\n".join(picked)
+
+
 # 発話に付けられるリアクションの絵文字（画面と保存の両方でこの範囲に限る）
 REACTION_EMOJIS: tuple[str, ...] = ("👍", "❤️", "😂", "😮", "🎉", "🙏")
 
