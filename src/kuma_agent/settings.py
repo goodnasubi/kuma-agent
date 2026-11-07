@@ -11,6 +11,11 @@
   の ON/OFF
 - approvals_enabled: 危険な道具（run_shell と MCP 道具）の実行前に
   利用者の承認を挟むかどうか
+- brain: テナントごとの頭脳（プロバイダ／モデル）の上書き
+  （{"provider": ..., "model": ...}。どちらも省略可）。読み書きは
+  brain_setting_for / set_brain_setting が担い、値の検証（未知の
+  プロバイダを落とす等）は解決側（brain.py）の責務とする。秘密
+  （API キー）はこのファイルには絶対に入れない
 
 ファイルが無い・壊れている場合や、そのテナントの指定が無い場合は
 既定値で動く（どちらも ON）。値が真偽値でない項目は無視する。
@@ -92,6 +97,26 @@ def approvals_enabled_for(data_dir: Path, tenant: str | None) -> bool:
                              DEFAULT_APPROVALS_ENABLED)
 
 
+def _merged_tenants(raw: dict) -> dict[str, object]:
+    """raw の tenants を、キーを正規化した辞書として返す（保存用）。
+
+    既存のキーも正規化して引き継ぐ（照合の流儀にそろえる）。
+    tenants が辞書でなければ空の辞書。
+    """
+    tenants = raw.get("tenants")
+    if not isinstance(tenants, dict):
+        return {}
+    return {normalize_tenant_name(key): value
+            for key, value in tenants.items()}
+
+
+def _write_raw(data_dir: Path, raw: dict) -> None:
+    """settings.json を書き出す（保存の共通処理）。"""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(raw, ensure_ascii=False, indent=2)
+    (data_dir / SETTINGS_FILENAME).write_text(text + "\n", encoding="utf-8")
+
+
 def _set_bool_setting(data_dir: Path, tenant: str | None, key: str,
                       enabled: bool) -> None:
     """テナントの真偽値設定を settings.json に保存する（共通処理）。
@@ -102,20 +127,13 @@ def _set_bool_setting(data_dir: Path, tenant: str | None, key: str,
     """
     name = normalize_tenant_name(tenant)
     raw = _load_raw(data_dir)
-    tenants = raw.get("tenants")
-    if not isinstance(tenants, dict):
-        tenants = {}
-    # 既存のキーも正規化して引き継ぐ（照合の流儀にそろえる）
-    merged: dict[str, object] = {
-        normalize_tenant_name(key): value for key, value in tenants.items()}
+    merged = _merged_tenants(raw)
     entry = merged.get(name)
     entry = dict(entry) if isinstance(entry, dict) else {}
     entry[key] = bool(enabled)
     merged[name] = entry
     raw["tenants"] = merged
-    data_dir.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(raw, ensure_ascii=False, indent=2)
-    (data_dir / SETTINGS_FILENAME).write_text(text + "\n", encoding="utf-8")
+    _write_raw(data_dir, raw)
 
 
 def remove_tenant_settings(data_dir: Path, tenant: str | None) -> None:
@@ -127,18 +145,15 @@ def remove_tenant_settings(data_dir: Path, tenant: str | None) -> None:
     """
     name = normalize_tenant_name(tenant)
     raw = _load_raw(data_dir)
-    tenants = raw.get("tenants")
-    if not isinstance(tenants, dict):
+    if not isinstance(raw.get("tenants"), dict):
         return
     # 既存のキーも正規化して照合する（読み書きの流儀にそろえる）
-    merged: dict[str, object] = {
-        normalize_tenant_name(key): value for key, value in tenants.items()}
+    merged = _merged_tenants(raw)
     if name not in merged:
         return
     del merged[name]
     raw["tenants"] = merged
-    text = json.dumps(raw, ensure_ascii=False, indent=2)
-    (data_dir / SETTINGS_FILENAME).write_text(text + "\n", encoding="utf-8")
+    _write_raw(data_dir, raw)
 
 
 def set_proactive_enabled(data_dir: Path, tenant: str | None,
@@ -151,3 +166,59 @@ def set_approvals_enabled(data_dir: Path, tenant: str | None,
                           enabled: bool) -> None:
     """テナントの承認 ON/OFF を settings.json に保存する。"""
     _set_bool_setting(data_dir, tenant, "approvals_enabled", enabled)
+
+
+# ---------------------------------------------------------------- 頭脳
+
+# 頭脳の指定として読む項目（文字列の値だけを拾う）
+_BRAIN_KEYS = ("provider", "model")
+
+
+def brain_setting_for(data_dir: Path, tenant: str | None) -> dict[str, str]:
+    """テナントの頭脳の指定（provider / model）を読む。
+
+    settings.json の brain 項目から、文字列で書かれている項目だけ
+    を返す。指定が無い・壊れている場合は空の辞書。プロバイダ名の
+    正しさ（未知の名前や、その段で許可されていない範囲）などの
+    検証はここでは行わない（解決側＝brain.py の責務）。秘密
+    （API キー）はこのファイルには置かないため、ここにも現れない。
+    """
+    entry = _merged_tenants(_load_raw(data_dir)).get(
+        normalize_tenant_name(tenant))
+    if not isinstance(entry, dict):
+        return {}
+    brain = entry.get("brain")
+    if not isinstance(brain, dict):
+        return {}
+    return {key: brain[key] for key in _BRAIN_KEYS
+            if isinstance(brain.get(key), str)}
+
+
+def set_brain_setting(data_dir: Path, tenant: str | None,
+                      provider: str | None, model: str | None) -> None:
+    """テナントの頭脳の指定を settings.json に保存する。
+
+    provider / model は、文字列を渡すとその項目を指定し、None を
+    渡すとその項目を取り除く。両方とも取り除かれたら brain の
+    指定ごと消え、そのテナントは全体の既定に戻る。他のテナント
+    の指定や、同じテナントの他の設定項目はそのまま残す。
+    """
+    name = normalize_tenant_name(tenant)
+    raw = _load_raw(data_dir)
+    merged = _merged_tenants(raw)
+    entry = merged.get(name)
+    entry = dict(entry) if isinstance(entry, dict) else {}
+    brain = entry.get("brain")
+    brain = dict(brain) if isinstance(brain, dict) else {}
+    for key, value in (("provider", provider), ("model", model)):
+        if value is None:
+            brain.pop(key, None)
+        else:
+            brain[key] = value
+    if brain:
+        entry["brain"] = brain
+    else:
+        entry.pop("brain", None)
+    merged[name] = entry
+    raw["tenants"] = merged
+    _write_raw(data_dir, raw)

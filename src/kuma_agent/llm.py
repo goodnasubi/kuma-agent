@@ -532,4 +532,18 @@ def create_client(provider: str, api_key: str = "", model: str | None = None, **
     return cls(api_key, model=model, **kwargs)
 
 
-PROVIDERS = API_PROVIDERS + ("claude-code", "gemini-cli")
+# 頭脳の候補一覧（API 系＋CLI 系）。CLI 系の正は agent_cli.py の
+# CLI_PROVIDERS で、こちらは循環 import を避けるため写しを持つ
+# （brain.py の ALL_PROVIDERS は両モジュールから組み立てる正の
+# 定義）。以前は codex が漏れていたため、定義し直した
+PROVIDERS = API_PROVIDERS + ("claude-code", "gemini-cli", "codex")
+
+
+def default_model_name(provider: str) -> str | None:
+    """プロバイダの既定モデル名を返す（API 系のみ）。
+
+    モデル名が未指定のときに各クライアントが使う DEFAULT_MODEL。
+    CLI 系はクライアント側に既定モデル名を持たないため None。
+    """
+    cls = _API_CLIENTS.get(provider)
+    return cls.DEFAULT_MODEL if cls is not None else None

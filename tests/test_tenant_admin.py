@@ -63,7 +63,12 @@ def test_tenant_settings_defaults(server):
     assert status == 200
     assert data == {"tenant": "default", "proactive_enabled": True,
                     "approvals_enabled": True, "approvals_locked": False,
-                    "retention_days": None, "retention_effective_days": 90}
+                    "retention_days": None, "retention_effective_days": 90,
+                    "brain_provider": None, "brain_model": None,
+                    "brain_effective_provider": "muse",
+                    "brain_effective_model": "muse-wonder-1.0",
+                    "brain_cli": False,
+                    "brain_providers": ["muse", "claude", "gemini"]}
 
     status, data = _get(base + "/api/tenant_settings?tenant=acme")
     assert status == 200

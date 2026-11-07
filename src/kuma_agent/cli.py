@@ -5,6 +5,7 @@ import argparse
 import sys
 from datetime import datetime
 
+from .brain import scoped_config
 from .config import Config, mode_label, normalize_mode
 from .llm import create_client
 from .memory import (Memory, cleanup_expired, delete_session_record,
@@ -916,6 +917,25 @@ def main(argv: list[str] | None = None) -> int:
                            user=args.user)
     if args.command == "google-calendar":  # 認可・確認もモデルも要らない
         return _run_google_calendar(cfg, args.action, args.targets)
+    if args.command == "web":
+        # Web は TenantStore がテナントごとに頭脳を解決する
+        # （起動時の組み合わせも含む）ため、ここでは全体の既定の
+        # まま渡す
+        api_key = cfg.resolve_api_key()
+        if not cfg.is_cli_provider and not api_key:
+            print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)
+            return 2
+        client = create_client(cfg.provider, api_key, cfg.model,
+                               **cfg.cli_client_kwargs())
+        from .web import serve
+
+        serve(Session(cfg, client), host=args.host, port=args.port)
+        return 0
+    # テナント別頭脳（brain.py）: このプロセスが扱うテナント
+    # （cfg.tenant）に指定があれば、その頭脳に差し替える。対話・
+    # Telegram・記憶まわりのサブコマンドはすべてこの cfg と
+    # client の組で動くため、裏側の処理もテナントの頭脳に追随する
+    cfg = scoped_config(cfg, cfg.tenant)
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)
@@ -929,11 +949,6 @@ def main(argv: list[str] | None = None) -> int:
         return _run_memory_extract(cfg, client, dry_run=args.dry_run)
     if args.command == "skill-learn":  # 学習にモデルが要るため API キー必須
         return _run_skill_learn(cfg, client, dry_run=args.dry_run)
-    if args.command == "web":
-        from .web import serve
-
-        serve(Session(cfg, client), host=args.host, port=args.port)
-        return 0
     if args.command == "telegram":
         return _run_telegram(cfg, client)
     session = Session(cfg, client, session_id=args.session)

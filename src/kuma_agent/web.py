@@ -86,11 +86,20 @@ from .tasks import TaskBoard
 from .worksteps import WorkSteps
 from .telegram import build_proactive_notifier
 from .telegram import start_polling_thread as start_telegram_polling
+from .brain import (
+    MAX_BRAIN_MODEL_CHARS,
+    TENANT_BRAIN_PROVIDERS,
+    effective_brain,
+    resolve_brain,
+    tenant_brain_setting,
+)
 from .settings import (
     approvals_enabled_for,
+    brain_setting_for,
     proactive_enabled_for,
     remove_tenant_settings,
     set_approvals_enabled,
+    set_brain_setting,
     set_proactive_enabled,
 )
 from .tools import summarize_tool_args
@@ -652,7 +661,8 @@ _PAGE_TEMPLATE = """\
        title="いまの状況を見る">__AVATAR__</div>
   <div>
     <h1>クマ</h1>
-    <div class="provider">provider: __PROVIDER__</div>__CLI_PROVIDER_NOTE__
+    <div class="provider" id="providerName">provider: __PROVIDER__</div>
+    <div id="cliNoteSlot">__CLI_PROVIDER_NOTE__</div>
     <div class="provider" id="modeName"></div>
   </div>
   <div class="sessions">
@@ -1261,6 +1271,7 @@ async function applyUser(name) {
   await loadSessions();
   applySession(currentSession);
   refreshAvatarFace();
+  loadMeta();
 }
 
 async function loadUsers() {
@@ -1292,6 +1303,7 @@ async function applyTenant(name) {
   await loadSessions();
   applySession(currentSession);
   refreshAvatarFace();
+  loadMeta();
 }
 
 async function loadTenants() {
@@ -2622,13 +2634,58 @@ async function buildTenantRow(name) {
   }
   retentionLabel.appendChild(days);
   row.appendChild(retentionLabel);
+  const brainLabel = document.createElement('label');
+  brainLabel.appendChild(document.createTextNode('頭脳: '));
+  const brainSelect = document.createElement('select');
+  const brainDefaultOpt = document.createElement('option');
+  brainDefaultOpt.value = '';
+  brainDefaultOpt.textContent = '全体の既定';
+  brainSelect.appendChild(brainDefaultOpt);
+  for (const p of (settings.brain_providers || [])) {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = p;
+    brainSelect.appendChild(opt);
+  }
+  brainSelect.value = settings.brain_provider || '';
+  brainLabel.appendChild(brainSelect);
+  const brainModel = document.createElement('input');
+  brainModel.type = 'text';
+  brainModel.size = 18;
+  if (settings.brain_model) brainModel.value = settings.brain_model;
+  brainModel.placeholder = settings.brain_effective_model
+    ? '既定 ' + settings.brain_effective_model : 'モデル名';
+  brainLabel.appendChild(brainModel);
+  row.appendChild(brainLabel);
+  const brainResetBtn = document.createElement('button');
+  brainResetBtn.type = 'button';
+  brainResetBtn.textContent = '頭脳を既定に戻す';
+  brainResetBtn.title = 'このテナントの頭脳の指定を取り除き、全体の既定に戻す';
+  brainResetBtn.addEventListener('click', async () => {
+    try {
+      const res = await fetch('/api/tenant_settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({tenant: name, brain: null}),
+      });
+      if (!res.ok) throw new Error('reset failed');
+      window.alert('「' + name + '」の頭脳を全体の既定に戻しました');
+      loadTenantAdmin();
+      loadMeta();
+    } catch (e) {
+      window.alert('戻すのに失敗しました');
+    }
+  });
+  row.appendChild(brainResetBtn);
   const saveBtn = document.createElement('button');
   saveBtn.type = 'button';
   setIcon(saveBtn, 'check', '保存');
   saveBtn.addEventListener('click', async () => {
     const body = {tenant: name, proactive_enabled: toggle.checked,
                   approvals_enabled: approvalToggle.checked,
-                  retention_days: days.value === '' ? null : Number(days.value)};
+                  retention_days: days.value === '' ? null : Number(days.value),
+                  brain: {provider: brainSelect.value || null,
+                          model: brainModel.value.trim() || null}};
     try {
       const res = await fetch('/api/tenant_settings', {
         method: 'POST',
@@ -2638,6 +2695,7 @@ async function buildTenantRow(name) {
       if (!res.ok) throw new Error('save failed');
       window.alert('「' + name + '」の設定を保存しました');
       loadTenantAdmin();
+      loadMeta();
     } catch (e) {
       window.alert('保存に失敗しました');
     }
@@ -3138,9 +3196,34 @@ form.addEventListener('submit', async (ev) => {
 // 動く）。スレッドモード（wall）では呼称を「部屋」から
 // 「スレッド」に切り替える
 const modeName = document.getElementById('modeName');
+
+// CLI 系の頭脳のときの注意書き（サーバー側の _CLI_PROVIDER_NOTE_HTML
+// と同じ文面）。頭脳はテナントごとに変わるため、初期表示はサーバー
+// が埋め込み、切り替え後は /api/meta の実効頭脳で描き直す
+const CLI_PROVIDER_NOTE_TEXT = 'この頭脳では、道具の実行は外部の'
+  + '道具の側で行われます。クマ側の承認確認や道具の制限は効きま'
+  + 'せん（委任の型による道具の上限も効きません）';
+
+function renderBrain(data) {
+  const providerEl = document.getElementById('providerName');
+  const slot = document.getElementById('cliNoteSlot');
+  if (!providerEl || !slot || !data || !data.brain_provider) return;
+  providerEl.textContent = 'provider: ' + data.brain_provider
+    + (data.brain_model ? ' / ' + data.brain_model : '');
+  slot.replaceChildren();
+  if (data.brain_cli) {
+    const note = document.createElement('div');
+    note.className = 'provider';
+    note.textContent = CLI_PROVIDER_NOTE_TEXT;
+    slot.appendChild(note);
+  }
+}
+
 async function loadMeta() {
   try {
-    const res = await fetch('/api/meta');
+    const res = await fetch('/api/meta?tenant='
+      + encodeURIComponent(currentTenant) + '&user='
+      + encodeURIComponent(currentUser));
     const data = await res.json();
     if (data.mode_label) {
       modeName.textContent = '分け方: ' + data.mode_label;
@@ -3151,6 +3234,7 @@ async function loadMeta() {
       sessionLabel.textContent = 'スレッド';
       newSessionInput.placeholder = '新しいスレッド';
     }
+    renderBrain(data);
   } catch (e) { /* 取れなければ従来どおり全部出す */ }
 }
 
@@ -3158,6 +3242,9 @@ async function loadMeta() {
   await loadMeta();
   await loadTenants();
   await loadUsers();
+  // テナント／ユーザーが確定したところで、頭脳表示をその
+  // 組み合わせの実効頭脳に合わせ直す
+  await loadMeta();
   await loadSessions();
   refreshAvatarFace();
   loadHistory();
@@ -3786,8 +3873,15 @@ class UserStore:
             store = self._stores.get(name)
             if store is None:
                 initial = self._make_session(name, DEFAULT_SESSION_ID)
-                store = SessionStore(initial, approvals=self._approvals,
-                                     choices=self._choices)
+                # 破棄後の作り直しも make_session を通す（factory を
+                # 渡さないと、最初の Session の設定・モデルを共有する
+                # 既定の作り方になり、頭脳の切り替えが反映されない）
+                store = SessionStore(
+                    initial,
+                    factory=lambda session_id, _user=name:
+                        self._make_session(_user, session_id),
+                    approvals=self._approvals,
+                    choices=self._choices)
                 self._stores[name] = store
             return store
 
@@ -3803,6 +3897,17 @@ class UserStore:
         if store is not None:
             store.discard_all()
 
+    def discard_all_sessions(self) -> None:
+        """このテナントの全ユーザーの Session をすべて破棄する。
+
+        ストアがまだ作られていないユーザーは対象外（作り直しは
+        しない）。頭脳設定の保存時に TenantStore から使う。
+        """
+        with self._lock:
+            stores = list(self._stores.values())
+        for store in stores:
+            store.discard_all()
+
     def names(self) -> list[str]:
         """開いているユーザーと、保存済みユーザーの一覧。"""
         with self._lock:
@@ -3815,11 +3920,12 @@ class TenantStore:
 
     サーバーはテナントごとに UserStore を持ち、その中ではユーザー
     ごとに SessionStore を持つ。初回アクセス時にその組み合わせの
-    Session を作る。新しい組み合わせの Session は、起動時の設定
-    （プロバイダやモデルなど）を引き継ぎ、テナントとユーザーだけを
-    差し替えた Config で作るため、データの置き場は組み合わせごとに
-    分かれる。session_factory は起動時テナント・起動時ユーザーの
-    部屋の作り方だけを差し替える（テスト用）。
+    Session を作る。新しい組み合わせの Session は、起動時の設定を
+    引き継ぎつつ、そのテナントの頭脳の指定（settings.json の
+    brain 項目）があれば brain.resolve_brain で解決した Config と
+    モデル実体の組で作るため、データの置き場も頭脳も組み合わせ
+    ごとに分かれる。session_factory は起動時テナント・起動時
+    ユーザーの部屋の作り方だけを差し替える（テスト用）。
     """
 
     def __init__(self, initial: Session,
@@ -3837,22 +3943,77 @@ class TenantStore:
         # 選択肢での質問の保留も、承認と同じくサーバー全体で
         # 1 つのブローカーが持つ（役割は承認とは分ける）
         self.choices = ChoiceBroker()
+        # テナントごとの頭脳（scoped Config とモデル実体の組）の
+        # キャッシュ。生成に失敗したテナントはキャッシュしない
+        # （設定を直せば次のアクセスで作り直せる）
+        self._brain_cache: dict[str, tuple[Config, object]] = {}
+        self._brain_lock = threading.Lock()
+        if tenant_brain_setting(self._cfg.data_dir, self.default_tenant):
+            # 起動時の組み合わせも同じ解決を通す（起動時だけ特別
+            # 扱いしない）。渡された Session は全体の既定で作られ
+            # ているため、起動時テナントに頭脳の指定があれば、
+            # 解決した組で作り直してから抱える。生成に失敗したら
+            # 全体の既定のまま抱える（そのテナントの新しい部屋は
+            # 次のアクセス時に解決をやり直す）
+            try:
+                brain_cfg, brain_model = self._brain_for(
+                    self.default_tenant)
+            except Exception:
+                pass
+            else:
+                initial = Session(
+                    replace(brain_cfg, tenant=self.default_tenant,
+                            user=self.default_user),
+                    brain_model, initial.session_id)
         seeded = UserStore(
             self.default_tenant, initial.cfg.tenant_data_dir,
             self.default_user, self._session_maker(self.default_tenant),
-            initial=SessionStore(initial, session_factory,
-                                 approvals=self.approvals,
-                                 choices=self.choices),
+            initial=SessionStore(
+                initial,
+                session_factory or (lambda name: self._make_session(
+                    self.default_tenant, self.default_user, name)),
+                approvals=self.approvals,
+                choices=self.choices),
             approvals=self.approvals, choices=self.choices)
         self._user_stores: dict[str, UserStore] = {self.default_tenant: seeded}
         self._lock = threading.Lock()
 
+    @property
+    def startup_provider(self) -> str:
+        """起動時の組み合わせの実効プロバイダ（ページの初期表示用）。"""
+        return effective_brain(self._cfg, self.default_tenant)[0]
+
+    def effective_brain_for(self, tenant: str | None) -> tuple[str, str, bool]:
+        """テナントの実効頭脳（プロバイダ・モデル名・CLI 系か）。
+
+        クライアントは作らない（/api/meta や設定 API の表示用）。
+        """
+        return effective_brain(self._cfg, tenant)
+
+    def _brain_for(self, tenant: str) -> tuple[Config, object]:
+        """テナントの (scoped Config, モデル実体) を解決して保持する。
+
+        テナントに頭脳の指定が無ければ、全体の既定（起動時の
+        Config とモデル実体）の組になる。生成に失敗した場合は
+        例外を送出し、キャッシュしない（そのテナントの Session
+        生成だけが失敗し、他のテナントと全体は止まらない）。
+        """
+        name = normalize_tenant_name(tenant)
+        with self._brain_lock:
+            pair = self._brain_cache.get(name)
+            if pair is None:
+                pair = resolve_brain(self._cfg, name,
+                                     fallback_model=self._model)
+                self._brain_cache[name] = pair
+            return pair
+
     def _session_maker(self, tenant: str) -> Callable[[str, str], Session]:
         def make(user: str, session_id: str) -> Session:
-            cfg = replace(self._cfg,
+            base_cfg, model = self._brain_for(tenant)
+            cfg = replace(base_cfg,
                           tenant=normalize_tenant_name(tenant),
                           user=normalize_user_name(user))
-            return Session(cfg, self._model, session_id)
+            return Session(cfg, model, session_id)
         return make
 
     def _make_session(self, tenant: str, user: str, session_id: str) -> Session:
@@ -3899,6 +4060,23 @@ class TenantStore:
             user_store = self._user_stores.get(name)
         if user_store is not None:
             user_store.discard_sessions(user)
+
+    def discard_tenant_sessions(self, tenant: str | None) -> None:
+        """そのテナントの開いている Session をすべて破棄する。
+
+        頭脳設定の保存時に使う。頭脳のキャッシュも落とし、次に
+        アクセスされたときに新しい頭脳で Session が作り直される
+        （会話記録はファイルに残るため、文脈は復元される）。対象の
+        ストアがまだ作られていなければ、キャッシュだけ落とす。
+        実行中の応答は旧頭脳で完走し、次回から新しい頭脳になる。
+        """
+        name = normalize_tenant_name(tenant)
+        with self._brain_lock:
+            self._brain_cache.pop(name, None)
+        with self._lock:
+            user_store = self._user_stores.get(name)
+        if user_store is not None:
+            user_store.discard_all_sessions()
 
     def names(self) -> list[str]:
         """開いているテナントと、保存済みテナントの一覧。"""
@@ -4109,8 +4287,16 @@ def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     approvals_enabled は実効値（運用者ロックが掛かっている間は
     テナント設定の値によらず True）で、approvals_locked はロック
     中かどうか（画面が切り替えを無効化して注記を出すために使う）。
+    brain_provider / brain_model はそのテナントの頭脳の指定値
+    （未指定の項目は None）で、brain_effective_provider /
+    brain_effective_model は全体の既定まで解決した実効値。
+    brain_cli は実効頭脳が CLI 系かどうか（注意表示の出し分け
+    用）。brain_providers はテナント指定で選べる頭脳の一覧
+    （第1段は API 系のみ）。API キーの値はどの項目にも含めない。
     """
     locked = tenants._cfg.require_approvals
+    brain = brain_setting_for(tenants.data_dir, name)
+    eff_provider, eff_model, eff_cli = tenants.effective_brain_for(name)
     return {
         "tenant": name,
         "proactive_enabled": proactive_enabled_for(tenants.data_dir, name),
@@ -4120,6 +4306,12 @@ def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
         "retention_days": load_retention_overrides(tenants.data_dir).get(name),
         "retention_effective_days": retention_days_for(
             tenants.data_dir, name, tenants.retention_days),
+        "brain_provider": brain.get("provider"),
+        "brain_model": brain.get("model"),
+        "brain_effective_provider": eff_provider,
+        "brain_effective_model": eff_model,
+        "brain_cli": eff_cli,
+        "brain_providers": list(TENANT_BRAIN_PROVIDERS),
     }
 
 
@@ -4357,10 +4549,22 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             if split.path == "/":
                 self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             elif split.path == "/api/meta":
-                self._send_json(200, {"mode": tenants.mode,
-                                      "mode_label": mode_label(tenants.mode),
-                                      "tenant": tenants.default_tenant,
-                                      "user": tenants.default_user})
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
+                tenant, user = pair
+                brain_provider, brain_model, brain_cli = (
+                    tenants.effective_brain_for(tenant))
+                self._send_json(200, {
+                    "mode": tenants.mode,
+                    "mode_label": mode_label(tenants.mode),
+                    "tenant": tenant,
+                    "user": user,
+                    # 解決済みの組み合わせの実効頭脳。ヘッダーの
+                    # 頭脳表示と CLI 系の注意書きの出し分けに使う
+                    "brain_provider": brain_provider,
+                    "brain_model": brain_model,
+                    "brain_cli": brain_cli})
             elif split.path == "/api/tenants":
                 fixed = tenants.fixed_tenant
                 if fixed is not None:
@@ -4884,12 +5088,17 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             self._send_json(200, {"deleted": deleted, "session": session_id})
 
         def _save_tenant_settings(self) -> None:
-            """テナント設定（能動発信・承認の ON/OFF と保持期間）を保存する。
+            """テナント設定（能動発信・承認・保持期間・頭脳）を保存する。
 
-            能動発信と承認は settings.json、保持期間は retention.json
-            に書く（どちらも既存の仕組み）。retention_days に null を
-            渡すとそのテナントの指定を取り除いて全体の既定に戻す。
-            渡されていない項目は変更しない。保存後の最新の設定を返す。
+            能動発信と承認と頭脳は settings.json、保持期間は
+            retention.json に書く（どちらも既存の仕組み）。
+            retention_days に null を渡すとそのテナントの指定を
+            取り除いて全体の既定に戻す。brain は {"provider": ...,
+            "model": ...} の辞書か null で、項目ごとに null が
+            「その項目の指定を取り除く」、brain 自体が null なら
+            指定ごと取り除く。渡されていない項目は変更しない。
+            頭脳を保存したら、そのテナントの Session を破棄して
+            即時反映する。保存後の最新の設定を返す。
             """
             data = self._read_json_body()
             if data is None:
@@ -4928,6 +5137,33 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                         "error": "retention_days は 0 以上の整数か null で指定してください"})
                     return
                 save_retention_override(tenants.data_dir, name, days)
+            if "brain" in data:
+                brain_value = data["brain"]
+                if brain_value is None:
+                    provider = model = None
+                elif isinstance(brain_value, dict):
+                    provider = brain_value.get("provider") or None
+                    model = brain_value.get("model") or None
+                    if provider is not None and (
+                            not isinstance(provider, str)
+                            or provider not in TENANT_BRAIN_PROVIDERS):
+                        self._send_json(400, {
+                            "error": "頭脳の種類が不正です"})
+                        return
+                    if model is not None and (
+                            not isinstance(model, str)
+                            or len(model) > MAX_BRAIN_MODEL_CHARS):
+                        self._send_json(400, {
+                            "error": "モデル名は文字列で指定してください"})
+                        return
+                else:
+                    self._send_json(400, {
+                        "error": "brain は辞書か null で指定してください"})
+                    return
+                set_brain_setting(tenants.data_dir, name, provider, model)
+                # 保存時に即時反映する: そのテナントの Session を
+                # 破棄し、次に開いたときに新しい頭脳で作り直させる
+                tenants.discard_tenant_sessions(name)
             self._send_json(200, _tenant_settings_payload(tenants, name))
 
         def _save_notify_prefs(self) -> None:
@@ -5600,8 +5836,11 @@ def build_server(session: Session, host: str = "127.0.0.1",
     """
     auth = AuthGate(session.cfg.web_password,
                     session.cfg.web_secure_cookie)
-    page = render_page(session.cfg.provider, web_auth=auth.enabled)
     tenants = TenantStore(session, session_factory)
+    # ページの初期表示の頭脳は、起動時の組み合わせの実効頭脳
+    # （テナント指定があればその頭脳）。切り替え後の正確な表示は
+    # /api/meta が担う
+    page = render_page(tenants.startup_provider, web_auth=auth.enabled)
     # LINE の設定（チャネルシークレットとアクセストークン）が
     # そろっていれば、Webhook の処理役を用意する（LINE 用の
     # Session は承認者なしで作る。telegram の経路と同じ流儀）

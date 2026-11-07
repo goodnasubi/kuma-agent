@@ -47,6 +47,7 @@ import httpx
 
 from .config import Config, normalize_mode
 from .activity import record_external_send
+from .brain import resolve_peer_brain
 from .memory import (
     DEFAULT_SESSION_ID,
     normalize_session_id,
@@ -224,16 +225,22 @@ def _default_session_factory(cfg: Config, model) -> SessionFactory:
     付けない（Session の既定のまま）ため、承認が必要な道具は安全側で
     却下される。記録ファイルは行き先の会話（main 等）のものをそのまま
     使うので、履歴は他の経路と共有される。
+
+    頭脳は行き先のテナントの指定で解決する
+    （brain.resolve_peer_brain。プロセスのテナント用の実体を
+    別テナントへ使い回さない分岐を含む）。
     """
-    scoped = replace(cfg,
-                     tenant=normalize_tenant_name(cfg.telegram_tenant),
+    target = normalize_tenant_name(cfg.telegram_tenant)
+    brain_cfg, brain_model = resolve_peer_brain(cfg, target, model)
+    scoped = replace(brain_cfg,
+                     tenant=target,
                      user=normalize_user_name(cfg.telegram_user))
     cache: dict[str, Session] = {}
 
     def factory(session_id: str) -> Session:
         session = cache.get(session_id)
         if session is None:
-            session = Session(scoped, model, session_id)
+            session = Session(scoped, brain_model, session_id)
             cache[session_id] = session
         return session
 
