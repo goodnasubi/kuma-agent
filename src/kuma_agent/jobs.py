@@ -440,6 +440,23 @@ class JobBoard:
         self._save()
         return job
 
+    def set_schedule(self, key: str, schedule: dict) -> Job | None:
+        """名前または ID で予定を変更する。無ければ None。
+
+        予定だけを変え、last_run_at はそのまま保つ（消すと、
+        予定によっては次の巡回で意図せず実行され得るため。
+        定期実行の棚卸しの直し案「時刻をずらす」の実行手段
+        として足した）。schedule は normalize_schedule 済みの
+        前提（set_delivery と同じ流儀）。
+        """
+        self._jobs = self._load()
+        job = self.find(key)
+        if job is None:
+            return None
+        job.schedule = dict(schedule)
+        self._save()
+        return job
+
     def mark_run(self, job_id: str,
                  when: datetime | None = None) -> Job | None:
         """前回実行時刻（last_run_at）を記録して保存する。無ければ None。

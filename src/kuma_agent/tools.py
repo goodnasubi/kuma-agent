@@ -80,11 +80,13 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "delete_job": "定期ジョブを記録中",
     "set_job_enabled": "定期ジョブを記録中",
     "set_job_delivery": "定期ジョブを記録中",
+    "set_job_schedule": "定期ジョブを記録中",
     "create_watch": "見張りを記録中",
     "list_watches": "見張りを確認中",
     "delete_watch": "見張りを記録中",
     "set_watch_enabled": "見張りを記録中",
     "set_watch_delivery": "見張りを記録中",
+    "set_watch_interval": "見張りを記録中",
     "create_space": "画面を作成中",
     "update_space": "画面を更新中",
     "list_spaces": "画面を確認中",
@@ -653,6 +655,30 @@ class ToolBox:
              "required": ["job", "delivery"]},
             self._set_job_delivery,
         ))
+        self.register(Tool(
+            "set_job_schedule",
+            "定期ジョブの予定を変更する。job には名前または ID を、"
+            "kind には daily（毎日）/ weekly（毎週）/ interval"
+            "（間隔）を入れること。daily は time（HH:MM）、weekly "
+            "は time と weekday（月曜=0 〜 日曜=6）、interval は "
+            "hours（何時間ごと）が必要で、種別に合わない項目を"
+            "一緒に渡すとエラーになる。前回実行の記録はそのまま"
+            "保たれる。",
+            {"type": "object", "properties": {
+                "job": {"type": "string",
+                        "description": "変更する定期ジョブの名前または ID"},
+                "kind": {"type": "string",
+                         "enum": ["daily", "weekly", "interval"],
+                         "description": "予定の種別"},
+                "time": {"type": "string",
+                         "description": "時刻（HH:MM、daily / weekly 用）"},
+                "weekday": {"type": "integer",
+                            "description": "曜日（月曜=0 〜 日曜=6、weekly 用）"},
+                "hours": {"type": "integer",
+                          "description": "間隔（時間、interval 用）"}},
+             "required": ["job", "kind"]},
+            self._set_job_schedule,
+        ))
 
     def _create_job(self, title: str, prompt: str, kind: str,
                     time: str | None = None, weekday: int | None = None,
@@ -717,6 +743,21 @@ class ToolBox:
         return (f"更新しました: #{updated.id} {updated.title}"
                 f"（知らせ方: {DELIVERY_LABELS[updated.delivery]}）")
 
+    def _set_job_schedule(self, job: str, kind: str,
+                          time: str | None = None,
+                          weekday: int | None = None,
+                          hours: int | None = None) -> str:
+        assert self.job_board is not None
+        try:
+            schedule = build_schedule(kind, time, weekday, hours)
+        except ValueError as e:
+            return f"error: {e}"
+        updated = self.job_board.set_schedule(job, schedule)
+        if updated is None:
+            return f"error: 定期ジョブ「{job}」が見つかりません"
+        return (f"更新しました: #{updated.id} {updated.title}"
+                f"（{schedule_description(updated.schedule)}）")
+
     def _register_watch_tools(self) -> None:
         # 見張りの道具は定期ジョブと同じくモードを問わず登録する
         # （置き場はユーザーごとの watches.json）。確認と変化の
@@ -776,6 +817,20 @@ class ToolBox:
                              "description": "届け方"}},
              "required": ["watch", "delivery"]},
             self._set_watch_delivery,
+        ))
+        self.register(Tool(
+            "set_watch_interval",
+            "見張りの確認間隔を変更する。watch には名前または "
+            "ID を、interval_hours には確認の間隔（時間、1 以上）"
+            "を入れること。基準や確認・変化の記録はそのまま"
+            "保たれる。",
+            {"type": "object", "properties": {
+                "watch": {"type": "string",
+                          "description": "変更する見張りの名前または ID"},
+                "interval_hours": {"type": "integer",
+                                   "description": "確認の間隔（時間）"}},
+             "required": ["watch", "interval_hours"]},
+            self._set_watch_interval,
         ))
         self.register(Tool(
             "delete_watch",
@@ -875,6 +930,24 @@ class ToolBox:
             return f"error: 見張り「{watch}」が見つかりません"
         return (f"更新しました: #{updated.id} {updated.title}"
                 f"（知らせ方: {DELIVERY_LABELS[updated.delivery]}）")
+
+    def _set_watch_interval(self, watch: str,
+                            interval_hours: int) -> str:
+        assert self.watch_board is not None
+        found = self.watch_board.find(watch)
+        if found is None:
+            return f"error: 見張り「{watch}」が見つかりません"
+        try:
+            # 間隔の検証は登録時と同じ validate_watch に寄せる
+            _kind, _target, hours = validate_watch(
+                found.kind, found.target, interval_hours)
+        except ValueError as e:
+            return f"error: {e}"
+        updated = self.watch_board.set_interval(watch, hours)
+        if updated is None:
+            return f"error: 見張り「{watch}」が見つかりません"
+        return (f"更新しました: #{updated.id} {updated.title}"
+                f"（{updated.interval_hours} 時間ごと）")
 
     def _register_space_tools(self) -> None:
         # 小さな画面の道具はモードを問わず登録する（置き場は

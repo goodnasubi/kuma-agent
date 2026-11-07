@@ -89,6 +89,17 @@ AF-5）も発言を伴わない仕事として 1 日 1 回まで行う: 進行�
 いたらフィード（種別 task）にだけ残す。初回の観測は基準を取る
 だけで記録しない。モデルは使わない。
 
+定期実行の棚卸し（fleet_audit.audit_fleet）も発言を伴わない
+仕事として、月 1 回まで（月が変わった最初の巡回で）行う:
+見張りと定期ジョブの定義と履歴を突き合わせ、見直しをおすすめ
+するもの（確認の失敗が続く見張り、長く変化のない見張り、同じ
+対象の見張りの重なり、定期ジョブの実行時刻の重なり、未配信の
+まま滞った知らせ）に印を付けて、詳細をフィード（種別
+proactive）にだけ残す。自動では一切変えず、モデルも使わない。
+同じ印は指紋が変わらない限り繰り返さない。当日分の短い材料は
+朝のまとめにだけ渡し（日報には混ぜない）、まとめが投稿されたら
+取り下げる。棚卸し全体は KUMA_FLEET_AUDIT=0 で無効化できる。
+
 見張りの変化には「通知の取捨」（0.84.0）がある: 見張りごとに
 届け方（delivery）を持ち、immediate（既定）は従来どおり
 その場で知らせ文を作って投稿し、digest はその場では投稿せず
@@ -246,6 +257,11 @@ def _triage_executor(session: Session, prompt: str) -> str:
     return run_delegated_task(session, prompt, retry=False,
                               role="triage")
 from .feed import KIND_BRIEFING, KIND_PROACTIVE, append_feed_entry
+from .fleet_audit import (
+    audit_fleet,
+    mark_fleet_briefing_used,
+    pending_fleet_text,
+)
 from .jobs import Job, JobBoard, is_due
 from .llm import ChatModel
 from .memory import (
@@ -686,7 +702,8 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
                           calendar_text: str | None = None,
                           task_notes: dict[str, str] | None = None,
                           calendar_empty: bool = False,
-                          digest_text: str | None = None) -> str:
+                          digest_text: str | None = None,
+                          fleet_text: str | None = None) -> str:
     """朝のまとめを子へ頼む指示文を組み立てる。
 
     その日の日付と、進行中の用事の一覧（ミュート分は呼び出し側で
@@ -719,6 +736,11 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
     一度きりで再び集め直せないため、他の材料と違い、日報への
     倒し込みにも専用の節として含める（倒し込み側は
     _daily_message）。
+    fleet_text（定期実行の棚卸しの短い材料）があれば、
+    「定期実行の棚卸し」として材料に足し、まとめの中で自然に
+    見直しをおすすめするものがあることに触れるよう指示する。
+    詳細はフィードに残してあるため、材料は件数と見出しだけに
+    留める。こちらも日報の組み立てには混ぜない。
     """
     date_text = (f"{now.year}年{now.month}月{now.day}日"
                  f"（{_WEEKDAY_NAMES[now.weekday()]}）")
@@ -771,6 +793,12 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
             "近づいている期限のある記憶:",
             deadlines_text,
         ]
+    if fleet_text:
+        lines += [
+            "",
+            "定期実行の棚卸し:",
+            fleet_text,
+        ]
     lines += [
         "",
         "やること:",
@@ -781,8 +809,8 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
         "予定を確認してください。",
         "- 今日の予定の節も進行中の用事も無く、確認したい記憶も"
         "作業の手順の残りも近づいている期限のある記憶も"
-        "まとめて知らせる変化も無ければ、「なし」とだけ"
-        "答えてください。",
+        "まとめて知らせる変化も定期実行の棚卸しも無ければ、"
+        "「なし」とだけ答えてください。",
         "- どちらかあれば、朝の挨拶に続けて、今日の予定（時刻と"
         "題名）と進行中の用事を短くまとめた、利用者への知らせを"
         "書いてください（その文章がそのまま利用者へ投稿されます）。",
@@ -811,6 +839,12 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
         lines.append(
             "- 近づいている期限のある記憶があれば、知らせの中で"
             "自然に、その期限が近いことに触れてください。")
+    if fleet_text:
+        lines.append(
+            "- 定期実行の棚卸しがあれば、知らせの中で自然に、"
+            "見直しをおすすめするものがあることに触れてください"
+            "（件数と概要までで、詳細はフィードの"
+            "「定期実行の棚卸し」で確認できる旨を添えてください）。")
     return "\n".join(lines)
 
 
@@ -840,6 +874,7 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
                    task_notes: dict[str, str] | None = None,
                    calendar_empty: bool = False,
                    digest_events: list[QueueEvent] | None = None,
+                   fleet_text: str | None = None,
                    ) -> tuple[str, str, list[str]] | None:
     """その日の声かけ（朝のまとめ／日報）の文面を決める。
 
@@ -879,7 +914,8 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
        AF-3）、期限の近い記憶（deadlines_text、AM-4）、今日の
        予定（calendar_text、Google カレンダー連携。用事へ寄せた
        注記 task_notes だけの場合も含む）、寄せた変化
-       （digest_events）がある場合は、それ自体が材料になる。
+       （digest_events）、定期実行の棚卸しの材料（fleet_text）
+       がある場合は、それ自体が材料になる。
        予定が 0 件だった旨（calendar_empty）は文脈として渡す
        だけで、材料にはしない
     6. 子にまとめさせ、失敗・空応答なら日報の組み立てに倒す。
@@ -923,7 +959,7 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
     if not visible_tasks and not _has_calendar_tool(session) \
             and not confirm_text and not steps_text \
             and not deadlines_text and not calendar_text \
-            and not task_notes and not picked:
+            and not task_notes and not picked and not fleet_text:
         return None
     executor = (briefing_executor if briefing_executor is not None
                 else _sweep_executor)
@@ -937,7 +973,8 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
                 calendar_text=calendar_text,
                 task_notes=task_notes,
                 calendar_empty=calendar_empty,
-                digest_text=build_digest_material(picked, now)))
+                digest_text=build_digest_material(picked, now),
+                fleet_text=fleet_text))
     except Exception as e:  # 子の失敗で声かけ自体は欠かさない
         result = f"error: {e}"
     if not isinstance(result, str):
@@ -1574,6 +1611,18 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     except Exception:
         pass  # 観測の失敗で巡回全体は落とさない
 
+    # 定期実行の棚卸し（fleet_audit）: 月 1 回まで（月が変わった
+    # 最初の巡回）、見張りと定期ジョブの定義と履歴を突き合わせて
+    # 見直しの候補に印を付け、詳細をフィードにだけ残す。自動では
+    # 何も変えず、モデルも使わないので、モデルなしの経路でも
+    # 行う。モードを問わず行う（見張り・ジョブは両モードの仕組み
+    # のため）。朝のまとめへの短い材料は、この後の日報の節で
+    # 状態から読む
+    try:
+        audit_fleet(user_data_dir, now=now)
+    except Exception:
+        pass  # 棚卸しの失敗で巡回全体は落とさない
+
     # 定期ジョブは用事とは独立の仕組みで、モードも静かな時間帯も
     # 問わず、期限が来ていれば先に実行して結果を投稿する
     posted.extend(run_due_jobs(cfg, now, get_session,
@@ -1671,6 +1720,14 @@ def check_and_post(cfg: Config, now: datetime | None = None,
                 user_data_dir, limit=MAX_BRIEFING_EVENTS)
         except Exception:
             digest_events = []
+        # 定期実行の棚卸し（fleet_audit）の短い材料: 棚卸しを
+        # 実施した日だけ、状態に残した当日分を朝のまとめにだけ
+        # 渡す。読み取りの失敗で日報自体は落とさない
+        fleet_text: str | None = None
+        try:
+            fleet_text = pending_fleet_text(user_data_dir, now=now)
+        except Exception:
+            fleet_text = None
         daily = _daily_message(cfg, now, visible_tasks, user_data_dir,
                                get_session, briefing_executor, manual=manual,
                                confirm_text=confirm[1] if confirm else None,
@@ -1679,7 +1736,8 @@ def check_and_post(cfg: Config, now: datetime | None = None,
                                calendar_text=calendar_text,
                                task_notes=task_notes,
                                calendar_empty=calendar_empty,
-                               digest_events=digest_events)
+                               digest_events=digest_events,
+                               fleet_text=fleet_text)
         if daily is not None:
             text, feed_kind, delivered_ids = daily
             get_session().post_proactive_message(text)
@@ -1694,6 +1752,14 @@ def check_and_post(cfg: Config, now: datetime | None = None,
                     mark_confirm_asked(user_data_dir, confirm[0], now=now)
                 except Exception:
                     pass  # 印付けの失敗で投稿や巡回は落とさない
+            # 棚卸しの材料も、朝のまとめとして投稿された場合だけ
+            # 取り下げる（日報に倒した場合は当日分として残るが、
+            # 翌日には当日分でなくなるため混ざらない）
+            if fleet_text is not None and feed_kind == KIND_BRIEFING:
+                try:
+                    mark_fleet_briefing_used(user_data_dir, now=now)
+                except Exception:
+                    pass  # 取り下げの失敗で投稿や巡回は落とさない
             # 寄せた変化は、実際に投稿された場合だけ配信済みに
             # する（投稿前に印を付けない。印付けに失敗したら
             # 未配信のまま残り、翌日に重複して届く側に倒れる）

@@ -433,6 +433,23 @@ class WatchBoard:
         self._save()
         return watch
 
+    def set_interval(self, key: str, interval_hours: int) -> Watch | None:
+        """ID または名前で確認間隔を変更する。対象がなければ None。
+
+        間隔だけを変え、基準（last_hash / last_summary）や確認・
+        変化・失敗の記録はそのまま保つ（削除＋再登録では基準が
+        消えてしまうため、定期実行の棚卸しの直し案「間隔を
+        広げる」の実行手段として足した）。interval_hours は
+        validate_watch で検証済みの前提。
+        """
+        self._watches = self._load()
+        watch = self.find(key)
+        if watch is None:
+            return None
+        watch.interval_hours = interval_hours
+        self._save()
+        return watch
+
     def mark_checked(self, watch_id: str, now: datetime, *,
                      hash: str | None = None, summary: str = "",
                      error: str = "", changed: bool = False) -> None:
