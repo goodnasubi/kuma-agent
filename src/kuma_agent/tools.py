@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -121,6 +122,11 @@ APPROVAL_TARGET_NAMES = frozenset({"run_shell"})
 # 結果文字列にすることで、モデルが受けて会話を続けられる
 APPROVAL_DENIED_RESULT = "error: 承認されませんでした"
 
+# 協調キャンセルの印（cancel_event）が立っているときに道具の結果
+# として返す文言。承認の却下と同じく例外ではなく結果文字列にし、
+# 呼び出し側（Session の道具ループ）が次の確認点で会話を打ち切る
+CANCELLED_RESULT = "error: キャンセルされました"
+
 
 def requires_approval(name: str) -> bool:
     """その道具の実行前に利用者の承認が要るかどうか。
@@ -217,6 +223,12 @@ class ToolBox:
         # （フックが無い・例外・False のいずれも実行しない側に倒す
         # 配線は Session の仕事）
         self.approval_check: Callable[[str, dict], bool] | None = None
+        # 協調キャンセルの印: 委任の子の制限時間切れなどで立てら
+        # れる threading.Event。Session が自分の印をそのまま差し
+        # 込む。None の間はキャンセルを確認しない（従来動作）で、
+        # 立っていたら call の冒頭で道具を実行せずに打ち切る。
+        # 実行中の道具そのものは止められない（確認は呼び出し単位）
+        self.cancel_event: threading.Event | None = None
         self._register_defaults()
         if work_steps is not None:
             self._register_work_step_tools()
@@ -1035,6 +1047,11 @@ class ToolBox:
         ]
 
     def call(self, name: str, args: dict) -> str:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            # キャンセルの印が立っていたら、道具は実行しない。
+            # 道具の連鎖の途中で早く止まるための確認点で、実行中
+            # の道具を止めるものではない
+            return CANCELLED_RESULT
         tool = self._tools.get(name)
         if tool is None:
             return f"error: unknown tool {name}"

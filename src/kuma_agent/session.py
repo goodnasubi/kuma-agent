@@ -24,6 +24,7 @@ tasks.json に置く。
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -79,6 +80,12 @@ def current_time_text(now: datetime | None = None) -> str:
 
 # 圧縮後の履歴の先頭に置く要約発話の見出し
 SUMMARY_PREFIX = "（これまでの会話の要約）"
+
+# 協調キャンセルで会話を打ち切るときの最終応答。委任の子が制限
+# 時間を過ぎたときに親が cancel_event を立て、子は次の確認点で
+# この文言を最終応答として記録して終わる（親には既に時間切れの
+# error が返っているため、この応答自体は親へは届かない）
+CANCELLED_REPLY = "（キャンセルされたため、この作業は打ち切りました）"
 
 # 作業中表示の文言（UI がそのまま出す）。道具の作業名は
 # tools.activity_label が道具ごとに出す。作業が終わったら空文字列を
@@ -136,7 +143,8 @@ class Session:
                  on_status: Callable[[str], None] | None = None,
                  mcp_manager: McpManager | None = None,
                  approver: Callable[[str, dict], bool] | None = None,
-                 delegate_child: bool = False) -> None:
+                 delegate_child: bool = False,
+                 cancel_event: threading.Event | None = None) -> None:
         self.cfg = cfg
         self.model = model
         # 作業中表示のコールバック。対話ループの各段階で「今なにを
@@ -155,6 +163,14 @@ class Session:
         # delegate- で始まる自分のセッション ID をそのまま使う。
         # また子には delegate 道具自体を登録しない（委任は1段まで）
         self.delegate_child = delegate_child
+        # 協調キャンセルの印。委任の子にだけ親（delegate.py）が
+        # 制限時間切れの打ち切り用に渡す。say の道具ループと
+        # モデル呼び出しの前、ToolBox の呼び出し冒頭で確認し、
+        # 立っていたら会話を打ち切る。渡されなければ未設定の
+        # Event を自分で持ち、誰も立てないため通常のセッション
+        # の挙動は従来どおりになる
+        self.cancel_event = (cancel_event if cancel_event is not None
+                             else threading.Event())
         self.tenant = normalize_tenant_name(cfg.tenant)
         self.user = normalize_user_name(cfg.user)
         self.mode = normalize_mode(cfg.mode)
@@ -204,6 +220,9 @@ class Session:
             watch_board=self.watch_board,
             space_store=self.space_store,
             shell_enabled=cfg.shell_enabled)
+        # 道具の連鎖の途中でも早く止まれるよう、ToolBox にも同じ
+        # 印を差し込む（call の冒頭で確認される）
+        self.tools.cancel_event = self.cancel_event
         # MCP サーバーの道具を組み込み道具と並べて登録する。接続は
         # 実効の設定の置き場単位で共有する（テナントの置き場に
         # mcp.json があればその置き場、無ければデータ置き場ルート。
@@ -429,6 +448,25 @@ class Session:
                 ))
         return history
 
+    def _cancelled(self) -> bool:
+        """協調キャンセルの印が立っているかどうか。"""
+        return self.cancel_event.is_set()
+
+    def _finish_cancelled(self) -> str:
+        """キャンセルで会話を打ち切り、最終応答として記録して返す。
+
+        実行中の道具やモデル呼び出しそのものは止められないため、
+        打ち切りは確認点（道具ループの各周回・モデル呼び出しの
+        前・道具呼び出しの前）でのみ起きる。最終応答は通常の完了
+        と同じく履歴と記録に残し、子の会話記録から「時間切れで
+        止まった」ことが辿れるようにする。
+        """
+        reply = Message("assistant", CANCELLED_REPLY)
+        self.history.append(reply)
+        reply.record_index = self.memory.append_turn(
+            "assistant", CANCELLED_REPLY)
+        return CANCELLED_REPLY
+
     def say(self, user_text: str, attachments: list[Attachment] | None = None,
             quote: str | None = None) -> str:
         """利用者の発話を受け、道具の循環を経て最終応答を返す。
@@ -449,6 +487,11 @@ class Session:
             "user", _message_text(user_msg), quote=quote_text)
         try:
             for _ in range(self.cfg.max_tool_rounds):
+                # 協調キャンセルの確認点（モデル呼び出しの前）:
+                # 印が立っていたら、それ以上のモデル呼び出しも道具
+                # 実行もせずに打ち切る
+                if self._cancelled():
+                    return self._finish_cancelled()
                 # モデルへの問い合わせ（CLI 系バックエンドもこの経路）
                 # 現在日時は発話のたびに新しいものを添える（リマインダーの
                 # 絶対時刻への変換に使う）
@@ -463,6 +506,11 @@ class Session:
                     self._maybe_compact()
                     return reply.content
                 for call in reply.tool_calls:
+                    # 協調キャンセルの確認点（道具呼び出しの前）。
+                    # ToolBox 側でも同じ印を見るため、ここを通過して
+                    # も実行直前に立っていれば道具は動かない
+                    if self._cancelled():
+                        return self._finish_cancelled()
                     args = call.get("args", {})
                     self._notify(activity_label(call["name"], args))
                     result = self.tools.call(call["name"], args)
@@ -648,7 +696,15 @@ class Session:
         CLI 系の頭脳では道具の実行が外部 CLI の側で行われるため
         道具単位の活動は追えない。代わりに、起動したことだけを
         活動の記録（cli_launch）として残す。
+
+        協調キャンセルの印が立っていたら、モデルは呼ばずに
+        キャンセルの文言を応答として返す（say 側が最終応答として
+        記録して会話を終える。要約などの道具なし経路でも、打ち
+        切られた会話をそれ以上進めないための受け皿）。
+        実行中のモデル呼び出しそのものは止められない。
         """
+        if self._cancelled():
+            return Message("assistant", CANCELLED_REPLY)
         if self.cfg.is_cli_provider:
             record_cli_launch(self.cfg.user_data_dir, self.session_id,
                               self.mode, self.cfg.provider,
