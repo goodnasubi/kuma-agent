@@ -28,6 +28,7 @@ from pathlib import Path
 
 from .llm import ChatModel, Message
 from .memory import Memory, split_memory_segments
+from .memory_meta import prune_memory_meta
 
 # 自動の機械的除去の状態ファイル（ユーザーの置き場に置く。
 # proactive_state.json と同じ「日付を JSON で記録する」流儀）
@@ -219,6 +220,13 @@ def _apply(memory: Memory, result: TidyResult,
     memory.memory_file.parent.mkdir(parents=True, exist_ok=True)
     memory.memory_file.write_text(result.final_text, encoding="utf-8")
     result.applied = True
+    # 項目の属性（memory_meta.json、AM-2）の孤児掃除: 書き換えで
+    # 消えた項目に対応する属性が残らないようにする。属性側の
+    # 掃除の失敗で整理自体は落とさない
+    try:
+        prune_memory_meta(memory.data_dir, result.final_text)
+    except Exception:
+        pass
     return result
 
 

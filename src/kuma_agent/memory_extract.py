@@ -17,6 +17,10 @@ MEMORY.md へ足す仕組み（詳細は docs/DESIGN.md の「長期記憶の
 - モデルへは道具なしの単発 chat で、新しい会話の抜粋と現在の
   MEMORY.md を渡し、箇条書きだけを返させる。「なし」・空・
   箇条書きでない応答・例外の場合は MEMORY.md を変更しない
+- 期限のある一時的な情報は、項目の末尾に（期限: YYYY-MM-DD）
+  の形で期限を添えて返させる（AM-2）。期限の印は MEMORY.md
+  には書かず、項目の属性（memory_meta.json）へ振り分ける。
+  印が無い従来形式の箇条書きもそのまま受け付ける（倒し込み）
 - 適用するときは、書き込む前に必ず MEMORY.md.bak-<日時> へ
   控えを取り（memory_tidy と同じ作法。MEMORY.md がまだ無い
   場合は控えは作らない）、末尾へ足してから機械的な重複除去
@@ -39,8 +43,9 @@ from pathlib import Path
 from typing import Callable
 
 from .llm import ChatModel, Message
-from .memory import Memory
-from .memory_tidy import backup_memory_file, dedupe_memory_text
+from .memory import Memory, split_memory_segments
+from .memory_meta import record_memory_items
+from .memory_tidy import _segment_key, backup_memory_file, dedupe_memory_text
 
 # 状態ファイル（ユーザーの置き場に置く。memory_tidy_state.json
 # と同じ「日付と進捗を JSON で記録する」流儀）
@@ -62,6 +67,12 @@ _DELEGATE_PREFIX = "delegate-"
 # モデルが返しがちな * / + / ・も受け付けて「- 」にそろえる
 _BULLET_START_RE = re.compile(r"^(?:[-*+]\s+|・\s*)")
 
+# 項目の末尾に付けられる期限の印（AM-2）。期限のある一時的な
+# 情報だけに付けさせ、本文（MEMORY.md）には残さず属性へ回す
+_UNTIL_SUFFIX_RE = re.compile(
+    r"[（(]\s*期限\s*[:：]\s*(\d{4}-\d{2}-\d{2})\s*[）)]\s*$")
+
+
 # 抽出用の指示。事実の保持と、すでにある内容を繰り返さないことを
 # 強く求める（memory_tidy の統合用指示と同じ考え方）
 EXTRACTION_SYSTEM = (
@@ -74,6 +85,11 @@ EXTRACTION_SYSTEM = (
     "会話に書かれていないことを補わないこと（推測で項目を足さないこと）。"
     "残す価値があるものが無ければ「なし」とだけ返すこと。"
     "説明や前置きは付けず、箇条書き（または「なし」）だけを返すこと。"
+    "期限のある一時的な情報（「今週末まで」「来月いっぱい」など）に"
+    "ついては、その項目の末尾に（期限: YYYY-MM-DD）の形で西暦の"
+    "期限を添えること。期限はプロンプトに示す今日の日付を基準に"
+    "計算すること。期限が読み取れない項目や、長く残す情報には"
+    "期限を付けないこと。"
 )
 
 
@@ -231,20 +247,41 @@ def _collect_new_material(user_data_dir: Path,
 
 # ---------------------------------------------------------- モデルの応答
 
-def _parse_bullets(text: str) -> list[str] | None:
-    """モデルの応答を箇条書きの項目列として読む。
+def _split_until(body: str) -> tuple[str, str | None]:
+    """項目本文の末尾にある期限の印（AM-2）を (本文, 期限) に分ける。
+
+    印が無い、または日付として読めない場合は、本文はそのまま
+    で期限は None（従来の箇条書きと同じ扱いに倒す）。
+    """
+    match = _UNTIL_SUFFIX_RE.search(body)
+    if match is None:
+        return body, None
+    until = match.group(1)
+    try:
+        parsed = datetime.strptime(until, "%Y-%m-%d")
+    except ValueError:
+        return body, None
+    if parsed.strftime("%Y-%m-%d") != until:
+        return body, None
+    return body[:match.start()].rstrip(), until
+
+
+def _parse_items(text: str) -> list[tuple[str, str | None]] | None:
+    """モデルの応答を (箇条書き, 期限) の項目列として読む。
 
     「なし」（末尾の「。」は許容）なら空のリスト、箇条書きだけの
-    応答なら「- 」にそろえた項目列を返す。空の応答や、箇条書き
-    でない行を含む応答は失敗として None を返す（変な文章を
-    そのまま長期記憶へ足さないため）。
+    応答なら「- 」にそろえた項目列を返す。期限の印が付いた項目
+    は、印を本文から外して期限と組にする（印が無い項目は期限
+    None で、従来形式の応答もそのまま受け付ける）。空の応答や、
+    箇条書きでない行を含む応答は失敗として None を返す（変な
+    文章をそのまま長期記憶へ足さないため）。
     """
     stripped = text.strip()
     if not stripped:
         return None
     if stripped.rstrip("。") == "なし":
         return []
-    bullets: list[str] = []
+    items: list[tuple[str, str | None]] = []
     for raw in stripped.splitlines():
         line = raw.strip()
         if not line:
@@ -255,15 +292,35 @@ def _parse_bullets(text: str) -> list[str] | None:
         body = line[match.end():].strip()
         if not body:
             return None
-        bullets.append(f"- {body}")
-    return bullets or None
+        body, until = _split_until(body)
+        if not body:
+            return None
+        items.append((f"- {body}", until))
+    return items or None
 
 
-def build_extraction_prompt(memory_text: str, material: str) -> str:
-    """抽出の単発呼び出しでモデルへ渡す本文を組み立てる。"""
+def _parse_bullets(text: str) -> list[str] | None:
+    """モデルの応答を箇条書きの項目列として読む（期限の印は外す）。"""
+    items = _parse_items(text)
+    if items is None:
+        return None
+    return [bullet for bullet, _until in items]
+
+
+def build_extraction_prompt(memory_text: str, material: str,
+                            today: str = "") -> str:
+    """抽出の単発呼び出しでモデルへ渡す本文を組み立てる。
+
+    today（YYYY-MM-DD）があれば先頭に今日の日付を示す（期限の
+    印を西暦で計算させるための基準）。
+    """
     current = memory_text if memory_text.strip() else "（まだ何も書かれていません）"
-    return (f"# 現在の長期記憶（MEMORY.md）\n{current}\n\n"
-            f"# 新しい会話\n{material}")
+    parts: list[str] = []
+    if today:
+        parts.append(f"# 今日の日付\n{today}")
+    parts.append(f"# 現在の長期記憶（MEMORY.md）\n{current}")
+    parts.append(f"# 新しい会話\n{material}")
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------- 抽出の実行
@@ -274,13 +331,15 @@ class ExtractResult:
 
     applied は本体（MEMORY.md）を書き換えたかどうか。bullets は
     モデルが返した箇条書き（dry-run の表示と件数の報告に使う）。
-    reason は書き換えなかった理由（"" / "no_new_turns" /
-    "nothing" / "no_change" / "model_failed"）。
+    items は bullets に期限（AM-2）を組にしたもの。reason は
+    書き換えなかった理由（"" / "no_new_turns" / "nothing" /
+    "no_change" / "model_failed"）。
     """
     applied: bool
     bullets: list[str] = field(default_factory=list)
     backup_path: Path | None = None
     reason: str = ""
+    items: list[tuple[str, str | None]] = field(default_factory=list)
 
     @property
     def added_count(self) -> int:
@@ -314,21 +373,23 @@ def extract_memory(memory: Memory, model: ChatModel,
     if collected is None:
         return ExtractResult(False, reason="no_new_turns")
     memory_text = memory.load_long_term()
-    prompt = build_extraction_prompt(memory_text, collected.text)
+    prompt = build_extraction_prompt(memory_text, collected.text,
+                                     today=now.date().isoformat())
     try:
         reply = model.chat(EXTRACTION_SYSTEM, [Message("user", prompt)], [])
     except Exception:
         return ExtractResult(False, reason="model_failed")
-    bullets = _parse_bullets(reply.content or "")
-    if bullets is None:
+    items = _parse_items(reply.content or "")
+    if items is None:
         return ExtractResult(False, reason="model_failed")
+    bullets = [bullet for bullet, _until in items]
     if not bullets:
         if not dry_run:
             state["positions"] = collected.positions
             _save_state(user_data_dir, state)
         return ExtractResult(False, reason="nothing")
     if dry_run:
-        return ExtractResult(False, bullets=bullets)
+        return ExtractResult(False, bullets=bullets, items=items)
     # 末尾へ足してから機械的な重複除去を通す
     base = memory_text
     if base and not base.endswith("\n"):
@@ -338,15 +399,31 @@ def extract_memory(memory: Memory, model: ChatModel,
     # 処理済み位置は、書き込みの有無にかかわらず進める
     state["positions"] = collected.positions
     _save_state(user_data_dir, state)
+    # 項目の属性（AM-2）: 書き込み後の本文に残っている項目に
+    # ついて、覚えた日と期限（印があった項目だけ）を記録する。
+    # 重複除去で残らなかった項目には付けない。すでに属性がある
+    # 項目が会話で改めて触れられた場合は、覚えた日が今日に
+    # 更新される（確認済みの印を兼ねる）。本文が変わらなかった
+    # 場合（すべて重複だった場合）も、残っている項目への記録は
+    # 同じに行う
+    present = {_segment_key(seg.text)
+               for seg in split_memory_segments(final)}
+    record_memory_items(
+        user_data_dir,
+        [(bullet, until) for bullet, until in items
+         if _segment_key(bullet) in present],
+        now=now)
     if final == memory_text:
-        return ExtractResult(False, bullets=bullets, reason="no_change")
+        return ExtractResult(False, bullets=bullets, reason="no_change",
+                             items=items)
     backup_path = None
     if memory.memory_file.exists():
         backup_path = backup_memory_file(memory.memory_file, memory_text,
                                          now=now)
     memory.memory_file.parent.mkdir(parents=True, exist_ok=True)
     memory.memory_file.write_text(final, encoding="utf-8")
-    return ExtractResult(True, bullets=bullets, backup_path=backup_path)
+    return ExtractResult(True, bullets=bullets, backup_path=backup_path,
+                         items=items)
 
 
 def auto_extract_memory(

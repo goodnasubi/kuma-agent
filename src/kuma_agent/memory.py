@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .memory_meta import record_memory_items
 from .tasks import TaskBoard
 
 DEFAULT_SESSION_ID = "main"
@@ -511,11 +512,19 @@ class Memory:
             return self.memory_file.read_text(encoding="utf-8")
         return ""
 
-    def remember(self, fact: str) -> None:
-        """長期記憶に 1 行追記する。"""
+    def remember(self, fact: str, until: str | None = None,
+                 now: datetime | None = None) -> None:
+        """長期記憶に 1 行追記し、項目の属性（AM-2）を記録する。
+
+        属性は本文とは別の memory_meta.json に持ち、覚えた日
+        （今日）と、until が渡された場合だけ期限を付ける
+        （memory_meta.record_memory_items）。MEMORY.md の形式
+        自体は従来どおり「- 」の 1 行で変わらない。
+        """
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
         with self.memory_file.open("a", encoding="utf-8") as f:
             f.write(f"- {fact}\n")
+        record_memory_items(self.data_dir, [(f"- {fact}", until)], now=now)
 
     def search(self, keyword: str) -> list[str]:
         """長期記憶からキーワードを含む行を返す（当面は単純一致）。"""

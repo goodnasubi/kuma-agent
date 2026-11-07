@@ -73,6 +73,16 @@ KUMA_BRIEFING_TIME、既定 07:30、"off" で無効）:
 Session の巡回では実行せず、試行の記録も残さない。こちらも
 会話へは投稿しない。
 
+加えて長期記憶の棚卸し（memory_audit.audit_memory、AM-3）も
+発言を伴わない仕事として 1 日 1 回まで行う: 期限を過ぎた
+一時的な項目を控えを取って自動で外してフィードに残し、
+変わり得る古い事実は「確認したい記憶」の候補として状態に
+残す。候補は朝のまとめの材料にだけ渡し（日報には混ぜない）、
+まとめが投稿されたら「尋ねた」印を付ける。モデルは使わない
+ため、モデルなしの巡回でも棚卸し自体は行う（確認候補は
+モデルなしでは日の目を見ず、翌日以降に回る）。
+棚卸し全体は KUMA_MEMORY_AUDIT=0 で無効化できる。
+
 投稿先は main の会話記録で、追記は Session が使う既存の保存経路
 （Memory.append_turn）を通す。発言には能動発信の印
 （proactive: true）を付けるが、読み込み側は role / content /
@@ -124,6 +134,7 @@ from .memory import (
     normalize_user_name,
     tenant_dir,
 )
+from .memory_audit import audit_memory, mark_confirm_asked, pending_confirm
 from .memory_extract import auto_extract_memory
 from .memory_tidy import auto_tidy_memory
 from .notify_prefs import load_notify_prefs, parse_hhmm
@@ -313,12 +324,16 @@ def _briefing_at(cfg: Config) -> time | None:
     return parsed if parsed is not None else DEFAULT_BRIEFING_TIME
 
 
-def build_briefing_prompt(open_tasks: list[Task], now: datetime) -> str:
+def build_briefing_prompt(open_tasks: list[Task], now: datetime,
+                          confirm_text: str | None = None) -> str:
     """朝のまとめを子へ頼む指示文を組み立てる。
 
     その日の日付と、進行中の用事の一覧（ミュート分は呼び出し側で
     除いてある）を含める。用事が無い場合はその旨を明記する
     （カレンダーの予定だけでもまとめられるように）。
+    confirm_text（棚卸し AM-3 の確認候補）があれば、「確認したい
+    記憶」として材料に足し、まとめの中で自然に 1 件だけ尋ねる
+    よう指示する。日報の組み立てには混ぜない。
     """
     date_text = (f"{now.year}年{now.month}月{now.day}日"
                  f"（{_WEEKDAY_NAMES[now.weekday()]}）")
@@ -335,17 +350,28 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime) -> str:
             lines.append(f"・{task.title}{memo}")
     else:
         lines.append("進行中の用事はありません。")
+    if confirm_text:
+        lines += [
+            "",
+            "確認したい記憶:",
+            f"・{confirm_text}",
+        ]
     lines += [
         "",
         "やること:",
         "- カレンダーを確認できる道具（予定の一覧を取る道具）が"
         "あれば、今日の予定を確認してください。",
-        "- 今日の予定も進行中の用事も無ければ、「なし」とだけ"
-        "答えてください。",
+        "- 今日の予定も進行中の用事も無く、確認したい記憶も"
+        "無ければ、「なし」とだけ答えてください。",
         "- どちらかあれば、朝の挨拶に続けて、今日の予定（時刻と"
         "題名）と進行中の用事を短くまとめた、利用者への知らせを"
         "書いてください（その文章がそのまま利用者へ投稿されます）。",
     ]
+    if confirm_text:
+        lines.append(
+            "- 確認したい記憶があれば、知らせの中で自然に、その"
+            "内容が今も同じかどうかを尋ねてください（1 件だけ。"
+            "例:「そういえば、〜は今も同じですか」）。")
     return "\n".join(lines)
 
 
@@ -368,6 +394,7 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
                    get_session: Callable[[], Session],
                    briefing_executor: Callable[[Session, str], str] | None,
                    manual: bool = False,
+                   confirm_text: str | None = None,
                    ) -> tuple[str, str] | None:
     """その日の声かけ（朝のまとめ／日報）の文面を決める。
 
@@ -386,9 +413,11 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
     4. モデルなしの一時 Session では子を動かさず、従来の日報に
        倒す（日報の組み立てはモデルなしでできるため）
     5. 用事もカレンダーらしい道具も無ければ、子を動かす材料が
-       無いので何も言わない
+       無いので何も言わない。ただし確認したい記憶（confirm_text、
+       棚卸し AM-3 の候補）がある場合は、それ自体が材料になる
     6. 子にまとめさせ、失敗・空応答なら用事がある場合だけ従来の
        日報に倒す。「なし」なら確認済みを記録して何も言わない
+       （日報に倒した場合は確認を混ぜない。候補は翌日以降に回る）
     """
     def daily_fallback() -> tuple[str, str] | None:
         """従来の日報の組み立てに倒す（種別は能動発信）。"""
@@ -407,12 +436,15 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
     session = get_session()
     if isinstance(session.model, _UnusedModel):
         return daily_fallback()
-    if not visible_tasks and not _has_calendar_tool(session):
+    if not visible_tasks and not _has_calendar_tool(session) \
+            and not confirm_text:
         return None
     executor = (briefing_executor if briefing_executor is not None
                 else _sweep_executor)
     try:
-        result = executor(session, build_briefing_prompt(visible_tasks, now))
+        result = executor(
+            session, build_briefing_prompt(visible_tasks, now,
+                                           confirm_text=confirm_text))
     except Exception as e:  # 子の失敗で声かけ自体は欠かさない
         result = f"error: {e}"
     if not isinstance(result, str):
@@ -729,6 +761,16 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     except Exception:
         pass  # 学習の失敗で巡回全体は落とさない
 
+    # 長期記憶の棚卸し（memory_audit、AM-3）: 1 日 1 回まで、
+    # 期限を過ぎた一時的な項目を控えを取って自動で外し
+    # （フィードにだけ残す）、変わり得る古い事実の確認候補を
+    # 状態に残す。モデルは使わないので、モデルなしの経路でも
+    # 行う。確認候補はこの後の朝のまとめにだけ渡す
+    try:
+        audit_memory(user_data_dir, now=now)
+    except Exception:
+        pass  # 棚卸しの失敗で巡回全体は落とさない
+
     # 定期ジョブは用事とは独立の仕組みで、モードも静かな時間帯も
     # 問わず、期限が来ていれば先に実行して結果を投稿する
     posted.extend(run_due_jobs(cfg, now, get_session,
@@ -774,8 +816,16 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     today = now.date().isoformat()
     if (_last_posted_on(user_data_dir) != today
             and not prefs.in_quiet_hours(now)):
+        # 棚卸し（AM-3）の確認候補: 朝のまとめの材料にだけ渡す。
+        # 読み取りの失敗で日報自体は落とさない
+        confirm: tuple[str, str] | None = None
+        try:
+            confirm = pending_confirm(user_data_dir, now=now)
+        except Exception:
+            confirm = None
         daily = _daily_message(cfg, now, visible_tasks, user_data_dir,
-                               get_session, briefing_executor, manual=manual)
+                               get_session, briefing_executor, manual=manual,
+                               confirm_text=confirm[1] if confirm else None)
         if daily is not None:
             text, feed_kind = daily
             get_session().post_proactive_message(text)
@@ -783,6 +833,13 @@ def check_and_post(cfg: Config, now: datetime | None = None,
             append_feed_entry(user_data_dir, feed_kind, text)
             posted.append(text)
             _notify(notify, cfg.tenant, cfg.user, text)
+            # 朝のまとめとして投稿された場合だけ「尋ねた」印を
+            # 付ける（日報に倒した場合は候補を翌日以降に残す）
+            if confirm is not None and feed_kind == KIND_BRIEFING:
+                try:
+                    mark_confirm_asked(user_data_dir, confirm[0], now=now)
+                except Exception:
+                    pass  # 印付けの失敗で投稿や巡回は落とさない
 
     if not posted:
         return None  # 言うべきことが無い
