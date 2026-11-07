@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kuma-agent"
-version = "0.84.0"
+version = "0.85.0"
 description = "Muse を頭脳にした自律開発エージェント（GitHub Issue 起点）"
 readme = "README.md"
 requires-python = ">=3.11"

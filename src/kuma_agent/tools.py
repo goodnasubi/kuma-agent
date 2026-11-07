@@ -686,7 +686,10 @@ class ToolBox:
             "知らせ文への希望があれば note に入れる（例: 価格が"
             "下がっていたら金額も添えて）。delivery は届け方で、"
             "immediate（変化したらその場で知らせる、省略時）か "
-            "digest（変化を朝のまとめでまとめて知らせる）か。"
+            "digest（変化を朝のまとめでまとめて知らせる）か "
+            "auto（その場で知らせるか朝のまとめに寄せるかを、"
+            "変化の内容で判定する。判定できないときはその場で"
+            "知らせる）か。"
             "登録直後の最初の確認は基準の記録だけで、知らせはしない。",
             {"type": "object", "properties": {
                 "title": {"type": "string",
@@ -701,7 +704,7 @@ class ToolBox:
                 "note": {"type": "string",
                          "description": "知らせるときの指示（任意）"},
                 "delivery": {"type": "string",
-                             "enum": ["immediate", "digest"],
+                             "enum": ["immediate", "digest", "auto"],
                              "description": "届け方（省略時は immediate）"}},
              "required": ["title", "kind", "target"]},
             self._create_watch,
@@ -717,12 +720,13 @@ class ToolBox:
             "set_watch_delivery",
             "見張りの届け方を切り替える。watch には名前または "
             "ID を、delivery には immediate（その場で知らせる）"
-            "か digest（朝のまとめに寄せる）を入れること。",
+            "か digest（朝のまとめに寄せる）か auto（その場か"
+            "朝かを判定に任せる）を入れること。",
             {"type": "object", "properties": {
                 "watch": {"type": "string",
                           "description": "切り替える見張りの名前または ID"},
                 "delivery": {"type": "string",
-                             "enum": ["immediate", "digest"],
+                             "enum": ["immediate", "digest", "auto"],
                              "description": "届け方"}},
              "required": ["watch", "delivery"]},
             self._set_watch_delivery,

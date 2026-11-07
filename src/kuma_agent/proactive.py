@@ -107,6 +107,20 @@ KUMA_NOTIFICATION_TRIAGE=0 の間は新しい変化を寄せず即時に
 知らせ文は、委任の内部専用の知らせ文作成役（道具なし）が
 作る。
 
+届け方 auto（おまかせ、0.85.0）の見張りでは、変化のたびに
+委任の内部専用の振り分け判定役（道具なし）が、材料（名前・
+種別・前回と今回の要約・利用者の指示・検出時刻。対象の URL
+や検索語は渡さない）から「その場で知らせるか、朝へ寄せる
+か」を決められた JSON で判定する（変化 1 件につき最大 1 回
+だけ呼ぶ）。判定は厳密に検証し、形式不正・例外・確信なし・
+error の結果はすべて即時へ倒す（知らせが消える事故を避ける
+ため）。immediate / digest を明示した見張りでは判定自体を
+行わず、モデルが利用者の明示設定を上書きすることはない。
+即時の判定で知らせ文候補（notice）が使える場合はそれを使い、
+使えない場合だけ知らせ文作成役へ作らせる。判定の理由は、
+朝へ寄せた出来事は置き場（decision_by=model と理由コード）
+に、即時になった場合はフィードの記録に残す。
+
 朝のまとめの材料には、main の会話の作業の手順の残り（AF-3）も
 足す: 終わっていない手順のうち進行中・停滞のもの（最大 3 件）を、
 状態と「その状態になってからの日数」（Step.updated_at から数える）
@@ -190,6 +204,19 @@ def _watch_notice_executor(session: Session, prompt: str) -> str:
     """
     return run_delegated_task(session, prompt, retry=False,
                               role="notice")
+
+
+def _watch_triage_executor(session: Session, prompt: str) -> str:
+    """見張りの auto 判定用の委任の実行役（内部専用の振り分け判定役）。
+
+    判定は、巡回が集めた材料（名前・種別・前回と今回の要約・
+    利用者の指示・検出時刻）だけで足りるため、道具を持たない
+    内部専用の型（triage）で子を作る。立て直しはしない（判定は
+    変化 1 件につき最大 1 回まで。失敗時の受け皿は即時への
+    倒し込みで、呼び出し側が持つ）。
+    """
+    return run_delegated_task(session, prompt, retry=False,
+                              role="triage")
 from .feed import KIND_BRIEFING, KIND_PROACTIVE, append_feed_entry
 from .jobs import Job, JobBoard, is_due
 from .llm import ChatModel
@@ -221,6 +248,7 @@ from .memory_tidy import _is_heading_segment, _segment_key, auto_tidy_memory
 from .notification_triage import (
     MAX_BRIEFING_EVENTS,
     REASON_QUEUE_FAILED_IMMEDIATE,
+    ROUTE_AUTO,
     ROUTE_DIGEST,
     QueueEvent,
     auto_cleanup_queue,
@@ -231,13 +259,16 @@ from .notification_triage import (
     enqueue_event,
     has_event,
     mark_delivered,
+    parse_triage_verdict,
     pending_events,
+    triage_feed_note,
 )
 from .notify_prefs import load_notify_prefs, parse_hhmm
 from .session import Session
 from .settings import proactive_enabled_for
 from .skill_learn import auto_learn_skills
 from .tasks import Task, TaskBoard
+from .watches import KIND_LABELS as WATCH_KIND_LABELS
 from .watches import Watch, WatchBoard, check_watch
 from .watches import is_due as watch_is_due
 from .worksteps import (
@@ -1017,6 +1048,38 @@ def build_watch_prompt(watch: Watch, old_summary: str,
     return "\n".join(lines)
 
 
+def build_watch_triage_prompt(watch: Watch, old_summary: str,
+                              new_summary: str, now: datetime) -> str:
+    """auto の見張りの変化を判定させるための、判定役への指示文。
+
+    判定に渡す材料は、見張りの名前・対象の種別・前回と今回の
+    要約・利用者の指示（note）・検出時刻だけに絞る。対象の
+    URL や検索語そのものは、判定には原則として渡さない（名前
+    と要約で足りる範囲に絞り、材料を小さく保つため。設計
+    §2.5）。全文や取得したページ本文も渡さない。返し方の約束
+    （JSON だけを返す）は判定役の指示（TRIAGE_NOTICE）にも
+    あるが、ここでも形を示して崩れにくくする。
+    """
+    lines = [
+        "見張りの対象に変化がありました。その場で知らせるべきか、"
+        "朝の知らせにまとめてよいか判定してください。",
+        f"見張りの名前: {watch.title}",
+        f"対象の種別: {WATCH_KIND_LABELS.get(watch.kind, watch.kind)}",
+        f"検出時刻: {now.isoformat(timespec='seconds')}",
+        f"前回の内容: {old_summary or '（記録なし）'}",
+        f"今回の内容: {new_summary}",
+    ]
+    if watch.note:
+        lines.append(f"利用者の指示: {watch.note}")
+    lines.append(
+        "返答は次の形の JSON だけにしてください: "
+        "{\"route\": \"immediate\" または \"digest\", "
+        "\"certain\": true または false, "
+        "\"reason\": \"判定の短い理由\", "
+        "\"notice\": \"その場で知らせる場合の知らせ文（任意）\"}")
+    return "\n".join(lines)
+
+
 def build_watch_message(watch: Watch, result: str) -> str:
     """見張りの知らせ文を組み立てる（変化があったとき）。"""
     body = result.strip()
@@ -1039,6 +1102,7 @@ def run_due_watches(cfg: Config, now: datetime,
                     get_session: Callable[[], Session],
                     watch_executor: Callable[[Session, str], str] | None = None,
                     notify: NotifyCallback | None = None,
+                    triage_executor: Callable[[Session, str], str] | None = None,
                     ) -> list[str]:
     """間隔の来た見張りを確認し、変化があったら知らせを投稿する。
 
@@ -1056,12 +1120,21 @@ def run_due_watches(cfg: Config, now: datetime,
       できなければ即時へ倒す。スレッドモードや振り分けの
       無効化中は、朝の知らせの経路が無い／止めているため
       即時に倒す（notification_triage.decide_watch_route）
+    - auto（0.85.0）: triage_executor（既定は委任の仕組みの
+      内部専用の振り分け判定役）へ判定を頼む。呼び出しは変化
+      1 件につき最大 1 回で、変化が無い巡回では呼ばない。
+      判定が採用できればその経路にし（digest なら置き場へ、
+      immediate なら判定の知らせ文候補が使える場合にそれを
+      使う）、形式不正・例外・確信なしなど判定が使えなければ
+      理由コードを残して即時へ倒す。スレッドモードや無効化中
+      は判定自体を行わず即時へ倒す（decide_watch_route）
 
     投稿した文面の一覧を返す（digest で寄せた分は含まない）。
     モデルなしの一時 Session の経路では、即時の変化は消費せず
     実行できる経路（Web の巡回など）に委ねる（定期ジョブと
-    同じ）。digest の寄せはモデルを使わないため、モデルなしの
-    経路でもそのまま行う。
+    同じ）。auto の判定もモデルが要るため、その経路では判定
+    せず変化を消費しない。digest の寄せはモデルを使わない
+    ため、モデルなしの経路でもそのまま行う。
     """
     board = WatchBoard(cfg.user_data_dir)
     due = [w for w in board.list() if watch_is_due(w, now)]
@@ -1069,6 +1142,8 @@ def run_due_watches(cfg: Config, now: datetime,
         return []
     executor = watch_executor if watch_executor is not None \
         else _watch_notice_executor
+    triage = triage_executor if triage_executor is not None \
+        else _watch_triage_executor
     posted: list[str] = []
     for watch in due:
         try:
@@ -1088,6 +1163,15 @@ def run_due_watches(cfg: Config, now: datetime,
         route, reason = decide_watch_route(
             watch, mode=normalize_mode(cfg.mode),
             triage_enabled=cfg.notification_triage_enabled)
+        session: Session | None = None
+        # auto の判定が返した知らせ文候補（検証済み）。使える
+        # 場合は、知らせ文作成役への追加の呼び出しをせずこれを
+        # 知らせ文にする
+        notice_text: str | None = None
+        # auto の判定が実際に走った場合だけ、最終的な理由コード
+        # とモデルの短い理由をここへ残す（記録用）
+        judged_reason: str | None = None
+        judged_model_reason = ""
         if route == ROUTE_DIGEST:
             # 朝へ寄せる: 置き場へ保存できた場合だけ基準を更新
             # する。保存できなければ即時へ倒して下へ続ける
@@ -1108,16 +1192,68 @@ def run_due_watches(cfg: Config, now: datetime,
                                    summary=new_summary, changed=True)
                 continue
             reason = REASON_QUEUE_FAILED_IMMEDIATE
-        session = get_session()
+        elif route == ROUTE_AUTO:
+            # モデル判定（auto）: 判定役の呼び出しは変化 1 件に
+            # つき最大 1 回。判定できない・迷う・形式が壊れて
+            # いる場合は、理由コードを残して即時へ倒す
+            session = get_session()
+            if isinstance(session.model, _UnusedModel):
+                # 判定も知らせ文も作れない経路では、変化を消費
+                # せず実行できる経路の巡回に委ねる（即時と同じ）
+                return posted
+            triage_prompt = build_watch_triage_prompt(
+                watch, watch.last_summary, new_summary, now)
+            try:
+                raw_verdict = triage(session, triage_prompt)
+            except Exception as e:  # 判定の失敗で巡回全体は落とさない
+                raw_verdict = f"error: {e}"
+            verdict, reason, judged_model_reason = \
+                parse_triage_verdict(raw_verdict)
+            judged_reason = reason
+            if verdict is not None and verdict.route == ROUTE_DIGEST:
+                # 朝へ寄せる判定: 置き場へ保存できた場合だけ
+                # 基準を更新する。保存できなければ即時へ倒す
+                event = build_watch_event(
+                    watch, watch.last_summary, new_summary,
+                    new_hash, now, reason, decision_by="model")
+                already = has_event(cfg.user_data_dir, event.id)
+                if enqueue_event(cfg.user_data_dir, event):
+                    if not already:
+                        note = (f"（おまかせ判定: {judged_model_reason}）"
+                                if judged_model_reason else "")
+                        append_feed_entry(
+                            cfg.user_data_dir, KIND_PROACTIVE,
+                            f"見張り「{watch.title}」で変化がありました。"
+                            "朝の知らせでまとめてお知らせします。"
+                            f"{note}")
+                    board.mark_checked(watch.id, now, hash=new_hash,
+                                       summary=new_summary, changed=True)
+                    continue
+                reason = REASON_QUEUE_FAILED_IMMEDIATE
+                judged_reason = reason
+                notice_text = verdict.notice
+            elif verdict is not None:
+                # その場で知らせる判定。知らせ文候補が使える
+                # 場合はそれを使い、追加の呼び出しはしない
+                notice_text = verdict.notice
+            # verdict が None の場合は、判定を使えなかった理由
+            # コード（uncertain / invalid）が reason に入って
+            # おり、知らせ文は通常の作成に回る
+        if session is None:
+            session = get_session()
         if isinstance(session.model, _UnusedModel):
             # モデルなしの経路では知らせ文を作れない。変化を
             # 消費せず、実行できる経路の巡回に委ねる
             return posted
-        prompt = build_watch_prompt(watch, watch.last_summary, new_summary)
-        try:
-            result = executor(session, prompt)
-        except Exception as e:  # 作成の失敗で巡回全体は落とさない
-            result = f"error: {e}"
+        if notice_text is not None:
+            result = notice_text
+        else:
+            prompt = build_watch_prompt(watch, watch.last_summary,
+                                        new_summary)
+            try:
+                result = executor(session, prompt)
+            except Exception as e:  # 作成の失敗で巡回全体は落とさない
+                result = f"error: {e}"
         if not isinstance(result, str):
             result = str(result)
         if result.startswith("error:"):
@@ -1131,6 +1267,14 @@ def run_due_watches(cfg: Config, now: datetime,
             board.mark_checked(watch.id, now, hash=new_hash,
                                summary=new_summary, changed=True)
         append_feed_entry(cfg.user_data_dir, KIND_PROACTIVE, text)
+        if judged_reason is not None:
+            # auto の判定で即時になった記録は、置き場ではなく
+            # フィードに残す（即時の出来事は置き場の対象外の
+            # ため。digest の出来事は置き場の理由コードが正）
+            append_feed_entry(
+                cfg.user_data_dir, KIND_PROACTIVE,
+                triage_feed_note(watch.title, judged_reason,
+                                 judged_model_reason))
         posted.append(text)
         _notify(notify, cfg.tenant, cfg.user, text)
     return posted
@@ -1143,6 +1287,7 @@ def check_and_post(cfg: Config, now: datetime | None = None,
                    notify: NotifyCallback | None = None,
                    briefing_executor: Callable[[Session, str], str] | None = None,
                    manual: bool = False,
+                   triage_executor: Callable[[Session, str], str] | None = None,
                    ) -> str | None:
     """1 テナント×1 ユーザー分をチェックし、投稿したら文面を返す。
 
@@ -1155,6 +1300,8 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     job_executor は定期ジョブの実行関数の差し替え（テスト用）で、
     既定は委任の仕組み（run_due_jobs を参照）。watch_executor は
     見張りの知らせ文の作成関数の差し替え（テスト用）で、既定は
+    同じく委任の仕組み（run_due_watches を参照）。triage_executor は
+    見張りの auto 判定の実行関数の差し替え（テスト用）で、既定は
     同じく委任の仕組み（run_due_watches を参照）。briefing_executor は
     朝のまとめの実行関数の差し替え（テスト用）で、既定は同じく
     委任の仕組み。notify があれば、投稿した文面をその都度通知
@@ -1267,7 +1414,8 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     # 確認し、変化があった分だけ知らせを投稿する
     posted.extend(run_due_watches(cfg, now, get_session,
                                   watch_executor=watch_executor,
-                                  notify=notify))
+                                  notify=notify,
+                                  triage_executor=triage_executor))
 
     if normalize_mode(cfg.mode) != "ledger":
         # スレッドモードでは用事を使わないため、残りは発言しない

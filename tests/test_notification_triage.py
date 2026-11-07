@@ -111,9 +111,11 @@ def _make_event(event_id: str, title: str, recorded: datetime,
 def test_validate_delivery():
     assert validate_delivery("immediate") == "immediate"
     assert validate_delivery(" digest ") == "digest"
+    # auto は第2段（0.85.0）で受け付けるようになった
+    assert validate_delivery("auto") == "auto"
     assert validate_delivery(None) == "immediate"
     assert validate_delivery("") == "immediate"
-    for bad in ("auto", "later", "DIGESTS"):
+    for bad in ("later", "DIGESTS"):
         with pytest.raises(ValueError):
             validate_delivery(bad)
 
@@ -155,20 +157,31 @@ def test_tools_delivery_roundtrip(tmp_path: Path):
         "delivery": "digest"})
     assert result.startswith("登録しました: #1 価格")
     assert "朝のまとめに寄せる" in result
-    # auto は第2段のため、道具からも受け付けない
+    # auto は第2段（0.85.0）から道具でも受け付ける
+    auto_result = session.tools.call("create_watch", {
+        "title": "天気", "kind": "web", "target": "https://example.com",
+        "delivery": "auto"})
+    assert auto_result.startswith("登録しました")
+    assert "おまかせ" in auto_result
+    # 知らない届け方は error のまま
     assert session.tools.call("create_watch", {
         "title": "x", "kind": "web", "target": "https://example.com",
-        "delivery": "auto"}).startswith("error:")
+        "delivery": "later"}).startswith("error:")
 
     listing = session.tools.call("list_watches", {})
     assert "知らせ方: 朝のまとめに寄せる" in listing
+    assert "知らせ方: おまかせ" in listing
 
     updated = session.tools.call(
         "set_watch_delivery", {"watch": "価格", "delivery": "immediate"})
     assert updated.startswith("更新しました")
     assert "その場で知らせる" in updated
+    updated_auto = session.tools.call(
+        "set_watch_delivery", {"watch": "価格", "delivery": "auto"})
+    assert updated_auto.startswith("更新しました")
+    assert "おまかせ" in updated_auto
     assert session.tools.call(
-        "set_watch_delivery", {"watch": "価格", "delivery": "auto"}
+        "set_watch_delivery", {"watch": "価格", "delivery": "later"}
     ).startswith("error:")
     assert session.tools.call(
         "set_watch_delivery", {"watch": "なし", "delivery": "digest"}

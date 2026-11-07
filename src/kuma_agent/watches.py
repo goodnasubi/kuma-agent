@@ -21,8 +21,11 @@
   その金額も添えて）
 - delivery: 届け方。immediate（変化したらその場で知らせる、
   既定）/ digest（変化の材料を置き場へ残し、朝の知らせで
-  まとめて知らせる）の 2 つ。通知の取捨（0.84.0）で足した
-  項目で、旧形式のファイルに無ければ immediate として読む。
+  まとめて知らせる）/ auto（変化ごとにモデルが判定し、その場
+  で知らせるか朝の知らせへ寄せるかを決める。判定できない
+  ときはその場で知らせる）の 3 つ。通知の取捨で足した項目
+  （immediate / digest は 0.84.0、auto は 0.85.0）で、旧形式
+  のファイルに無ければ immediate として読む。
   保存済みの値が不正な場合も immediate として読む（届け方は
   通知の好みであり、壊れた好みで見張り自体を落とさないため）。
   道具や内部の検証で不正な値が渡された場合は error にする
@@ -62,17 +65,19 @@ KIND_LABELS: dict[str, str] = {
     "file": "ファイル",
 }
 
-# 届け方（通知の取捨、0.84.0）。immediate は現行どおりその場で
-# 知らせ、digest は変化を置き場（notification_queue.jsonl）へ
-# 残して朝の知らせでまとめて届ける。auto（モデル判定）は
-# 第2段で足すため、ここでは受け付けない
-DELIVERY_VALUES = ("immediate", "digest")
+# 届け方（通知の取捨）。immediate は現行どおりその場で知らせ、
+# digest は変化を置き場（notification_queue.jsonl）へ残して
+# 朝の知らせでまとめて届ける（以上 0.84.0）。auto は変化ごとに
+# モデル判定で即時か朝へ寄せるかを決める（0.85.0。判定の実体は
+# notification_triage.py と proactive.py が持つ）
+DELIVERY_VALUES = ("immediate", "digest", "auto")
 DEFAULT_DELIVERY = "immediate"
 
 # 届け方の表示名（利用者向けの文面で使う）
 DELIVERY_LABELS: dict[str, str] = {
     "immediate": "その場で知らせる",
     "digest": "朝のまとめに寄せる",
+    "auto": "おまかせ（その場か朝かを判定する）",
 }
 
 # 要約として保持する最大の文字数（前後の内容を子へ渡す材料）
@@ -149,7 +154,8 @@ def validate_delivery(raw: object) -> str:
     if name not in DELIVERY_VALUES:
         raise ValueError(
             f"届け方は {' / '.join(DELIVERY_VALUES)} のいずれかです"
-            "（immediate=その場で知らせる、digest=朝のまとめに寄せる）")
+            "（immediate=その場で知らせる、digest=朝のまとめに寄せる、"
+            "auto=その場か朝かを判定に任せる）")
     return name
 
 

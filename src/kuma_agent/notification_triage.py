@@ -1,10 +1,19 @@
 """通知の取捨（見張りの変化を朝の知らせへ寄せる置き場）。
 
-能動発信の通知を重要度で振り分ける仕組みの第1段（0.84.0）。
-見張りごとに届け方（watches.Watch.delivery）を持ち、digest
-（朝のまとめに寄せる）にした見張りの変化は、その場では会話へ
-投稿せず、発生時点の材料をこの置き場へ残して次の朝の知らせ
-（朝のまとめ／日報）でまとめて届ける。
+能動発信の通知を重要度で振り分ける仕組み。見張りごとに届け方
+（watches.Watch.delivery）を持ち、digest（朝のまとめに寄せる）
+にした見張りの変化は、その場では会話へ投稿せず、発生時点の
+材料をこの置き場へ残して次の朝の知らせ（朝のまとめ／日報）で
+まとめて届ける（第1段、0.84.0）。
+
+第2段（0.85.0）では、届け方 auto（おまかせ）を足した。auto の
+見張りの変化は、内部専用の振り分け判定役（道具なし。委任の
+内部の型 triage）が決められた JSON で「その場で知らせるか、
+朝へ寄せるか」を判定する。判定の検証はこのモジュールの
+parse_triage_verdict が担い、採用できない判定（形式不正・
+例外・確信なし等）は理由コードを残して即時へ倒す。immediate
+／digest を明示した見張りでは判定自体を行わない（決め手の
+優先順位は decide_watch_route を参照）。
 
 置き場は利用者の置き場の notification_queue.jsonl で、活動の
 記録（activity.jsonl）やフィード（feed.jsonl）と同じ1行1件の
@@ -88,9 +97,21 @@ REASON_WATCH_SETTING_IMMEDIATE = "watch_setting_immediate"
 REASON_QUEUE_FAILED_IMMEDIATE = "queue_failed_immediate"
 REASON_NO_DIGEST_ROUTE_IMMEDIATE = "no_digest_route_immediate"
 REASON_TRIAGE_DISABLED_IMMEDIATE = "triage_disabled_immediate"
+# モデル判定（auto、0.85.0）の理由コード。digest / immediate は
+# 採用された判定、uncertain は「確信が持てないため採用せず
+# 即時」、invalid は「形式不正・例外などで判定が使えなかった
+# ため即時」
+REASON_MODEL_DIGEST = "model_digest"
+REASON_MODEL_IMMEDIATE = "model_immediate"
+REASON_MODEL_UNCERTAIN_IMMEDIATE = "model_uncertain_immediate"
+REASON_MODEL_INVALID_IMMEDIATE = "model_invalid_immediate"
 
 ROUTE_IMMEDIATE = "immediate"
 ROUTE_DIGEST = "digest"
+# auto の見張りで、モデル判定がまだ必要な状態を表す経路。
+# decide_watch_route が返し、巡回側が判定役を呼んで最終的な
+# 経路（immediate / digest）と理由コードに置き換える
+ROUTE_AUTO = "auto"
 
 # 朝のまとめ／日報の節の見出し（材料文と日報の組み立てで共用）
 DIGEST_SECTION_TITLE = "まとめて知らせる変化"
@@ -103,15 +124,21 @@ def decide_watch_route(watch: Watch, *, mode: str,
                        triage_enabled: bool) -> tuple[str, str]:
     """見張りの変化の届け方を決め、(経路, 理由コード) を返す。
 
-    決め方の優先順位（設計 §2.2）のうち第1段で効く範囲:
+    決め方の優先順位（設計 §2.2）:
     1. 強制規則: スレッドモード（wall）では朝の知らせの経路が
-       無いため、digest の指定でも即時に倒す
+       無いため、digest / auto の指定でも即時に倒す（auto の
+       判定も行わない）
     2. 切り戻し: 振り分け自体が無効化されている間
-       （KUMA_NOTIFICATION_TRIAGE=0）は即時に倒す。ただし既に
-       置き場にある未配信分は、この判定の対象ではなく朝の
-       知らせで読み続けられる（呼び出し側の扱い）
-    3. 見張りの明示設定: delivery の値そのまま
-    モデル判定（auto）は第2段のため、ここには無い。
+       （KUMA_NOTIFICATION_TRIAGE=0）は即時に倒す（auto の
+       判定も行わない）。ただし既に置き場にある未配信分は、
+       この判定の対象ではなく朝の知らせで読み続けられる
+       （呼び出し側の扱い）
+    3. 見張りの明示設定: immediate / digest はそのまま経路に
+       なる。モデル判定で上書きはしない
+    4. モデル判定: auto のときだけ ROUTE_AUTO を返し、実際の
+       判定は巡回側が振り分け判定役を呼んで行う。この関数の
+       返す理由コードは空で、最終的な理由コードは判定結果
+       （parse_triage_verdict）で決まる
     """
     if mode != "ledger":
         return ROUTE_IMMEDIATE, REASON_NO_DIGEST_ROUTE_IMMEDIATE
@@ -119,6 +146,8 @@ def decide_watch_route(watch: Watch, *, mode: str,
         return ROUTE_IMMEDIATE, REASON_TRIAGE_DISABLED_IMMEDIATE
     if watch.delivery == "digest":
         return ROUTE_DIGEST, REASON_WATCH_SETTING_DIGEST
+    if watch.delivery == "auto":
+        return ROUTE_AUTO, ""
     return ROUTE_IMMEDIATE, REASON_WATCH_SETTING_IMMEDIATE
 
 
@@ -207,8 +236,14 @@ class QueueEvent:
 
 def build_watch_event(watch: Watch, old_summary: str, new_summary: str,
                       new_hash: str, now: datetime,
-                      reason: str) -> QueueEvent:
-    """見張りの変化から、置き場へ入れる出来事を組み立てる。"""
+                      reason: str,
+                      decision_by: str = "setting") -> QueueEvent:
+    """見張りの変化から、置き場へ入れる出来事を組み立てる。
+
+    decision_by は誰が決めたか（setting=見張りの明示設定、
+    model=auto のモデル判定）。理由コードと対で記録し、後から
+    「なぜ朝へ寄ったか」を検証できるようにする。
+    """
     stamp = now.isoformat(timespec="seconds")
     return QueueEvent(
         id=watch_event_id(watch, new_hash),
@@ -223,9 +258,136 @@ def build_watch_event(watch: Watch, old_summary: str, new_summary: str,
         new_summary=new_summary,
         source_note=watch.note,
         decision=ROUTE_DIGEST,
-        decision_by="setting",
+        decision_by=decision_by,
         decision_reason=reason,
     )
+
+
+# ---------------------------------------------------------- モデル判定（auto）
+
+# 判定の知らせ文候補（notice）として受け付ける最大の文字数。
+# これより長いものは「検証に通らない候補」として使わず、通常の
+# 知らせ文作成に回す（判定そのものの採用は妨げない）
+_MAX_TRIAGE_NOTICE_CHARS = 1000
+# 記録に残すモデルの理由の最大の文字数（理由欄は短く保つ）
+_MAX_TRIAGE_REASON_CHARS = 200
+
+
+@dataclass
+class TriageVerdict:
+    """採用されたモデル判定（auto の判定結果）。
+
+    route は最終的な経路（immediate / digest）。reason_text は
+    モデルが返した短い理由（記録用。そのままの全文ではなく、
+    記録向けに切り詰めたもの）。notice は即時になった場合の
+    知らせ文候補で、検証を通らなかった場合は None（呼び出し側
+    が通常の知らせ文作成に回す）。
+    """
+    route: str
+    reason_text: str = ""
+    notice: str | None = None
+
+
+def _unwrap_json_text(raw: str) -> str:
+    """判定結果の文字列から JSON 本文を取り出す。
+
+    前後の空白と、コードフェンス（```json … ```）で包まれた
+    場合の囲みだけを取り除く。本文の前後に説明文が付いたもの
+    は「JSON だけを返す」という約束に反するため、ここでは
+    救済しない（呼び出し側で形式不正として即時へ倒れる）。
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 2 and lines[-1].strip() == "```":
+            text = "\n".join(lines[1:-1]).strip()
+    return text
+
+
+def parse_triage_verdict(
+        raw: object) -> tuple[TriageVerdict | None, str, str]:
+    """判定役の応答を検証し、(判定, 理由コード, モデルの理由) を返す。
+
+    採用できるのは、route が immediate / digest のどちらかで、
+    certain が真で、reason が空でない JSON だけ。それ以外は
+    判定を None とし、理由コードで「なぜ採用しなかったか」を
+    返す（呼び出し側は全て即時へ倒す。モデルの失敗で朝へ
+    回したり出来事を消したりはしない）:
+
+    - error の結果・文字列でない・JSON として読めない・項目が
+      欠ける・知らない値: REASON_MODEL_INVALID_IMMEDIATE
+    - certain が真でない（迷い・確信なし）:
+      REASON_MODEL_UNCERTAIN_IMMEDIATE
+
+    採用した場合は経路に応じた REASON_MODEL_* を返す。第3の
+    戻り値は、モデルが返した理由の短い文（記録用に切り詰めた
+    もの。読めなかった場合は空）。
+    """
+    if not isinstance(raw, str) or raw.startswith("error:"):
+        return None, REASON_MODEL_INVALID_IMMEDIATE, ""
+    try:
+        data = json.loads(_unwrap_json_text(raw))
+    except ValueError:
+        return None, REASON_MODEL_INVALID_IMMEDIATE, ""
+    if not isinstance(data, dict):
+        return None, REASON_MODEL_INVALID_IMMEDIATE, ""
+    reason_text = data.get("reason")
+    reason_text = (reason_text.strip()[:_MAX_TRIAGE_REASON_CHARS]
+                   if isinstance(reason_text, str) else "")
+    route = data.get("route")
+    if route not in (ROUTE_IMMEDIATE, ROUTE_DIGEST):
+        return None, REASON_MODEL_INVALID_IMMEDIATE, reason_text
+    certain = data.get("certain")
+    if certain is not True:
+        # certain が欠けている・真偽値でない場合は形式不正、
+        # false の場合は「確信なし」として扱う
+        if isinstance(certain, bool):
+            return None, REASON_MODEL_UNCERTAIN_IMMEDIATE, reason_text
+        return None, REASON_MODEL_INVALID_IMMEDIATE, reason_text
+    if not reason_text:
+        return None, REASON_MODEL_INVALID_IMMEDIATE, ""
+    notice = data.get("notice")
+    if (not isinstance(notice, str)
+            or not notice.strip()
+            or len(notice) > _MAX_TRIAGE_NOTICE_CHARS
+            or notice.strip().startswith("error:")):
+        # 知らせ文候補が使えなくても判定自体は採用し、候補だけ
+        # を捨てる（即時なら通常の知らせ文作成に回る）
+        notice = None
+    else:
+        notice = notice.strip()
+    code = (REASON_MODEL_DIGEST if route == ROUTE_DIGEST
+            else REASON_MODEL_IMMEDIATE)
+    return TriageVerdict(route=route, reason_text=reason_text,
+                         notice=notice), code, reason_text
+
+
+def triage_feed_note(watch_title: str, reason: str,
+                     model_reason: str = "") -> str:
+    """auto の判定で即時になった場合に、フィードへ残す判定の記録。
+
+    即時の出来事は置き場の対象外（置き場は「寄せた通知」の
+    保持が役割）のため、判定の理由はこちらに残す（digest の
+    出来事は置き場の decision / decision_reason が正）。文面は
+    読み返す記録として平易な日本語にし、モデルの短い理由が
+    あれば添える。理由コード自体は、置き場と突き合わせられる
+    よう括弧内に併記する。
+    """
+    if reason == REASON_MODEL_IMMEDIATE:
+        base = (f"見張り「{watch_title}」の変化は、おまかせ判定で"
+                "その場でお知らせしました")
+    elif reason == REASON_MODEL_UNCERTAIN_IMMEDIATE:
+        base = (f"見張り「{watch_title}」の変化は、おまかせ判定が"
+                "定まらなかったため、その場でお知らせしました")
+    elif reason == REASON_QUEUE_FAILED_IMMEDIATE:
+        base = (f"見張り「{watch_title}」の変化は、朝へ寄せる置き場"
+                "へ保存できなかったため、その場でお知らせしました")
+    else:  # REASON_MODEL_INVALID_IMMEDIATE 等
+        base = (f"見張り「{watch_title}」の変化は、おまかせ判定を"
+                "使えなかったため、その場でお知らせしました")
+    detail = f"判定の理由: {model_reason}（{reason}）" if model_reason \
+        else f"理由コード: {reason}"
+    return f"{base}（{detail}）。"
 
 
 def _read_records(user_data_dir: Path) -> list[dict]:

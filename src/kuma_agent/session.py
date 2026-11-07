@@ -47,6 +47,7 @@ from .delegate import (
     NOTICE_NOTICE,
     PLAN_NOTICE,
     RESEARCH_NOTICE,
+    TRIAGE_NOTICE,
     run_delegated_task,
 )
 from .goals import STATUS_ACTIVE as GOAL_STATUS_ACTIVE
@@ -337,7 +338,8 @@ class Session:
         # さらに狭めるだけに働く。親セッション（委任の子でない）
         # と通常役は上限なし（None＝従来どおり）。調べ役は分類表
         # （tools.READ_ONLY_TOOLS）にある道具だけ、計画役と内部
-        # 専用の知らせ文作成役（notice）は空（道具ゼロ）。上限の
+        # 専用の知らせ文作成役（notice）・振り分け判定役
+        # （triage）は空（道具ゼロ）。上限の
         # 強制は ToolBox.register の1点に寄せるため、この後に
         # 登録されるカレンダー・MCP・履歴検索の道具にも同じ
         # 上限が効く
@@ -345,7 +347,7 @@ class Session:
         if delegate_child:
             if delegate_role == "research":
                 allowed_tools = READ_ONLY_TOOLS
-            elif delegate_role in ("plan", "notice"):
+            elif delegate_role in ("plan", "notice", "triage"):
                 allowed_tools = frozenset()
         # 手順書（スキル）の置き場はデータ置き場ルート（全テナント
         # 共通）なので cfg.data_dir を渡す。道具を出す条件は用事系と
@@ -470,6 +472,8 @@ class Session:
                 self.system_prompt += f"\n{PLAN_NOTICE}"
             elif delegate_role == "notice":
                 self.system_prompt += f"\n{NOTICE_NOTICE}"
+            elif delegate_role == "triage":
+                self.system_prompt += f"\n{TRIAGE_NOTICE}"
 
     # -------------------------------------------------- 選択肢での質問
 
