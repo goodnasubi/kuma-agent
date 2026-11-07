@@ -213,6 +213,20 @@ LINE 公式アカウント（Messaging API）を通じて会話できます。Te
 
 能動発信も許可リストのユーザーに届きます（`KUMA_LINE_PROACTIVE=0` で止められます）。能動発信は Push 送信で、月間の送信通数に数えられます。
 
+### Google カレンダーの読み取り連携
+
+Google カレンダーの予定を、読み取りだけに使うための連携です（予定の作成・変更・削除はできません）。準備は運用者が行います。認可まで済ませたら `kuma-agent google-calendar status` で接続を確認できます（会話から予定を読む道具と、朝のまとめへの反映は次の版で入ります）。
+
+1. [Google Cloud コンソール](https://console.cloud.google.com/)でプロジェクトを用意する（既存のものでも構いません）
+2. 「API とサービス」→「ライブラリ」で **Google Calendar API を有効化**する
+3. 「OAuth 同意画面」を設定し、公開ステータスを **「本番」に進める**（テストのままだと、許可が 7 日で切れてしまいます）
+4. 「認証情報」で **OAuth クライアント ID（種類: デスクトップアプリ）** を作り、設定ファイル（JSON）をダウンロードする
+5. ダウンロードしたファイルを、kuma-agent のプロセスだけが読める場所に置き、環境変数 `KUMA_GOOGLE_CALENDAR_CLIENT_SECRETS_FILE` にそのパスを設定する（このファイルをリポジトリやデータの書き出しに入れないこと）
+6. 対象のテナント・ユーザーで認可を実行する: `kuma-agent google-calendar auth --tenant <名前> --user <名前>`。ブラウザで Google の認可画面が開くので、対象のアカウントでサインインし、予定の読み取りを許可する
+7. `kuma-agent google-calendar status` で「接続済みです」と出れば完了です
+
+認可の情報は利用者ごとに、その利用者のデータ置き場の `google-calendar/credentials.json` に保存されます。データの書き出しや控えには含まれないため、別の環境へデータを移した場合は、移した先で認可をやり直してください。連携をやめるときは `kuma-agent google-calendar revoke` で資格情報を削除できます（Google アカウント側の許可も消したい場合は、Google アカウントの「サードパーティによるアクセス」からも削除してください）。コンテナで動かしている場合は、認可はホスト側でデータ置き場を指定して実行し、できた資格情報ファイルをボリューム内の対象ユーザーの置き場へ置くのが実用的です。
+
 ### 添付の渡し方
 
 添付できるのは画像（png / jpg / gif / webp）と文書（PDF、.txt /
@@ -257,6 +271,8 @@ LINE 公式アカウント（Messaging API）を通じて会話できます。Te
 | `KUMA_LINE_ALLOWED_USERS` | 会話を許可する user id（カンマ区切り） | （無し＝処理しない） |
 | `KUMA_LINE_TENANT` / `KUMA_LINE_USER` | LINE の会話の行き先 | `default` / `default` |
 | `KUMA_LINE_PROACTIVE` | 能動発信を LINE にも届けるか（`0` で止める） | （届ける） |
+| `KUMA_GOOGLE_CALENDAR_CLIENT_SECRETS_FILE` | Google カレンダー連携の OAuth クライアント設定ファイルへのパス | （未設定＝連携なし） |
+| `KUMA_GOOGLE_CALENDAR` | Google カレンダー連携をするか（`0` で止める） | （する） |
 | `KUMA_BRIEFING_TIME` | 朝のまとめの時刻（`off` で無効） | `07:30` |
 | `KUMA_MEMORY_EXTRACT` | 会話から長期記憶への自動抽出（`0` で止める） | （する） |
 | `KUMA_WEB_PASSWORD` | Web UI のログインパスワード | （未設定＝ログインなし） |

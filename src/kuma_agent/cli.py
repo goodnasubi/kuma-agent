@@ -270,6 +270,110 @@ def _run_import(cfg: Config, archive: str, tenant: str | None = None,
     return 0
 
 
+def _run_google_calendar(cfg: Config, action: str) -> int:
+    """Google カレンダー連携の認可・状態確認・解除（運用者向け）。
+
+    対象は cfg が指すテナント×ユーザーの置き場。auth はブラウザ
+    認可（デスクトップアプリ型 OAuth、PKCE・ループバック戻り先）
+    を回して資格情報を保存し、保存できたら接続確認まで行う。
+    status は保存済みの資格情報で主カレンダーの読み取りまでを
+    確認した状態を表示する。revoke は Google 側の取り消しを
+    試みてから資格情報ファイルを削除する。トークンの値はどの
+    経路でも表示しない。モデルも API キーも要らない。
+
+    終了コード: 状態確認と解除は 0。認可は、設定の不備
+    （連携が無効・クライアント設定が無い／読めない）なら 2、
+    認可や接続確認の失敗なら 1。
+    """
+    import webbrowser
+
+    from .google_calendar import (
+        GoogleCalendarError,
+        authorize,
+        build_client,
+    )
+
+    tenant = normalize_tenant_name(cfg.tenant)
+    user = normalize_user_name(cfg.user)
+    print(f"対象: テナント {tenant} / ユーザー {user}")
+    client = build_client(
+        cfg.user_data_dir,
+        enabled=cfg.google_calendar_enabled,
+        client_secrets_file=cfg.google_calendar_client_secrets_file)
+    if action == "status":
+        status = client.check_connection()
+        print(f"Google カレンダー連携: {status.message}")
+        return 0
+    if action == "revoke":
+        return _run_google_calendar_revoke(cfg, client)
+    # action == "auth"
+    if not cfg.google_calendar_enabled:
+        print("Google カレンダー連携は無効になっています"
+              "（環境変数 KUMA_GOOGLE_CALENDAR=0）")
+        return 2
+    if client.secrets_error:
+        print(client.secrets_error)
+        return 2
+    if client.client_secrets is None:
+        print("クライアント設定ファイルが未設定です"
+              "（環境変数 KUMA_GOOGLE_CALENDAR_CLIENT_SECRETS_FILE に、"
+              "Google Cloud で作成したデスクトップ型 OAuth クライアントの"
+              "設定ファイルへのパスを指定してください）")
+        return 2
+    print("ブラウザで Google の認可画面を開きます。"
+          "対象の Google アカウントでサインインし、"
+          "予定の読み取りを許可してください")
+
+    def open_url(url: str) -> None:
+        print(f"認可画面: {url}")
+        webbrowser.open(url)
+
+    try:
+        authorize(cfg.user_data_dir, client.client_secrets,
+                  open_url=open_url)
+    except GoogleCalendarError as exc:
+        print(f"認可できませんでした: {exc.message}")
+        return 1
+    print("認可が完了しました。接続を確認します")
+    status = client.check_connection()
+    print(f"Google カレンダー連携: {status.message}")
+    return 0 if status.state == "connected" else 1
+
+
+def _run_google_calendar_revoke(cfg: Config, client) -> int:
+    """Google カレンダー連携の解除（_run_google_calendar の本体）。
+
+    保存されている資格情報があれば、Google 側のリフレッシュ
+    トークンの取り消しを試みてから、資格情報ファイルを削除
+    する。資格情報が壊れていて読み込めない場合も、ファイルの
+    削除だけは行う。予定データ自体には触れない。
+    """
+    from .google_calendar import (
+        GoogleCalendarError,
+        credentials_path,
+        delete_credentials,
+        load_credentials,
+        revoke_refresh_token,
+    )
+
+    credentials = None
+    if credentials_path(cfg.user_data_dir).is_file():
+        try:
+            credentials = load_credentials(cfg.user_data_dir)
+        except GoogleCalendarError:
+            credentials = None  # 読めなくても削除は進める
+    if credentials is not None and client.client_secrets is not None:
+        revoke_refresh_token(client.client_secrets,
+                             credentials.refresh_token)
+    if delete_credentials(cfg.user_data_dir):
+        print("連携を解除しました（資格情報を削除しました）。"
+              "Google アカウント側の許可も取り消したい場合は、"
+              "Google のサードパーティアクセスから削除してください")
+    else:
+        print("保存されている資格情報はありませんでした")
+    return 0
+
+
 def _run_memory_tidy(cfg: Config, client, dry_run: bool = False) -> int:
     """長期記憶（MEMORY.md）の整理（運用者向けコマンドの本体）。
 
@@ -617,6 +721,17 @@ def main(argv: list[str] | None = None) -> int:
                                help="復元先のテナント名（既定: ZIP に記録されたテナント）")
     import_parser.add_argument("--user", default=None,
                                help="復元先のユーザー名（既定: ZIP に記録されたユーザー）")
+    google_calendar_parser = sub.add_parser(
+        "google-calendar",
+        help="Google カレンダーの読み取り連携（認可・状態確認・解除）")
+    google_calendar_parser.add_argument(
+        "action", choices=["auth", "status", "revoke"],
+        help="auth: ブラウザで許可を取る / status: 状態と接続を確認する"
+             " / revoke: 連携を解除する")
+    google_calendar_parser.add_argument("--tenant", default=None,
+                                        help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
+    google_calendar_parser.add_argument("--user", default=None,
+                                        help="対象のユーザー名（既定: 環境変数 KUMA_USER、無ければ default）")
     sub.add_parser(
         "telegram",
         help="Telegram からのメッセージを受けて会話する（単独実行）")
@@ -651,6 +766,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "import":  # 復元もモデルも API キーも要らない
         return _run_import(cfg, args.archive, tenant=args.tenant,
                            user=args.user)
+    if args.command == "google-calendar":  # 認可・確認もモデルも要らない
+        return _run_google_calendar(cfg, args.action)
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)

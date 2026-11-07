@@ -18,6 +18,12 @@ export-info.json で、kuma-agent の書き出しであることを確かめて
 控え置き場である backups/ も消さない（取ったばかりの控えを
 置き換えで消してしまわないため）。
 
+資格情報の扱いも書き出しとそろえる。Google カレンダー連携の
+資格情報ファイル（google-calendar/credentials.json）は、ZIP
+に含まれていても書き込まず（注入・上書きの防止）、置き換えの
+際も既存のファイルを消さずに保全する（パス定義は
+google_calendar.py が正）。
+
 安全のため、ZIP の項目は書き出す前にすべて検証する。絶対パス
 や `..` を含む項目、シンボリックリンクの項目が 1 つでもあれば、
 何も変更せずに ValueError で中止する（パストラバーサル防止）。
@@ -40,6 +46,7 @@ from .export import (
     build_export_zip,
     iter_export_files,
 )
+from .google_calendar import CREDENTIALS_PATH_PARTS
 from .memory import (
     normalize_tenant_name,
     normalize_user_name,
@@ -169,20 +176,50 @@ def _validated_entries(
     return entries
 
 
-def _clear_user_dir(user_data_dir: Path, preserved: set[str]) -> None:
+def _clear_tree(directory: Path, prefix: tuple[str, ...],
+                preserved_files: set[tuple[str, ...]]) -> None:
+    """ディレクトリの中身を消す（保全対象のファイルは残す）。
+
+    prefix はユーザー置き場から見た directory の相対パスの要素。
+    preserved_files は置き場からの相対パスの要素の組で、一致
+    するファイルは中身ごと残す。保全のために残ったファイルを
+    含むディレクトリは消さず、空になったディレクトリは消す。
+    """
+    for child in list(directory.iterdir()):
+        parts = prefix + (child.name,)
+        if child.is_dir() and not child.is_symlink():
+            _clear_tree(child, parts, preserved_files)
+            if not any(child.iterdir()):
+                child.rmdir()
+        elif parts in preserved_files:
+            continue
+        else:
+            child.unlink()
+
+
+def _clear_user_dir(user_data_dir: Path, preserved: set[str],
+                    preserved_files: set[tuple[str, ...]] | None = None
+                    ) -> None:
     """ユーザー置き場の中身を空にする（残す名前の配下は触らない）。
 
-    ファイルは削除し、ディレクトリは中身ごと削除する。置き場
-    自体が無ければ何もしない。
+    ファイルは削除し、ディレクトリは中身ごと削除する。
+    preserved_files（置き場からの相対パス）にあたるファイルは、
+    そのファイルだけを残して周りを消す（資格情報の保全用）。
+    置き場自体が無ければ何もしない。
     """
     if not user_data_dir.is_dir():
         return
+    keep = preserved_files or set()
     for child in user_data_dir.iterdir():
         if child.name in preserved and child.is_dir() \
                 and not child.is_symlink():
             continue
         if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
+            _clear_tree(child, (child.name,), keep)
+            if not any(child.iterdir()):
+                child.rmdir()
+        elif (child.name,) in keep:
+            continue
         else:
             child.unlink()
 
@@ -195,8 +232,9 @@ def restore_user_data(data_dir: Path, tenant: str, user: str,
     手順は、検証（サイズ・書き出し情報・全項目のパス）→ 対象に
     データがあれば控え → 置き場を空にする → 項目の書き出し。
     検証で落ちる場合は何も変更しない。除外対象（他のユーザー／
-    テナントの置き場）にあたる項目は書き込まず、skipped_files
-    に数える。
+    テナントの置き場）と資格情報ファイルにあたる項目は書き込
+    まず、skipped_files に数える。既存の資格情報ファイルは
+    置き換えでも消さずに保全する。
     """
     if len(zip_bytes) > MAX_IMPORT_BYTES:
         raise ValueError(
@@ -230,6 +268,9 @@ def restore_user_data(data_dir: Path, tenant: str, user: str,
         for entry in entries:
             if entry[1][0] in excluded:
                 result.skipped_files += 1
+            elif entry[1] == CREDENTIALS_PATH_PARTS:
+                # 資格情報は ZIP からは書き戻さない
+                result.skipped_files += 1
             else:
                 accepted.append(entry)
         # 控えの要否: 除外配下を除いたファイルが 1 つでもあれば取る。
@@ -246,7 +287,8 @@ def restore_user_data(data_dir: Path, tenant: str, user: str,
         preserved = set(excluded)
         if udir == data_dir:
             preserved.add(BACKUPS_DIRNAME)
-        _clear_user_dir(udir, preserved)
+        _clear_user_dir(udir, preserved,
+                        preserved_files={CREDENTIALS_PATH_PARTS})
         udir.mkdir(parents=True, exist_ok=True)
         for zip_info, parts in accepted:
             dest = udir.joinpath(*parts)

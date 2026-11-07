@@ -237,6 +237,21 @@ class Config:
     # 運用者が CLI のヘルプで確認して入れる逃げ道として用意する
     cli_extra_args: str = field(
         default_factory=lambda: os.environ.get("KUMA_CLI_EXTRA_ARGS", ""))
+    # Google カレンダーの読み取り連携（google_calendar.py）。
+    # "0" のとき連携全体を無効化する（それ以外、未設定を含む、
+    # は有効。ただしクライアント設定が無ければ未設定として扱う）
+    google_calendar_enabled: bool = field(
+        default_factory=lambda: os.environ.get(
+            "KUMA_GOOGLE_CALENDAR", "") != "0")
+    # OAuth クライアント設定ファイルへのパス（運用者単位の設定。
+    # Google Cloud で作成したデスクトップ型 OAuth クライアントの
+    # 設定ファイルを指す。ファイル自体はリポジトリやデータ
+    # 書き出しへ入れず、アプリのプロセスだけが読める場所へ置く）。
+    # 利用者ごとのリフレッシュトークンは、ここではなく利用者の
+    # 置き場の google-calendar/credentials.json に分かれる
+    google_calendar_client_secrets_file: str = field(
+        default_factory=lambda: os.environ.get(
+            "KUMA_GOOGLE_CALENDAR_CLIENT_SECRETS_FILE", ""))
 
     def cli_client_kwargs(self) -> dict:
         """CLI 系の頭脳を作るときの追加引数（API 系では空）。
