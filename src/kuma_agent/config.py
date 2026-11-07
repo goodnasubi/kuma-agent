@@ -220,6 +220,17 @@ class Config:
     require_approvals: bool = field(
         default_factory=lambda: os.environ.get(
             "KUMA_REQUIRE_APPROVALS", "") == "1")
+    # テナント別頭脳で CLI 系を選べるようにする運用者スイッチ:
+    # "1" のときだけ、テナントの頭脳の指定で CLI 系（claude-code /
+    # gemini-cli / codex）も受け付ける。CLI 系では道具の実行が
+    # 外部 CLI の側で行われ、kuma-agent 側の承認確認や道具の制限
+    # は効かないため、画面操作だけで「承認の効かないテナント」を
+    # 作れないよう、解禁は運用者の明示に限る（公開前チェック
+    # 指摘1との連動。合成は brain.py の解決と Web のテナント
+    # 設定 API が担う）
+    allow_tenant_brain_cli: bool = field(
+        default_factory=lambda: os.environ.get(
+            "KUMA_ALLOW_TENANT_BRAIN_CLI", "") == "1")
     # shell 道具（run_shell）の有効化: "0" のとき道具自体を登録
     # しない（モデルの選択肢にも出ない）。既定（未設定を含む）は
     # 有効＝従来動作

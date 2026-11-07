@@ -87,15 +87,17 @@ from .worksteps import WorkSteps
 from .telegram import build_proactive_notifier
 from .telegram import start_polling_thread as start_telegram_polling
 from .brain import (
+    ALL_PROVIDERS,
     MAX_BRAIN_API_KEY_CHARS,
     MAX_BRAIN_MODEL_CHARS,
-    TENANT_BRAIN_PROVIDERS,
     brain_key_status,
+    cli_brain_tenants,
     delete_brain_credentials,
     effective_brain,
     has_tenant_brain_override,
     resolve_brain,
     save_brain_credentials,
+    tenant_brain_providers,
 )
 from .settings import (
     approvals_enabled_for,
@@ -3999,7 +4001,8 @@ class TenantStore:
         self._brain_lock = threading.Lock()
         if has_tenant_brain_override(self._cfg.data_dir,
                                       self.default_tenant,
-                                      self._cfg.provider):
+                                      self._cfg.provider,
+                                      self._cfg.allow_tenant_brain_cli):
             # 起動時の組み合わせも同じ解決を通す（起動時だけ特別
             # 扱いしない）。渡された Session は全体の既定で作られ
             # ているため、起動時テナントに頭脳の上書き（指定または
@@ -4344,7 +4347,8 @@ def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     brain_effective_model は全体の既定まで解決した実効値。
     brain_cli は実効頭脳が CLI 系かどうか（注意表示の出し分け
     用）。brain_providers はテナント指定で選べる頭脳の一覧
-    （第1段は API 系のみ）。brain_key_set はテナントの API
+    （API 系のみ。運用者スイッチが有効なときだけ CLI 系も
+    含む。第3段）。brain_key_set はテナントの API
     キーが設定済みか、brain_key_provider はそのキーの対象
     プロバイダ、brain_key_invalid はキーの保存が壊れているか
     （第2段）。API キーの値はどの項目にも含めない。
@@ -4367,7 +4371,8 @@ def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
         "brain_effective_provider": eff_provider,
         "brain_effective_model": eff_model,
         "brain_cli": eff_cli,
-        "brain_providers": list(TENANT_BRAIN_PROVIDERS),
+        "brain_providers": list(tenant_brain_providers(
+            tenants._cfg.allow_tenant_brain_cli)),
         "brain_key_set": key_status["state"] == "set",
         "brain_key_provider": key_status["provider"],
         "brain_key_invalid": key_status["state"] == "invalid",
@@ -5211,9 +5216,20 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                     model = brain_value.get("model") or None
                     if provider is not None and (
                             not isinstance(provider, str)
-                            or provider not in TENANT_BRAIN_PROVIDERS):
+                            or provider not in ALL_PROVIDERS):
                         self._send_json(400, {
                             "error": "頭脳の種類が不正です"})
+                        return
+                    if provider in CLI_PROVIDERS \
+                            and not tenants._cfg.allow_tenant_brain_cli:
+                        # CLI 系のテナント別指定は、運用者スイッチ
+                        # （KUMA_ALLOW_TENANT_BRAIN_CLI）が有効な
+                        # ときだけ。画面操作だけで「承認の効かない
+                        # テナント」を作れないための歯止め
+                        self._send_json(400, {
+                            "error": "CLI 系の頭脳は、運用者が有効化"
+                                     "したときだけテナントごとに"
+                                     "指定できます"})
                         return
                     if model is not None and (
                             not isinstance(model, str)
@@ -5928,6 +5944,32 @@ def cli_provider_note(cfg: Config) -> str | None:
         "（委任の型による道具の上限も効きません）")
 
 
+def tenant_cli_brain_note(cfg: Config) -> str | None:
+    """テナント別 CLI が有効なときの起動時注意（1行）。
+
+    運用者スイッチ（環境変数 KUMA_ALLOW_TENANT_BRAIN_CLI）が
+    有効な間は、テナントごとに CLI 系の頭脳を指定でき、その
+    テナントでは道具の実行が外部 CLI の側で行われ、kuma-agent
+    側の承認確認や道具の制限は効かない。起動時の組み合わせの
+    頭脳が API 系でもこの状態は生じるため、cli_provider_note
+    とは別に、スイッチが有効なこと自体を明示する（公開前
+    チェックの指摘1 (a) の第3段分）。CLI 系を指定している
+    テナントがあれば、その名前も挙げる。スイッチが無効なら
+    None。挙動は変えない。
+    """
+    if not cfg.allow_tenant_brain_cli:
+        return None
+    note = (
+        "注意: テナントごとに CLI 系の頭脳も選べる設定"
+        "（環境変数 KUMA_ALLOW_TENANT_BRAIN_CLI）になっています。"
+        "CLI 系のテナントでは、道具の実行は外部の道具（CLI）の"
+        "側で行われ、クマ側の承認確認や道具の制限は効きません")
+    names = cli_brain_tenants(cfg.data_dir)
+    if names:
+        note += f"。現在、CLI 系を指定しているテナント: {'、'.join(names)}"
+    return note
+
+
 def build_server(session: Session, host: str = "127.0.0.1",
                  port: int = 8765,
                  session_factory: Callable[[str], Session] | None = None,
@@ -6021,6 +6063,9 @@ def serve(session: Session, host: str = "127.0.0.1", port: int = 8765) -> None:
     cli_note = cli_provider_note(cfg)
     if cli_note is not None:
         print(cli_note)
+    tenant_cli_note = tenant_cli_brain_note(cfg)
+    if tenant_cli_note is not None:
+        print(tenant_cli_note)
     if cfg.web_password:
         print("Web UI のログインが有効です（パスワードは環境変数 KUMA_WEB_PASSWORD）")
     _start_proactive_loop(server.tenants, cfg)  # type: ignore[attr-defined]

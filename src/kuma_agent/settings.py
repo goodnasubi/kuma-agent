@@ -194,6 +194,28 @@ def brain_setting_for(data_dir: Path, tenant: str | None) -> dict[str, str]:
             if isinstance(brain.get(key), str)}
 
 
+def all_brain_settings(data_dir: Path) -> dict[str, dict[str, str]]:
+    """全テナントの頭脳の指定を {テナント名: 指定} で返す。
+
+    brain_setting_for と同じ読み方（文字列の項目だけ）を、settings
+    .json に書かれている全テナント分について行う。指定が無い
+    テナントは含めない。起動時の注意で「どのテナントがどの頭脳を
+    指定しているか」を走査するために使う。
+    """
+    result: dict[str, dict[str, str]] = {}
+    for name, entry in _merged_tenants(_load_raw(data_dir)).items():
+        if not isinstance(entry, dict):
+            continue
+        brain = entry.get("brain")
+        if not isinstance(brain, dict):
+            continue
+        parsed = {key: brain[key] for key in _BRAIN_KEYS
+                  if isinstance(brain.get(key), str)}
+        if parsed:
+            result[name] = parsed
+    return result
+
+
 def set_brain_setting(data_dir: Path, tenant: str | None,
                       provider: str | None, model: str | None) -> None:
     """テナントの頭脳の指定を settings.json に保存する。

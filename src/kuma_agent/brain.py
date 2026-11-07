@@ -22,6 +22,13 @@ main、Telegram / LINE の factory）から使う。
   カレンダーの資格情報と同じ保護・除外の流儀）。解決では、
   実効プロバイダと一致するテナントのキーが全体のキーより
   優先する
+- 第3段（0.83.0）では、CLI 系もテナント指定できる。ただし
+  運用者スイッチ（Config.allow_tenant_brain_cli、環境変数
+  KUMA_ALLOW_TENANT_BRAIN_CLI）が有効なときだけに限る。CLI
+  系では承認確認や道具の制限が効かないため、スイッチが無い
+  間は設定に CLI 系が書かれていても第1段と同じく読み取りで
+  無視し、画面操作だけで「承認の効かないテナント」を作れない
+  形を維持する（公開前チェック指摘1との連動）
 
 設計の正は docs/DESIGN.md の「テナントごとの頭脳」の節。
 """
@@ -36,15 +43,27 @@ from .agent_cli import CLI_PROVIDERS
 from .config import Config
 from .llm import API_PROVIDERS, create_client, default_model_name
 from .memory import normalize_tenant_name, tenant_dir
-from .settings import brain_setting_for
+from .settings import all_brain_settings, brain_setting_for
 
 # 頭脳の候補一覧の正（API 系＋CLI 系）。llm.PROVIDERS は循環
 # import を避けた写しで、候補の組み立てはこちらを正とする
 ALL_PROVIDERS = API_PROVIDERS + CLI_PROVIDERS
 
-# テナント指定として受け付けるプロバイダの範囲。第1段は API 系
-# のみ（CLI 系のテナント別は第3段で運用者スイッチ付きで解禁する）
+# テナント指定として受け付けるプロバイダの範囲の土台（API 系）。
+# CLI 系は運用者スイッチが有効なときだけ加わる（第3段）。
+# tenant_brain_providers がスイッチに応じた一覧を返す
 TENANT_BRAIN_PROVIDERS = API_PROVIDERS
+
+
+def tenant_brain_providers(allow_cli: bool) -> tuple[str, ...]:
+    """テナント指定で選べるプロバイダの一覧を返す。
+
+    既定は API 系のみ。運用者スイッチ（allow_cli）が有効なとき
+    だけ CLI 系も含めた全候補になる。
+    """
+    if allow_cli:
+        return ALL_PROVIDERS
+    return TENANT_BRAIN_PROVIDERS
 
 # モデル名の長さ上限（管理タブからの保存時の検証に使う）
 MAX_BRAIN_MODEL_CHARS = 200
@@ -61,25 +80,38 @@ BRAIN_CREDENTIALS_PATH_PARTS = (BRAIN_CREDENTIALS_DIRNAME,
 MAX_BRAIN_API_KEY_CHARS = 1000
 
 
-def tenant_brain_setting(data_dir: Path,
-                         tenant: str | None) -> dict[str, str]:
+def tenant_brain_setting(data_dir: Path, tenant: str | None,
+                         allow_cli: bool = False) -> dict[str, str]:
     """検証済みのテナント頭脳の指定を返す（provider / model）。
 
-    settings.json の指定（settings.brain_setting_for）から、その
-    段で許可されていないプロバイダ（未知の名前・CLI 系）はその
-    項目だけ落とし、空のモデル名も未指定として落とす。壊れた
-    指定があっても全体の既定に倒れる（そのテナントが設定ミスで
-    全滅しないための流儀）。
+    settings.json の指定（settings.brain_setting_for）から、許可
+    されていないプロバイダ（未知の名前と、運用者スイッチが無い
+    間の CLI 系）はその項目だけ落とし、空のモデル名も未指定と
+    して落とす。壊れた指定があっても全体の既定に倒れる（その
+    テナントが設定ミスで全滅しないための流儀）。
     """
     raw = brain_setting_for(data_dir, tenant)
     setting: dict[str, str] = {}
     provider = raw.get("provider")
-    if provider in TENANT_BRAIN_PROVIDERS:
+    if provider in tenant_brain_providers(allow_cli):
         setting["provider"] = provider
     model = raw.get("model")
     if model:
         setting["model"] = model
     return setting
+
+
+def cli_brain_tenants(data_dir: Path) -> list[str]:
+    """CLI 系の頭脳を指定しているテナント名の一覧を返す。
+
+    settings.json を走査し、brain.provider が CLI 系に当たる
+    テナントを正規化済みの名前で（ソートして）返す。運用者
+    スイッチの有無は見ない（設定ファイルに何が書かれているかの
+    棚卸し用で、起動時の注意が使う）。
+    """
+    return sorted(
+        name for name, setting in all_brain_settings(data_dir).items()
+        if setting.get("provider") in CLI_PROVIDERS)
 
 
 # ------------------------------------------------------- テナントのキー
@@ -230,15 +262,17 @@ def brain_key_status(data_dir: Path, tenant: str | None) -> dict:
 
 
 def has_tenant_brain_override(data_dir: Path, tenant: str | None,
-                              base_provider: str) -> bool:
+                              base_provider: str,
+                              allow_cli: bool = False) -> bool:
     """そのテナントに頭脳の上書き（指定、または効くキー）があるか。
 
     base_provider は土台のプロバイダ（全体の既定、またはプロセス
     のテナントで解決済みの Config のプロバイダ）。頭脳の指定が
     無ければ実効プロバイダは土台のものになるため、キーの一致
-    判定はそのプロバイダで行う。
+    判定はそのプロバイダで行う。allow_cli は運用者スイッチの
+    状態で、CLI 系の指定を上書きとして数えるかどうかを決める。
     """
-    if tenant_brain_setting(data_dir, tenant):
+    if tenant_brain_setting(data_dir, tenant, allow_cli):
         return True
     return tenant_api_key(data_dir, tenant, base_provider) is not None
 
@@ -255,7 +289,8 @@ def scoped_config(base_cfg: Config, tenant: str | None) -> Config:
     他人のキーを送る事故の防止）。
     """
     name = normalize_tenant_name(tenant)
-    setting = tenant_brain_setting(base_cfg.data_dir, name)
+    setting = tenant_brain_setting(base_cfg.data_dir, name,
+                                   base_cfg.allow_tenant_brain_cli)
     cfg = replace(base_cfg, tenant=name)
     if "provider" in setting:
         cfg = replace(cfg, provider=setting["provider"])
@@ -288,7 +323,8 @@ def effective_brain(base_cfg: Config,
 
 def _effective_parts(base_cfg: Config,
                      tenant: str | None) -> tuple[str, str | None, bool]:
-    setting = tenant_brain_setting(base_cfg.data_dir, tenant)
+    setting = tenant_brain_setting(base_cfg.data_dir, tenant,
+                                   base_cfg.allow_tenant_brain_cli)
     provider = setting.get("provider", base_cfg.provider)
     model = setting.get("model", base_cfg.model)
     return provider, model, provider in CLI_PROVIDERS
@@ -308,7 +344,8 @@ def resolve_brain(base_cfg: Config, tenant: str | None,
     """
     cfg = scoped_config(base_cfg, tenant)
     if fallback_model is not None and not has_tenant_brain_override(
-            base_cfg.data_dir, tenant, base_cfg.provider):
+            base_cfg.data_dir, tenant, base_cfg.provider,
+            base_cfg.allow_tenant_brain_cli):
         return cfg, fallback_model
     model = create_client(cfg.provider, cfg.resolve_api_key(),
                           cfg.model, **cfg.cli_client_kwargs())
@@ -345,8 +382,11 @@ def resolve_peer_brain(cfg: Config, tenant: str | None, fallback_model):
     name = normalize_tenant_name(tenant)
     same = name == normalize_tenant_name(cfg.tenant)
     base = cfg if same else global_brain_base(cfg)
-    if has_tenant_brain_override(cfg.data_dir, name, base.provider):
+    allow_cli = cfg.allow_tenant_brain_cli
+    if has_tenant_brain_override(cfg.data_dir, name, base.provider,
+                                 allow_cli):
         return resolve_brain(base, name)
-    if has_tenant_brain_override(cfg.data_dir, cfg.tenant, cfg.provider):
+    if has_tenant_brain_override(cfg.data_dir, cfg.tenant, cfg.provider,
+                                 allow_cli):
         return resolve_brain(global_brain_base(cfg), name)
     return scoped_config(cfg, name), fallback_model
