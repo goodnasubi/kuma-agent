@@ -3663,6 +3663,48 @@ class TenantStore:
         return sorted(set(loaded) | set(list_tenant_names(self._cfg.data_dir)))
 
     @property
+    def fixed_tenant(self) -> str | None:
+        """公開先として固定されたテナント（正規化済み）。
+
+        環境変数 KUMA_WEB_TENANT が設定されている間だけ、その
+        テナントを返す。未設定（空）なら None＝テナント軸は
+        固定しない（公開前チェックの指摘3・選択肢C）。
+        """
+        raw = self._cfg.web_tenant
+        return normalize_tenant_name(raw) if raw else None
+
+    @property
+    def fixed_user(self) -> str | None:
+        """公開先として固定されたユーザー（正規化済み）。
+
+        KUMA_WEB_USER が設定されている間だけ、そのユーザーを
+        返す。未設定（空）なら None＝ユーザー軸は固定しない。
+        """
+        raw = self._cfg.web_user
+        return normalize_user_name(raw) if raw else None
+
+    def tenant_allowed(self, tenant: str) -> bool:
+        """そのテナントが固定の範囲内かどうか。
+
+        テナントが固定されていなければ常に True。固定されて
+        いれば、正規化して固定先と一致するときだけ True。
+        """
+        fixed = self.fixed_tenant
+        return fixed is None or normalize_tenant_name(tenant) == fixed
+
+    def pair_allowed(self, tenant: str, user: str) -> bool:
+        """その組み合わせが固定の範囲内かどうか。
+
+        照合するのは設定された軸だけ（テナントだけ固定なら
+        ユーザーは問わない、という一貫した意味にする）。
+        """
+        if not self.tenant_allowed(tenant):
+            return False
+        fixed_user = self.fixed_user
+        return fixed_user is None \
+            or normalize_user_name(user) == fixed_user
+
+    @property
     def data_dir(self) -> Path:
         """データ置き場のルート（settings.json / retention.json の置き場）。"""
         return self._cfg.data_dir
@@ -3905,6 +3947,12 @@ def _tenant_impact_payload(tenants: TenantStore, name: str) -> dict:
     }
 
 
+# 公開先の固定（KUMA_WEB_TENANT / KUMA_WEB_USER）に食い違う
+# テナント／ユーザーを指定されたときの 403 の文言
+_FIXED_PAIR_ERROR = ("公開先が固定されているため、このテナント／"
+                     "ユーザーにはアクセスできません")
+
+
 def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                  line_bot: LineBot | None = None):
     """TenantStore を受け取るリクエストハンドラクラスを作る。
@@ -4000,6 +4048,56 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             self._send_json(200, {"logged_out": True},
                             {"Set-Cookie": auth.cleared_cookie()})
 
+        # -------------------------------------------- 公開先の固定
+        # テナント／ユーザーの解決はこの4つのヘルパーに寄せる。
+        # 解決（未指定なら起動時の組み合わせ）と正規化に加えて、
+        # 公開先の固定（KUMA_WEB_TENANT / KUMA_WEB_USER）に
+        # 食い違えば 403 を送って None を返す。呼び出し側は
+        # None ならそのまま return する。固定の判定そのものは
+        # TenantStore（pair_allowed / tenant_allowed）が持つ。
+
+        def _resolve_tenant_query(self, query: dict) -> str | None:
+            """クエリの tenant を解決する（テナント軸だけの API 用）。"""
+            name = normalize_tenant_name(
+                _first(query.get("tenant")) or tenants.default_tenant)
+            if not tenants.tenant_allowed(name):
+                self._send_json(403, {"error": _FIXED_PAIR_ERROR})
+                return None
+            return name
+
+        def _resolve_pair_query(
+                self, query: dict) -> tuple[str, str] | None:
+            """クエリの tenant / user を解決する。"""
+            tenant = normalize_tenant_name(
+                _first(query.get("tenant")) or tenants.default_tenant)
+            user = normalize_user_name(
+                _first(query.get("user")) or tenants.default_user)
+            if not tenants.pair_allowed(tenant, user):
+                self._send_json(403, {"error": _FIXED_PAIR_ERROR})
+                return None
+            return tenant, user
+
+        def _resolve_tenant_body(self, data: dict) -> str | None:
+            """POST 本文の tenant を解決する（テナント軸だけの API 用）。"""
+            name = normalize_tenant_name(
+                data.get("tenant") or tenants.default_tenant)
+            if not tenants.tenant_allowed(name):
+                self._send_json(403, {"error": _FIXED_PAIR_ERROR})
+                return None
+            return name
+
+        def _resolve_pair_body(
+                self, data: dict) -> tuple[str, str] | None:
+            """POST 本文の tenant / user を解決する。"""
+            tenant = normalize_tenant_name(
+                data.get("tenant") or tenants.default_tenant)
+            user = normalize_user_name(
+                data.get("user") or tenants.default_user)
+            if not tenants.pair_allowed(tenant, user):
+                self._send_json(403, {"error": _FIXED_PAIR_ERROR})
+                return None
+            return tenant, user
+
         def do_GET(self) -> None:
             split = urlsplit(self.path)
             query = parse_qs(split.query)
@@ -4020,38 +4118,59 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                                       "tenant": tenants.default_tenant,
                                       "user": tenants.default_user})
             elif split.path == "/api/tenants":
-                self._send_json(200, {"tenants": tenants.names(),
-                                      "current": tenants.default_tenant})
+                fixed = tenants.fixed_tenant
+                if fixed is not None:
+                    # 公開先の固定中は、切り替え候補は固定先だけ
+                    self._send_json(200, {"tenants": [fixed],
+                                          "current": fixed})
+                else:
+                    self._send_json(
+                        200, {"tenants": tenants.names(),
+                              "current": tenants.default_tenant})
             elif split.path == "/api/tenant_settings":
-                name = normalize_tenant_name(_first(query.get("tenant")))
+                name = self._resolve_tenant_query(query)
+                if name is None:
+                    return
                 self._send_json(200, _tenant_settings_payload(tenants, name))
             elif split.path == "/api/tenants/impact":
-                name = normalize_tenant_name(_first(query.get("tenant")))
+                name = self._resolve_tenant_query(query)
+                if name is None:
+                    return
                 if name not in list_tenant_names(tenants.data_dir):
                     self._send_json(404, {"error": "テナントが見つかりません"})
                 else:
                     self._send_json(
                         200, _tenant_impact_payload(tenants, name))
             elif split.path == "/api/notify_prefs":
-                tenant = normalize_tenant_name(
-                    _first(query.get("tenant")) or tenants.default_tenant)
-                user = normalize_user_name(
-                    _first(query.get("user")) or tenants.default_user)
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
                 self._send_json(
-                    200, _notify_prefs_payload(tenants, tenant, user))
+                    200, _notify_prefs_payload(tenants, *pair))
             elif split.path == "/api/users":
-                users = tenants.users(_first(query.get("tenant")))
-                self._send_json(200, {"users": users.names(),
-                                      "current": users.default_user})
+                tenant = self._resolve_tenant_query(query)
+                if tenant is None:
+                    return
+                users = tenants.users(tenant)
+                names = users.names()
+                fixed_user = tenants.fixed_user
+                if fixed_user is not None:
+                    # 公開先の固定中は、切り替え候補は固定先だけ
+                    names = [fixed_user]
+                self._send_json(200, {
+                    "users": names,
+                    "current": fixed_user or users.default_user})
             elif split.path == "/api/sessions":
-                store = tenants.store(_first(query.get("tenant")),
-                                      _first(query.get("user")))
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
+                store = tenants.store(*pair)
                 self._send_json(200, {"sessions": store.names()})
             elif split.path == "/api/status":
-                tenant = normalize_tenant_name(
-                    _first(query.get("tenant")) or tenants.default_tenant)
-                user = normalize_user_name(
-                    _first(query.get("user")) or tenants.default_user)
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
+                tenant, user = pair
                 store = tenants.store(tenant, user)
                 udir = user_dir(tenant_dir(tenants.data_dir, tenant), user)
                 t_all, t_open = _count_tasks_file(udir)
@@ -4064,54 +4183,50 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                     "steps": [{"text": s.text, "status": s.status}
                               for s in steps]})
             elif split.path == "/api/approvals":
-                tenant = normalize_tenant_name(_first(query.get("tenant")))
-                user = normalize_user_name(_first(query.get("user")))
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
                 self._send_json(200, {"approvals": tenants.approvals
-                                      .list_pending(tenant, user)})
+                                      .list_pending(*pair)})
             elif split.path == "/api/outputs":
-                tenant = normalize_tenant_name(
-                    _first(query.get("tenant")) or tenants.default_tenant)
-                user = normalize_user_name(
-                    _first(query.get("user")) or tenants.default_user)
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
                 self._send_json(
-                    200, _outputs_payload(tenants, tenant, user))
+                    200, _outputs_payload(tenants, *pair))
             elif split.path == "/api/outputs/download":
                 self._download_output(query)
             elif split.path == "/api/feed":
-                tenant = normalize_tenant_name(
-                    _first(query.get("tenant")) or tenants.default_tenant)
-                user = normalize_user_name(
-                    _first(query.get("user")) or tenants.default_user)
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
                 self._send_json(
-                    200, _feed_payload(tenants, tenant, user,
+                    200, _feed_payload(tenants, *pair,
                                        _first(query.get("limit")),
                                        _first(query.get("kind"))))
             elif split.path == "/api/ideas":
-                tenant = normalize_tenant_name(
-                    _first(query.get("tenant")) or tenants.default_tenant)
-                user = normalize_user_name(
-                    _first(query.get("user")) or tenants.default_user)
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
                 self._send_json(
-                    200, _ideas_payload(tenants, tenant, user))
+                    200, _ideas_payload(tenants, *pair))
             elif split.path == "/api/goals":
-                tenant = normalize_tenant_name(
-                    _first(query.get("tenant")) or tenants.default_tenant)
-                user = normalize_user_name(
-                    _first(query.get("user")) or tenants.default_user)
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
                 self._send_json(
-                    200, _goals_payload(tenants, tenant, user))
+                    200, _goals_payload(tenants, *pair))
             elif split.path == "/api/avatar":
-                tenant = normalize_tenant_name(
-                    _first(query.get("tenant")) or tenants.default_tenant)
-                user = normalize_user_name(
-                    _first(query.get("user")) or tenants.default_user)
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
                 self._send_json(
-                    200, _avatar_payload(tenants, tenant, user))
+                    200, _avatar_payload(tenants, *pair))
             elif split.path == "/api/avatar/image":
-                tenant = normalize_tenant_name(
-                    _first(query.get("tenant")) or tenants.default_tenant)
-                user = normalize_user_name(
-                    _first(query.get("user")) or tenants.default_user)
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
+                tenant, user = pair
                 store = AvatarStore(user_dir(
                     tenant_dir(tenants.data_dir, tenant), user))
                 item_id = _first(query.get("id"))
@@ -4131,17 +4246,16 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                            {"Cache-Control": "no-cache",
                             "Content-Security-Policy": "sandbox"})
             elif split.path == "/api/spaces":
-                tenant = normalize_tenant_name(
-                    _first(query.get("tenant")) or tenants.default_tenant)
-                user = normalize_user_name(
-                    _first(query.get("user")) or tenants.default_user)
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
                 self._send_json(
-                    200, _spaces_payload(tenants, tenant, user))
+                    200, _spaces_payload(tenants, *pair))
             elif split.path == "/api/spaces/content":
-                tenant = normalize_tenant_name(
-                    _first(query.get("tenant")) or tenants.default_tenant)
-                user = normalize_user_name(
-                    _first(query.get("user")) or tenants.default_user)
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
+                tenant, user = pair
                 store = SpaceStore(user_dir(
                     tenant_dir(tenants.data_dir, tenant), user))
                 space_id = _first(query.get("id")) or ""
@@ -4155,32 +4269,31 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                                           "title": space.title,
                                           "html": html})
             elif split.path == "/api/usage":
-                tenant = normalize_tenant_name(
-                    _first(query.get("tenant")) or tenants.default_tenant)
-                user = normalize_user_name(
-                    _first(query.get("user")) or tenants.default_user)
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
                 self._send_json(
-                    200, _usage_payload(tenants, tenant, user))
+                    200, _usage_payload(tenants, *pair))
             elif split.path == "/api/activity":
-                tenant = normalize_tenant_name(
-                    _first(query.get("tenant")) or tenants.default_tenant)
-                user = normalize_user_name(
-                    _first(query.get("user")) or tenants.default_user)
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
                 self._send_json(
                     200, _activity_payload(
-                        tenants, tenant, user,
+                        tenants, *pair,
                         _first(query.get("limit"))))
             elif split.path == "/api/export":
-                tenant = normalize_tenant_name(
-                    _first(query.get("tenant")) or tenants.default_tenant)
-                user = normalize_user_name(
-                    _first(query.get("user")) or tenants.default_user)
-                self._download_export(tenant, user)
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
+                self._download_export(*pair)
             elif split.path == "/api/profile":
                 self._get_profile(query)
             elif split.path == "/api/history":
-                store = tenants.store(_first(query.get("tenant")),
-                                      _first(query.get("user")))
+                pair = self._resolve_pair_query(query)
+                if pair is None:
+                    return
+                store = tenants.store(*pair)
                 session = store.get(_first(query.get("session")))
                 reactions = session.memory.load_reactions()
                 agent_reactions = session.memory.load_agent_reactions()
@@ -4213,10 +4326,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             .resolve_download が basename 検証と実在確認を担う）。
             登録されていない名前や ../ を含む名前は 404 にする。
             """
-            tenant = normalize_tenant_name(
-                _first(query.get("tenant")) or tenants.default_tenant)
-            user = normalize_user_name(
-                _first(query.get("user")) or tenants.default_user)
+            pair = self._resolve_pair_query(query)
+            if pair is None:
+                return
+            tenant, user = pair
             name = _first(query.get("name"))
             if not name:
                 self._send_json(400, {"error": "name を指定してください"})
@@ -4269,10 +4382,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             ゲートは do_POST 側で済んでいる。
             """
             query = parse_qs(urlsplit(self.path).query)
-            tenant = normalize_tenant_name(
-                _first(query.get("tenant")) or tenants.default_tenant)
-            user = normalize_user_name(
-                _first(query.get("user")) or tenants.default_user)
+            pair = self._resolve_pair_query(query)
+            if pair is None:
+                return
+            tenant, user = pair
             data = self._read_json_body()
             if data is None:
                 self._send_json(400, {"error": "リクエストが不正です"})
@@ -4426,8 +4539,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             except (ValueError, KeyError, TypeError):
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
-            session = tenants.store(
-                data.get("tenant"), data.get("user")).get(data.get("session"))
+            pair = self._resolve_pair_body(data)
+            if pair is None:
+                return
+            session = tenants.store(*pair).get(data.get("session"))
             self._chat(session, message, attachments, quote)
 
         def _get_profile(self, query: dict) -> None:
@@ -4439,10 +4554,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             どれか。ファイルが無ければ空の本文を返す。対象外の
             名前は 400。
             """
-            tenant = normalize_tenant_name(
-                _first(query.get("tenant")) or tenants.default_tenant)
-            user = normalize_user_name(
-                _first(query.get("user")) or tenants.default_user)
+            pair = self._resolve_pair_query(query)
+            if pair is None:
+                return
+            tenant, user = pair
             name = _first(query.get("name"))
             if not name:
                 self._send_json(400, {"error": "name を指定してください"})
@@ -4471,9 +4586,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             if data is None:
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
-            tenant = normalize_tenant_name(
-                data.get("tenant") or tenants.default_tenant)
-            user = normalize_user_name(data.get("user") or tenants.default_user)
+            pair = self._resolve_pair_body(data)
+            if pair is None:
+                return
+            tenant, user = pair
             name = data.get("name")
             content = data.get("content")
             if not isinstance(name, str) or not isinstance(content, str):
@@ -4505,7 +4621,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             except ValueError:
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
-            store = tenants.store(data.get("tenant"), data.get("user"))
+            pair = self._resolve_pair_body(data)
+            if pair is None:
+                return
+            store = tenants.store(*pair)
             session_id = normalize_session_id(data.get("session"))
             deleted = delete_session_record(store.data_dir, session_id)
             store.discard(session_id)
@@ -4523,8 +4642,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             if data is None:
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
-            name = normalize_tenant_name(
-                data.get("tenant") or tenants.default_tenant)
+            resolved = self._resolve_tenant_body(data)
+            if resolved is None:
+                return
+            name = resolved
             if "proactive_enabled" in data:
                 enabled = data["proactive_enabled"]
                 if not isinstance(enabled, bool):
@@ -4572,9 +4693,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             if data is None:
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
-            tenant = normalize_tenant_name(
-                data.get("tenant") or tenants.default_tenant)
-            user = normalize_user_name(data.get("user") or tenants.default_user)
+            pair = self._resolve_pair_body(data)
+            if pair is None:
+                return
+            tenant, user = pair
             target_dir = user_dir(tenant_dir(tenants.data_dir, tenant), user)
             for key, func in (("add_topic", add_muted_topic),
                               ("remove_topic", remove_muted_topic)):
@@ -4623,9 +4745,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 self._send_json(400, {
                     "error": "id と approved（true / false）を指定してください"})
                 return
-            tenant = normalize_tenant_name(
-                data.get("tenant") or tenants.default_tenant)
-            user = normalize_user_name(data.get("user") or tenants.default_user)
+            pair = self._resolve_pair_body(data)
+            if pair is None:
+                return
+            tenant, user = pair
             if not tenants.approvals.decide(tenant, user, approval_id, approved):
                 self._send_json(404, {"error": "対象の承認が見つかりません"})
                 return
@@ -4648,6 +4771,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 self._send_json(400, {"error": "テナント名を入力してください"})
                 return
             name = normalize_tenant_name(raw)
+            if not tenants.tenant_allowed(name):
+                # 公開先の固定中は、固定先以外のテナントは作れない
+                self._send_json(403, {"error": _FIXED_PAIR_ERROR})
+                return
             if name == DEFAULT_TENANT:
                 self._send_json(400, {
                     "error": "既定のテナント（default）はすでにあります"})
@@ -4690,6 +4817,11 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 self._send_json(400, {"error": "テナント名を指定してください"})
                 return
             name = normalize_tenant_name(raw)
+            if not tenants.tenant_allowed(name):
+                # 公開先の固定中は、固定先以外のテナントは消せない
+                # （固定先そのものの削除は従来どおりの判定に委ねる）
+                self._send_json(403, {"error": _FIXED_PAIR_ERROR})
+                return
             if name == DEFAULT_TENANT:
                 self._send_json(400, {
                     "error": "既定のテナント（default）は削除できません"})
@@ -4760,10 +4892,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             if data is None:
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
-            tenant = normalize_tenant_name(
-                data.get("tenant") or tenants.default_tenant)
-            user = normalize_user_name(
-                data.get("user") or tenants.default_user)
+            pair = self._resolve_pair_body(data)
+            if pair is None:
+                return
+            tenant, user = pair
             session = tenants.store(tenant, user).get(None)
             target_dir = user_dir(tenant_dir(tenants.data_dir, tenant), user)
             result = generate_ideas(session, target_dir)
@@ -4788,10 +4920,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             if data is None:
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
-            tenant = normalize_tenant_name(
-                data.get("tenant") or tenants.default_tenant)
-            user = normalize_user_name(
-                data.get("user") or tenants.default_user)
+            pair = self._resolve_pair_body(data)
+            if pair is None:
+                return
+            tenant, user = pair
             idea_id = data.get("id")
             action = data.get("action")
             if not isinstance(idea_id, str) or not idea_id:
@@ -4828,10 +4960,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             if data is None:
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
-            tenant = normalize_tenant_name(
-                data.get("tenant") or tenants.default_tenant)
-            user = normalize_user_name(
-                data.get("user") or tenants.default_user)
+            pair = self._resolve_pair_body(data)
+            if pair is None:
+                return
+            tenant, user = pair
             target_dir = user_dir(tenant_dir(tenants.data_dir, tenant),
                                   user)
             action = data.get("action")
@@ -4938,10 +5070,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             if data is None:
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
-            tenant = normalize_tenant_name(
-                data.get("tenant") or tenants.default_tenant)
-            user = normalize_user_name(
-                data.get("user") or tenants.default_user)
+            pair = self._resolve_pair_body(data)
+            if pair is None:
+                return
+            tenant, user = pair
             target_dir = user_dir(tenant_dir(tenants.data_dir, tenant),
                                   user)
             store = SpaceStore(target_dir)
@@ -4995,12 +5127,17 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 return
             self._send_json(200, _spaces_payload(tenants, tenant, user))
 
-        def _avatar_store(self, data: dict) -> tuple[str, str, AvatarStore]:
-            """アバター API 共通の対象解決（tenant / user / 置き場）。"""
-            tenant = normalize_tenant_name(
-                data.get("tenant") or tenants.default_tenant)
-            user = normalize_user_name(
-                data.get("user") or tenants.default_user)
+        def _avatar_store(
+                self, data: dict) -> tuple[str, str, AvatarStore] | None:
+            """アバター API 共通の対象解決（tenant / user / 置き場）。
+
+            公開先の固定に食い違う組み合わせなら 403 を送って
+            None を返す（呼び出し側はそのまま return する）。
+            """
+            pair = self._resolve_pair_body(data)
+            if pair is None:
+                return None
+            tenant, user = pair
             store = AvatarStore(user_dir(
                 tenant_dir(tenants.data_dir, tenant), user))
             return tenant, user, store
@@ -5018,7 +5155,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             if data is None:
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
-            tenant, user, store = self._avatar_store(data)
+            resolved = self._avatar_store(data)
+            if resolved is None:
+                return
+            tenant, user, store = resolved
             try:
                 raw = base64.b64decode(str(data.get("data_base64") or ""),
                                        validate=True)
@@ -5046,7 +5186,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             if data is None:
                 self._send_json(400, {"error": "リクエストが不正です"})
                 return
-            tenant, user, store = self._avatar_store(data)
+            resolved = self._avatar_store(data)
+            if resolved is None:
+                return
+            tenant, user, store = resolved
             action = data.get("action")
             item_id = data.get("id")
             if action == "reset":
@@ -5088,8 +5231,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                     or not isinstance(emoji, str):
                 self._send_json(400, {"error": "rid と emoji を指定してください"})
                 return
-            session = tenants.store(
-                data.get("tenant"), data.get("user")).get(data.get("session"))
+            pair = self._resolve_pair_body(data)
+            if pair is None:
+                return
+            session = tenants.store(*pair).get(data.get("session"))
             with lock:  # 記録の読み書きを直列化する
                 try:
                     current = session.memory.toggle_reaction(rid, emoji)

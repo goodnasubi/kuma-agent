@@ -202,6 +202,16 @@ class Config:
         default_factory=lambda: os.environ.get("KUMA_WEB_PASSWORD", ""))
     web_secure_cookie: bool = field(
         default_factory=lambda: os.environ.get("KUMA_WEB_SECURE_COOKIE", "") == "1")
+    # 公開先の固定（公開前チェックの指摘3・選択肢C）: テナントと
+    # ユーザーを環境変数で 1 組に固定する。設定した軸だけを Web の
+    # 解決で照合し、食い違うテナント／ユーザーへの API アクセスを
+    # 403 で返す（TenantStore の fixed_tenant / fixed_user と
+    # Handler の解決ヘルパーが担う）。どちらも未設定（空）なら
+    # 固定なしで、従来どおり全テナント・全ユーザーへ切り替えられる
+    web_tenant: str = field(
+        default_factory=lambda: os.environ.get("KUMA_WEB_TENANT", ""))
+    web_user: str = field(
+        default_factory=lambda: os.environ.get("KUMA_WEB_USER", ""))
     # 承認の運用者ロック: "1" の間は、テナント設定（settings.json の
     # approvals_enabled）で承認を OFF にできず、常に承認を挟む。
     # 公開時に画面から承認を切られる事故を防ぐための歯止めで、
