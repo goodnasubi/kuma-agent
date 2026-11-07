@@ -83,6 +83,19 @@ Session の巡回では実行せず、試行の記録も残さない。こちら
 モデルなしでは日の目を見ず、翌日以降に回る）。
 棚卸し全体は KUMA_MEMORY_AUDIT=0 で無効化できる。
 
+目標の進み具合の観測（goal_progress.observe_goal_progress、
+AF-5）も発言を伴わない仕事として 1 日 1 回まで行う: 進行中の
+目標について紐づいた用事の完了割合を前回の観測と比べ、変わって
+いたらフィード（種別 task）にだけ残す。初回の観測は基準を取る
+だけで記録しない。モデルは使わない。
+
+朝のまとめの材料には、main の会話の作業の手順の残り（AF-3）も
+足す: 終わっていない手順のうち進行中・停滞のもの（最大 3 件）を、
+状態と「その状態になってからの日数」（Step.updated_at から数える）
+つきで子の指示文に含める。手順の残りだけでも子を動かす材料に
+なるが、日報への倒し込みには混ぜない（声かけは朝のまとめ経由
+だけ。日報は用事の知らせと役割を分ける）。
+
 投稿先は main の会話記録で、追記は Session が使う既存の保存経路
 （Memory.append_turn）を通す。発言には能動発信の印
 （proactive: true）を付けるが、読み込み側は role / content /
@@ -128,12 +141,14 @@ from .feed import KIND_BRIEFING, KIND_PROACTIVE, append_feed_entry
 from .jobs import Job, JobBoard, is_due
 from .llm import ChatModel
 from .memory import (
+    DEFAULT_SESSION_ID,
     list_tenant_names,
     list_user_names,
     normalize_tenant_name,
     normalize_user_name,
     tenant_dir,
 )
+from .goal_progress import observe_goal_progress
 from .memory_audit import audit_memory, mark_confirm_asked, pending_confirm
 from .memory_extract import auto_extract_memory
 from .memory_tidy import auto_tidy_memory
@@ -144,6 +159,12 @@ from .skill_learn import auto_learn_skills
 from .tasks import Task, TaskBoard
 from .watches import Watch, WatchBoard, check_watch
 from .watches import is_due as watch_is_due
+from .worksteps import (
+    STATUS_BLOCKED as _STEP_BLOCKED,
+    STATUS_IN_PROGRESS as _STEP_IN_PROGRESS,
+    STATUS_LABELS as _STEP_LABELS,
+    WorkSteps,
+)
 
 STATE_FILENAME = "proactive_state.json"
 
@@ -314,6 +335,12 @@ DEFAULT_BRIEFING_TIME = time(7, 30)
 _CALENDAR_TOOL_MARKER = "list-events"
 _WEEKDAY_NAMES = "月火水木金土日"
 
+# 朝のまとめの材料に挙げる、終わっていない手順の上限（AF-3）。
+# 対象は進行中・停滞だけ（未着手はこれからの分、完了・中止は
+# 終わった分なので、再開の声かけには含めない）
+_MAX_BRIEFING_STEPS = 3
+_BRIEFING_STEP_STATUSES = (_STEP_IN_PROGRESS, _STEP_BLOCKED)
+
 
 def _briefing_at(cfg: Config) -> time | None:
     """朝のまとめの時刻。"off" なら None、不正な値は既定に倒す。"""
@@ -324,8 +351,33 @@ def _briefing_at(cfg: Config) -> time | None:
     return parsed if parsed is not None else DEFAULT_BRIEFING_TIME
 
 
+def open_steps_text(user_data_dir: Path, now: datetime) -> str | None:
+    """朝のまとめの材料にする、終わっていない手順の文面（AF-3）。
+
+    対象は main の会話の手順（相棒モードの声かけは main の会話
+    宛て）のうち、進行中・停滞のものだけ、最大 _MAX_BRIEFING_STEPS
+    件。各行には状態と、その状態になってからの日数（updated_at
+    から数えられる場合だけ）を添える。対象が無ければ None。
+    """
+    steps = WorkSteps(user_data_dir, DEFAULT_SESSION_ID).items()
+    picked = [s for s in steps if s.status in _BRIEFING_STEP_STATUSES]
+    if not picked:
+        return None
+    lines = []
+    for step in picked[:_MAX_BRIEFING_STEPS]:
+        line = f"・[{_STEP_LABELS[step.status]}] {step.text}"
+        updated = _parse_time(step.updated_at)
+        if updated is not None:
+            days = (now - _as_local_naive(updated)).days
+            if days >= 1:
+                line += f"（{days}日この状態のまま）"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def build_briefing_prompt(open_tasks: list[Task], now: datetime,
-                          confirm_text: str | None = None) -> str:
+                          confirm_text: str | None = None,
+                          steps_text: str | None = None) -> str:
     """朝のまとめを子へ頼む指示文を組み立てる。
 
     その日の日付と、進行中の用事の一覧（ミュート分は呼び出し側で
@@ -334,6 +386,9 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
     confirm_text（棚卸し AM-3 の確認候補）があれば、「確認したい
     記憶」として材料に足し、まとめの中で自然に 1 件だけ尋ねる
     よう指示する。日報の組み立てには混ぜない。
+    steps_text（AF-3 の手順の残り）があれば、「エージェントの
+    作業の手順の残り」として材料に足し、まとめの中で自然に触れる
+    よう指示する。こちらも日報の組み立てには混ぜない。
     """
     date_text = (f"{now.year}年{now.month}月{now.day}日"
                  f"（{_WEEKDAY_NAMES[now.weekday()]}）")
@@ -350,6 +405,12 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
             lines.append(f"・{task.title}{memo}")
     else:
         lines.append("進行中の用事はありません。")
+    if steps_text:
+        lines += [
+            "",
+            "エージェントの作業の手順の残り:",
+            steps_text,
+        ]
     if confirm_text:
         lines += [
             "",
@@ -362,11 +423,16 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
         "- カレンダーを確認できる道具（予定の一覧を取る道具）が"
         "あれば、今日の予定を確認してください。",
         "- 今日の予定も進行中の用事も無く、確認したい記憶も"
-        "無ければ、「なし」とだけ答えてください。",
+        "作業の手順の残りも無ければ、「なし」とだけ答えてください。",
         "- どちらかあれば、朝の挨拶に続けて、今日の予定（時刻と"
         "題名）と進行中の用事を短くまとめた、利用者への知らせを"
         "書いてください（その文章がそのまま利用者へ投稿されます）。",
     ]
+    if steps_text:
+        lines.append(
+            "- エージェントの作業の手順の残りがあれば、知らせの"
+            "中で自然に、その作業が残っていることに触れてください"
+            "（例:「昨日からの続きの作業が残っています」）。")
     if confirm_text:
         lines.append(
             "- 確認したい記憶があれば、知らせの中で自然に、その"
@@ -395,6 +461,7 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
                    briefing_executor: Callable[[Session, str], str] | None,
                    manual: bool = False,
                    confirm_text: str | None = None,
+                   steps_text: str | None = None,
                    ) -> tuple[str, str] | None:
     """その日の声かけ（朝のまとめ／日報）の文面を決める。
 
@@ -414,10 +481,12 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
        倒す（日報の組み立てはモデルなしでできるため）
     5. 用事もカレンダーらしい道具も無ければ、子を動かす材料が
        無いので何も言わない。ただし確認したい記憶（confirm_text、
-       棚卸し AM-3 の候補）がある場合は、それ自体が材料になる
+       棚卸し AM-3 の候補）や作業の手順の残り（steps_text、
+       AF-3）がある場合は、それ自体が材料になる
     6. 子にまとめさせ、失敗・空応答なら用事がある場合だけ従来の
        日報に倒す。「なし」なら確認済みを記録して何も言わない
-       （日報に倒した場合は確認を混ぜない。候補は翌日以降に回る）
+       （日報に倒した場合は確認も手順の残りも混ぜない。候補は
+       翌日以降に回る）
     """
     def daily_fallback() -> tuple[str, str] | None:
         """従来の日報の組み立てに倒す（種別は能動発信）。"""
@@ -437,14 +506,15 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
     if isinstance(session.model, _UnusedModel):
         return daily_fallback()
     if not visible_tasks and not _has_calendar_tool(session) \
-            and not confirm_text:
+            and not confirm_text and not steps_text:
         return None
     executor = (briefing_executor if briefing_executor is not None
                 else _sweep_executor)
     try:
         result = executor(
             session, build_briefing_prompt(visible_tasks, now,
-                                           confirm_text=confirm_text))
+                                           confirm_text=confirm_text,
+                                           steps_text=steps_text))
     except Exception as e:  # 子の失敗で声かけ自体は欠かさない
         result = f"error: {e}"
     if not isinstance(result, str):
@@ -771,6 +841,16 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     except Exception:
         pass  # 棚卸しの失敗で巡回全体は落とさない
 
+    # 目標の進み具合の観測（goal_progress、AF-5）: 1 日 1 回まで、
+    # 進行中の目標の完了割合が前回の観測から変わっていたら
+    # フィードにだけ残す。会話への投稿はせず、モデルも使わない
+    # ので、モデルなしの経路でも行う。モードを問わず行う
+    # （目標は利用者ごとの置き場で、両モード共通のため）
+    try:
+        observe_goal_progress(user_data_dir, now=now)
+    except Exception:
+        pass  # 観測の失敗で巡回全体は落とさない
+
     # 定期ジョブは用事とは独立の仕組みで、モードも静かな時間帯も
     # 問わず、期限が来ていれば先に実行して結果を投稿する
     posted.extend(run_due_jobs(cfg, now, get_session,
@@ -823,9 +903,17 @@ def check_and_post(cfg: Config, now: datetime | None = None,
             confirm = pending_confirm(user_data_dir, now=now)
         except Exception:
             confirm = None
+        # 作業の手順の残り（AF-3）: こちらも朝のまとめの材料に
+        # だけ渡す。読み取りの失敗で日報自体は落とさない
+        steps_text: str | None = None
+        try:
+            steps_text = open_steps_text(user_data_dir, now)
+        except Exception:
+            steps_text = None
         daily = _daily_message(cfg, now, visible_tasks, user_data_dir,
                                get_session, briefing_executor, manual=manual,
-                               confirm_text=confirm[1] if confirm else None)
+                               confirm_text=confirm[1] if confirm else None,
+                               steps_text=steps_text)
         if daily is not None:
             text, feed_kind = daily
             get_session().post_proactive_message(text)

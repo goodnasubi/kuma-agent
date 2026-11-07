@@ -10,11 +10,17 @@ work-steps/<セッション ID>.json。相棒モードではセッションが
 実質 1 つ（main）に固定されるため、利用者ごとの 1 冊になる。
 スレッドモードではスレッドごとに分かれる。壊れた JSON のときは
 空の手順として始める（例外で落とさない）。
+
+各項目は updated_at（最後に状態が変わった日時、ISO 形式）も
+持つ（AF-3: 朝のまとめで「何日止まっているか」を伝えるため）。
+旧データに項目が無ければ空文字列として読み、次に保存し直した
+ときに日時が付く。
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from .memory import DEFAULT_SESSION_ID, normalize_session_id
@@ -46,12 +52,19 @@ _STEPS_DIR = "work-steps"
 
 @dataclass
 class Step:
-    """作業の手順の 1 件。"""
+    """作業の手順の 1 件。
+
+    updated_at は最後に状態が変わった日時（ISO 形式）。旧データに
+    無ければ空文字列で、その項目については「何日止まっているか」
+    は分からないものとして扱う。
+    """
     text: str
     status: str = STATUS_PENDING
+    updated_at: str = ""
 
     def to_dict(self) -> dict:
-        return {"text": self.text, "status": self.status}
+        return {"text": self.text, "status": self.status,
+                "updated_at": self.updated_at}
 
     @classmethod
     def from_dict(cls, record: object) -> Step | None:
@@ -64,7 +77,10 @@ class Step:
         status = record.get("status")
         if status not in _STATUSES:
             status = STATUS_PENDING
-        return cls(text=text, status=status)
+        updated_at = record.get("updated_at")
+        if not isinstance(updated_at, str):
+            updated_at = ""
+        return cls(text=text, status=status, updated_at=updated_at)
 
 
 def format_steps(steps: list[Step]) -> str:
@@ -114,15 +130,23 @@ class WorkSteps:
         返す前にファイルを読み直す。"""
         return self._load()
 
-    def set_items(self, pairs: list[tuple[str, str]]) -> list[Step]:
+    def set_items(self, pairs: list[tuple[str, str]],
+                  now: datetime | None = None) -> list[Step]:
         """手順を丸ごと置き換えて保存する。
 
         pairs は (文面, 状態) の並び。文面が空・状態が不正・上限
         （MAX_STEPS 件）超過・「進行中」が複数ある場合は ValueError
         で、手順は変更しない。
+
+        updated_at は、文面と状態が前回から変わっていない項目に
+        ついては前回の値を引き継ぎ、新しい項目と状態が変わった
+        項目には now（無ければ現在時刻）を付ける。
         """
         if len(pairs) > MAX_STEPS:
             raise ValueError(f"手順は {MAX_STEPS} 件までです")
+        stamp = (now or datetime.now()).isoformat(timespec="seconds")
+        previous = {(s.text, s.status): s.updated_at
+                    for s in self._load() if s.updated_at}
         steps: list[Step] = []
         in_progress = 0
         for text, status in pairs:
@@ -134,7 +158,9 @@ class WorkSteps:
                     f"状態は {' / '.join(_STATUSES)} のいずれかです")
             if status == STATUS_IN_PROGRESS:
                 in_progress += 1
-            steps.append(Step(text=text, status=status))
+            steps.append(Step(
+                text=text, status=status,
+                updated_at=previous.get((text, status), stamp)))
         if in_progress > 1:
             raise ValueError("「進行中」の手順は同時に 1 つだけにしてください")
         self._save(steps)

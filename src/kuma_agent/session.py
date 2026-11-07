@@ -42,6 +42,8 @@ from .activity import (
 )
 from .config import Config, normalize_mode
 from .delegate import DELEGATE_NOTICE, run_delegated_task
+from .goals import STATUS_ACTIVE as GOAL_STATUS_ACTIVE
+from .goals import GoalBoard, progress_of
 from .jobs import JobBoard
 from .llm import Attachment, ChatModel, GeminiClient, Message, quoted_content
 from .mcp_client import McpManager, get_shared_manager, resolve_config_dir
@@ -68,6 +70,10 @@ from .worksteps import WorkSteps, format_steps
 
 # 曜日（月曜始まり、datetime.weekday() の並び）
 _WEEKDAYS_JA = ("月", "火", "水", "木", "金", "土", "日")
+
+# プロンプトに載せる進行中の目標の上限（AF-5。読み取りだけの
+# 節のため、プロンプトが膨らまないよう小さく保つ）
+_MAX_PROMPT_GOALS = 5
 
 
 def current_time_text(now: datetime | None = None) -> str:
@@ -385,6 +391,11 @@ class Session:
             skills_text = self._skills_catalog_text()
             if skills_text:
                 self.system_prompt += f"\n\n# 使える手順書\n{skills_text}"
+        # 進行中の目標（AF-5）: 目標は利用者ごとの置き場なので、
+        # 用事の節と違いモードを問わず載せる（読み取りだけ）
+        goals_text = self._active_goals_text()
+        if goals_text:
+            self.system_prompt += f"\n\n# 進行中の目標\n{goals_text}"
         steps_text = self._work_steps_text()
         if steps_text:
             self.system_prompt += f"\n\n# 作業の手順（前回の続き）\n{steps_text}"
@@ -604,6 +615,35 @@ class Session:
             if task.remind_at:
                 line += f"（{format_remind_at(task.remind_at)} に通知）"
             lines.append(line)
+        return "\n".join(lines)
+
+    def _active_goals_text(self) -> str:
+        """進行中の目標をシステムプロンプト用の箇条書きにする（AF-5）。
+
+        読み取りだけで、目標を書き換える口は作らない（目標の
+        操作は画面からだけ、という線引きを保つ）。進行中
+        （active）の目標だけを最大 _MAX_PROMPT_GOALS 件出し、
+        紐づいた用事があれば「N件中M件完了」の形で進み具合を
+        添える。目標が無い・全て達成済みの場合は空文字列
+        （節自体を足さない）。
+        """
+        goals = [g for g in GoalBoard(self.cfg.user_data_dir).list()
+                 if g.status == GOAL_STATUS_ACTIVE]
+        if not goals:
+            return ""
+        tasks = self.task_board.list()
+        lines = []
+        for goal in goals[:_MAX_PROMPT_GOALS]:
+            progress = progress_of(
+                [t for t in tasks if t.goal_id == goal.id])
+            if progress.total:
+                lines.append(
+                    f"- {goal.title}（{progress.total}件中"
+                    f"{progress.done}件完了）")
+            else:
+                lines.append(f"- {goal.title}")
+        if len(goals) > _MAX_PROMPT_GOALS:
+            lines.append(f"ほか {len(goals) - _MAX_PROMPT_GOALS} 件")
         return "\n".join(lines)
 
     def _work_steps_text(self) -> str:
