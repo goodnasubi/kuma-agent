@@ -104,6 +104,16 @@ AF-5）も発言を伴わない仕事として 1 日 1 回まで行う: 進行�
 棚卸し（AM-3）の担当で、こちらには含めない。こちらも日報
 への倒し込みには混ぜない。
 
+今日の予定（Google カレンダー連携、0.77.0）も朝のまとめの
+材料に足す: 巡回が google_calendar.py を直接使って主
+カレンダーの今日の予定を読み、「今日の予定（Google
+カレンダー）」の節として子の指示文の先頭に含める（モデルに
+道具を呼ばせる方式は正にしない）。用事と強く重なる予定は
+独立した節から外し、用事の行へ予定時刻を注記として寄せる
+（同じ出来事を二重に触れない）。連携が未設定・未認可・
+失敗のときは材料に入れず、エラー文も渡さず、従来どおり
+静かに動く。こちらも日報への倒し込みには混ぜない。
+
 投稿先は main の会話記録で、追記は Session が使う既存の保存経路
 （Memory.append_turn）を通す。発言には能動発信の印
 （proactive: true）を付けるが、読み込み側は role / content /
@@ -160,6 +170,14 @@ from .memory import (
     tenant_dir,
 )
 from .goal_progress import observe_goal_progress
+from .google_calendar import (
+    CalendarEvent,
+    GoogleCalendarError,
+    build_client as build_google_calendar_client,
+    fetch_events,
+    format_events,
+    format_time_range,
+)
 from .memory_audit import audit_memory, mark_confirm_asked, pending_confirm
 from .memory_extract import auto_extract_memory
 from .memory_meta import load_memory_meta
@@ -396,28 +414,98 @@ NEAR_DEADLINE_DAYS = 3
 _MAX_BRIEFING_DEADLINES = 3
 
 
+def _terms_overlap(terms: list[str], text: str) -> bool:
+    """語の一覧が本文へ「強く」重なるか（AM-4 の物差し）。
+
+    知らせを消す側の判定なので保守的にし、はっきり重なる
+    場合だけ True にする:
+    - 一致する語が 2 つ以上ある場合
+    - 語が 1 つしか取れない場合は、その語自体が 4 文字以上
+      （＝それだけで具体的な内容を持つ長さ）で、本文にそのまま
+      含まれるときだけ
+    """
+    if not terms:
+        return False
+    matched = [term for term in terms if term in text]
+    if len(matched) >= 2:
+        return True
+    return (len(terms) == 1 and len(matched) == 1
+            and len(terms[0]) >= 4)
+
+
 def _strongly_overlaps_task(item_text: str, task: Task) -> bool:
     """記憶の項目と用事が「同じこと」を指すほど強く重なるか（AM-4）。
 
     判定は記憶の検索（search_memory_text）と同じ、キーワードの
     部分文字列一致の流儀で、用事の題名・メモから取った語が項目
-    本文にどれだけ含まれるかで見る。知らせを消す側の判定なので
-    保守的にし、はっきり重なる場合だけ True にする:
-    - 一致する語が 2 つ以上ある場合
-    - 語が 1 つしか取れない用事は、その語自体が 4 文字以上
-      （＝それだけで具体的な内容を持つ長さ）で、項目本文に
-      そのまま含まれるときだけ
+    本文にどれだけ含まれるかで見る（物差しは _terms_overlap）。
     言い換えや弱い重なりは拾わない（その場合は記憶側も知らせる。
     二重になる代わりに、知らせが消えすぎる事故を避ける）。
     """
-    terms = _query_terms(f"{task.title} {task.memo}")
-    if not terms:
-        return False
-    matched = [term for term in terms if term in item_text]
-    if len(matched) >= 2:
+    return _terms_overlap(
+        _query_terms(f"{task.title} {task.memo}"), item_text)
+
+
+def _event_overlaps_task(event: CalendarEvent, task: Task) -> bool:
+    """予定と用事が「同じ出来事」を指すほど強く重なるか。
+
+    重なりの物差しは _strongly_overlaps_task と同じで、予定の
+    題名と用事の題名・メモの双方へかける（予定の題名は短く、
+    用事の語がそのまま入るとは限らないため）。弱い重なりや
+    言い換えだけの場合は寄せない（知らせが重なる代わりに、
+    予定や用事を取りこぼす事故を避ける。設計 §4.3）。
+    """
+    if _strongly_overlaps_task(event.title, task):
         return True
-    return (len(terms) == 1 and len(matched) == 1
-            and len(terms[0]) >= 4)
+    return _terms_overlap(
+        _query_terms(event.title), f"{task.title} {task.memo}")
+
+
+def calendar_briefing_materials(
+        cfg: Config, visible_tasks: list[Task], now: datetime,
+        *, client=None, tz=None,
+        ) -> tuple[str | None, dict[str, str], bool]:
+    """朝のまとめの材料にする、今日の予定（Google カレンダー）。
+
+    戻り値は (予定の節の文面, 用事への注記 {用事 ID: 注記},
+    取得できたが予定が 0 件だったか)。連携が未設定・未認可・
+    失敗のときは (None, {}, False) で、節も注記も渡さない
+    （エラー文も渡さない。設計 §4.1・§4.4）。用事と強く
+    重なる予定は節から外し、用事の行への注記（時刻つきは
+    「予定 HH:MM–HH:MM」、終日は「終日予定あり」）に寄せる。
+    client はテスト用の差し替え口で、通常は cfg から組み立てる。
+    """
+    if client is None:
+        client = build_google_calendar_client(
+            cfg.user_data_dir, enabled=cfg.google_calendar_enabled,
+            client_secrets_file=cfg.google_calendar_client_secrets_file)
+    if client.status().state != "authorized":
+        return None, {}, False
+    today = now.date()
+    try:
+        events, has_more = fetch_events(client, today, today, tz=tz)
+    except GoogleCalendarError:
+        return None, {}, False  # 失効・通信失敗は静かに従来動作へ
+    if not events:
+        return None, {}, True
+    remaining: list[CalendarEvent] = []
+    note_parts: dict[str, list[str]] = {}
+    for event in events:
+        matched = next(
+            (task for task in visible_tasks
+             if _event_overlaps_task(event, task)), None)
+        if matched is None:
+            remaining.append(event)
+            continue
+        part = ("終日予定あり" if event.all_day
+                else f"予定 {format_time_range(event)}")
+        note_parts.setdefault(matched.id, []).append(part)
+    task_notes = {task_id: f"（{'、'.join(parts)}）"
+                  for task_id, parts in note_parts.items()}
+    events_text = (format_events(remaining, today, today,
+                                 has_more=has_more)
+                   if remaining else None)
+    return events_text, task_notes, False
 
 
 def near_deadline_text(user_data_dir: Path, open_tasks: list[Task],
@@ -475,12 +563,25 @@ def near_deadline_text(user_data_dir: Path, open_tasks: list[Task],
 def build_briefing_prompt(open_tasks: list[Task], now: datetime,
                           confirm_text: str | None = None,
                           steps_text: str | None = None,
-                          deadlines_text: str | None = None) -> str:
+                          deadlines_text: str | None = None,
+                          calendar_text: str | None = None,
+                          task_notes: dict[str, str] | None = None,
+                          calendar_empty: bool = False) -> str:
     """朝のまとめを子へ頼む指示文を組み立てる。
 
     その日の日付と、進行中の用事の一覧（ミュート分は呼び出し側で
     除いてある）を含める。用事が無い場合はその旨を明記する
     （カレンダーの予定だけでもまとめられるように）。
+    材料の並びは、今日の予定（Google カレンダー）→進行中の
+    用事→作業の手順の残り→確認したい記憶→近づいている期限の
+    ある記憶の順（設計 §4.2）。
+    calendar_text（Google カレンダー連携の今日の予定）があれば、
+    「今日の予定（Google カレンダー）」の節として最初に足す
+    （巡回が直接集めた材料で、子は同じ範囲を取り直さない）。
+    取得できたが予定が 0 件だった場合は calendar_empty で、
+    その旨だけを文脈として渡す（それ自体は材料にしない）。
+    task_notes は、用事と強く重なった予定を用事の行へ寄せた
+    注記（{用事 ID: 注記}）で、用事の行の末尾に添える。
     confirm_text（棚卸し AM-3 の確認候補）があれば、「確認したい
     記憶」として材料に足し、まとめの中で自然に 1 件だけ尋ねる
     よう指示する。日報の組み立てには混ぜない。
@@ -498,13 +599,25 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
         "朝のまとめを作ってください。",
         "",
         f"今日は {date_text} です。",
-        "",
     ]
+    if calendar_text:
+        lines += [
+            "",
+            "今日の予定（Google カレンダー）:",
+            calendar_text,
+        ]
+    elif calendar_empty:
+        lines += [
+            "",
+            "Google カレンダーに今日の予定はありません。",
+        ]
+    lines.append("")
     if open_tasks:
         lines.append("進行中の用事:")
         for task in open_tasks:
             memo = f"（{task.memo}）" if task.memo else ""
-            lines.append(f"・{task.title}{memo}")
+            note = (task_notes or {}).get(task.id, "")
+            lines.append(f"・{task.title}{memo}{note}")
     else:
         lines.append("進行中の用事はありません。")
     if steps_text:
@@ -528,15 +641,22 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
     lines += [
         "",
         "やること:",
-        "- カレンダーを確認できる道具（予定の一覧を取る道具）が"
-        "あれば、今日の予定を確認してください。",
-        "- 今日の予定も進行中の用事も無く、確認したい記憶も"
+        "- 「今日の予定（Google カレンダー）」の節がある場合は、"
+        "それを今日の予定として使ってください（同じ範囲の予定を"
+        "道具で取り直さないこと）。節が無い場合は、カレンダーを"
+        "確認できる道具（予定の一覧を取る道具）があれば、今日の"
+        "予定を確認してください。",
+        "- 今日の予定の節も進行中の用事も無く、確認したい記憶も"
         "作業の手順の残りも近づいている期限のある記憶も"
         "無ければ、「なし」とだけ答えてください。",
         "- どちらかあれば、朝の挨拶に続けて、今日の予定（時刻と"
         "題名）と進行中の用事を短くまとめた、利用者への知らせを"
         "書いてください（その文章がそのまま利用者へ投稿されます）。",
     ]
+    if calendar_text:
+        lines.append(
+            "- 予定と用事は別のものとしてまとめ、同じ内容は "
+            "1 回だけ触れてください。")
     if steps_text:
         lines.append(
             "- エージェントの作業の手順の残りがあれば、知らせの"
@@ -576,6 +696,9 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
                    confirm_text: str | None = None,
                    steps_text: str | None = None,
                    deadlines_text: str | None = None,
+                   calendar_text: str | None = None,
+                   task_notes: dict[str, str] | None = None,
+                   calendar_empty: bool = False,
                    ) -> tuple[str, str] | None:
     """その日の声かけ（朝のまとめ／日報）の文面を決める。
 
@@ -596,12 +719,15 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
     5. 用事もカレンダーらしい道具も無ければ、子を動かす材料が
        無いので何も言わない。ただし確認したい記憶（confirm_text、
        棚卸し AM-3 の候補）や作業の手順の残り（steps_text、
-       AF-3）、期限の近い記憶（deadlines_text、AM-4）がある
-       場合は、それ自体が材料になる
+       AF-3）、期限の近い記憶（deadlines_text、AM-4）、今日の
+       予定（calendar_text、Google カレンダー連携。用事へ寄せた
+       注記 task_notes だけの場合も含む）がある場合は、それ
+       自体が材料になる。予定が 0 件だった旨（calendar_empty）
+       は文脈として渡すだけで、材料にはしない
     6. 子にまとめさせ、失敗・空応答なら用事がある場合だけ従来の
        日報に倒す。「なし」なら確認済みを記録して何も言わない
        （日報に倒した場合は確認も手順の残りも期限の近い記憶も
-       混ぜない。候補は翌日以降に回る）
+       予定も混ぜない。候補は翌日以降に回る）
     """
     def daily_fallback() -> tuple[str, str] | None:
         """従来の日報の組み立てに倒す（種別は能動発信）。"""
@@ -622,7 +748,8 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
         return daily_fallback()
     if not visible_tasks and not _has_calendar_tool(session) \
             and not confirm_text and not steps_text \
-            and not deadlines_text:
+            and not deadlines_text and not calendar_text \
+            and not task_notes:
         return None
     executor = (briefing_executor if briefing_executor is not None
                 else _sweep_executor)
@@ -631,7 +758,10 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
             session, build_briefing_prompt(visible_tasks, now,
                                            confirm_text=confirm_text,
                                            steps_text=steps_text,
-                                           deadlines_text=deadlines_text))
+                                           deadlines_text=deadlines_text,
+                                           calendar_text=calendar_text,
+                                           task_notes=task_notes,
+                                           calendar_empty=calendar_empty))
     except Exception as e:  # 子の失敗で声かけ自体は欠かさない
         result = f"error: {e}"
     if not isinstance(result, str):
@@ -1036,11 +1166,27 @@ def check_and_post(cfg: Config, now: datetime | None = None,
                 user_data_dir, visible_tasks, now)
         except Exception:
             deadlines_text = None
+        # 今日の予定（Google カレンダー連携）: こちらも朝の
+        # まとめの材料にだけ足す。未設定・未認可・失敗では
+        # 材料に入らず従来どおり静かに動く。用事と強く重なる
+        # 予定は、材料の組み立て側で用事の行への注記に寄せて
+        # ある。読み取りの失敗で日報自体は落とさない
+        calendar_text: str | None = None
+        task_notes: dict[str, str] = {}
+        calendar_empty = False
+        try:
+            calendar_text, task_notes, calendar_empty = \
+                calendar_briefing_materials(cfg, visible_tasks, now)
+        except Exception:
+            calendar_text, task_notes, calendar_empty = None, {}, False
         daily = _daily_message(cfg, now, visible_tasks, user_data_dir,
                                get_session, briefing_executor, manual=manual,
                                confirm_text=confirm[1] if confirm else None,
                                steps_text=steps_text,
-                               deadlines_text=deadlines_text)
+                               deadlines_text=deadlines_text,
+                               calendar_text=calendar_text,
+                               task_notes=task_notes,
+                               calendar_empty=calendar_empty)
         if daily is not None:
             text, feed_kind = daily
             get_session().post_proactive_message(text)

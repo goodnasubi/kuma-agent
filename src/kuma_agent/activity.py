@@ -55,6 +55,11 @@ ERROR_KIND_NOT_FOUND = "not_found"  # 対象が見つからない
 ERROR_KIND_TIMEOUT = "timeout"  # 時間切れ
 ERROR_KIND_UNKNOWN_TOOL = "unknown_tool"  # 無い道具
 ERROR_KIND_ERROR = "error"  # その他の例外
+# Google カレンダー連携の状態の区別（list_calendar_events の
+# 失敗だけに付ける。設計 §3.6）
+ERROR_KIND_NOT_CONFIGURED = "not_configured"  # 連携が未設定
+ERROR_KIND_NOT_AUTHORIZED = "not_authorized"  # 利用者が未認可
+ERROR_KIND_REVOKED = "revoked"  # 許可が失効・取り消し
 
 # 時間切れと分かる結果文の断片。委任の時間切れ（delegate.py）、
 # MCP の応答待ち（mcp_client.py）、道具の subprocess や Web 取得
@@ -84,6 +89,15 @@ def classify_tool_error(result: str) -> str | None:
         return ERROR_KIND_CANCELLED
     if result.startswith("error: unknown tool"):
         return ERROR_KIND_UNKNOWN_TOOL
+    if result.startswith("error: Google カレンダー"):
+        # 連携の失敗は状態で区別する（文面は google_calendar.py の
+        # 結果文字列が正。取得失敗そのものはその他の例外に倒す）
+        if "まだ設定されていません" in result:
+            return ERROR_KIND_NOT_CONFIGURED
+        if "許可がまだ済んでいません" in result:
+            return ERROR_KIND_NOT_AUTHORIZED
+        if "許可が無効になっています" in result:
+            return ERROR_KIND_REVOKED
     if "見つかりません" in result:
         return ERROR_KIND_NOT_FOUND
     if any(marker in result for marker in _TIMEOUT_MARKERS):

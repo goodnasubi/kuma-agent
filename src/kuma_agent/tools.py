@@ -53,6 +53,7 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "web_search": "Webを検索中",
     "fetch_page": "ページを読んでいます",
     "list_tasks": "用事を確認中",
+    "list_calendar_events": "予定を確認中",
     "create_task": "用事を記録中",
     "update_task": "用事を記録中",
     "set_work_steps": "作業の手順を記録中",
@@ -148,6 +149,16 @@ def summarize_tool_args(name: str, args: dict, limit: int = 200) -> str:
     """
     if name == "run_shell":
         text = str(args.get("command", ""))
+    elif name == "list_calendar_events":
+        # Google カレンダーの道具は、期間とカレンダーの種別だけを
+        # 残す（実カレンダー ID はメールアドレスを含み得るため、
+        # そのまま記録しない。設計 §3.6）
+        start = str(args.get("start_date") or "今日")
+        end = str(args.get("end_date") or start)
+        calendar = args.get("calendar_id")
+        kind = "primary" if not calendar or calendar == "primary" \
+            else "指定カレンダー"
+        text = f"期間: {start}〜{end}、カレンダー: {kind}"
     elif args:
         try:
             text = json.dumps(args, ensure_ascii=False, default=str)
