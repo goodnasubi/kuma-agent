@@ -1655,7 +1655,8 @@ usageBtn.addEventListener('click', () => {
 });
 
 // 活動の記録パネル。現在のテナント×ユーザーの活動（道具の呼び
-// 出し・承認・外への送信・CLI の起動）を新しい順に表示する。
+// 出し・承認・外への送信・CLI の起動・裏側のモデル呼び出し）を
+// 新しい順に表示する。
 // 読み取りは /api/activity を使い、パネルを開くたびに取り直す
 activityBtn.addEventListener('click', () => {
   activityPanel.hidden = !activityPanel.hidden;
@@ -1667,6 +1668,7 @@ const ACTIVITY_KIND_LABELS = {
   approval: '承認',
   external_send: '外への送信',
   cli_launch: 'CLI の起動',
+  background_model: '裏側のモデル呼び出し',
 };
 
 function activityText(entry) {
@@ -1687,6 +1689,12 @@ function activityText(entry) {
   } else if (entry.kind === 'cli_launch') {
     parts.push(entry.tool || '');
     if (entry.summary) parts.push(entry.summary);
+  } else if (entry.kind === 'background_model') {
+    parts.push(entry.tool === 'memory_extract' ? '長期記憶の自動抽出'
+             : entry.tool === 'skill_learn' ? '手順書の自動学習'
+             : (entry.tool || ''));
+    if (entry.summary) parts.push(entry.summary);
+    if (entry.ok === false) parts.push('（失敗）');
   } else {
     if (entry.tool) parts.push(entry.tool);
     if (entry.summary) parts.push(entry.summary);

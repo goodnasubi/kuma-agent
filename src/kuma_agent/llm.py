@@ -547,3 +547,17 @@ def default_model_name(provider: str) -> str | None:
     """
     cls = _API_CLIENTS.get(provider)
     return cls.DEFAULT_MODEL if cls is not None else None
+
+
+def model_name_of(model: ChatModel) -> str:
+    """クライアントから実効モデル名を引く（使用量の記録用）。
+
+    クライアントは実効モデル名を model 属性に持ち、未指定の場合は
+    クラス既定（DEFAULT_MODEL）を使う作りなので、その順に引く。
+    どちらも無い頭脳（テスト用のスタブ等）は空文字列にする。
+    Session の使用量記録（session._model_name）と同じ引き方を、
+    Session を経由しない裏側の呼び出し（自動抽出・自動学習）でも
+    使えるよう、ここに正を置く。
+    """
+    name = getattr(model, "model", None) or getattr(model, "DEFAULT_MODEL", None)
+    return str(name) if name else ""

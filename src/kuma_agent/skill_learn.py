@@ -30,6 +30,12 @@ memory_extract の手順書版。詳細は docs/DESIGN.md の
   （試行日だけを記録し、位置は進めない）
 - モデルが要る処理なので、モデルなしの一時 Session の巡回
   では実行せず、試行の記録も残さない（memory_extract と同じ）
+- 巡回での実行は、活動の記録（activity の background_model、
+  成功・失敗と保存件数だけ）と使用量（usage、セッション ID は
+  background:skill_learn）に残す（歯止めの漏れ点検 L3 の
+  直し、0.88.0。memory_extract と同じ作法）。CLI の明示実行
+  （learn_skills の直接呼び出し）は記録しない。記録の失敗で
+  巡回は落とさない
 """
 from __future__ import annotations
 
@@ -40,10 +46,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from .activity import record_background_model
 from .feed import KIND_PROACTIVE, append_feed_entry
-from .llm import ChatModel, Message
+from .llm import ChatModel, Message, Usage, model_name_of
 from .memory_extract import _collect_new_material
 from .skills import is_valid_skill_name, load_skills, save_skill
+from .usage import record_usage
+
+# 使用量の記録で使う、裏側の学習呼び出しのセッション ID
+BACKGROUND_SESSION_ID = "background:skill_learn"
 
 # 状態ファイル（ユーザーの置き場に置く。memory_extract_state.json
 # と同じ「日付と進捗を JSON で記録する」流儀）
@@ -190,11 +201,15 @@ class LearnResult:
     learned は保存した手順書の名前の列（適用した場合）。
     candidates はモデルが返した候補のうち検証を通ったもの
     （dry-run の表示に使う）。reason は保存しなかった理由
-    （"" / "no_new_turns" / "nothing" / "model_failed"）。
+    （"" / "no_new_turns" / "nothing" / "model_failed"）。usage
+    はモデルが応答に含めていた使用量（応答が返った場合だけ。
+    例外で応答が無い場合と、材料が無くてモデルを呼ばなかった
+    場合は None）。巡回側が使用量の記録へ流すために持つ。
     """
     learned: list[str] = field(default_factory=list)
     candidates: list[dict] = field(default_factory=list)
     reason: str = ""
+    usage: Usage | None = None
 
 
 def learn_skills(data_dir: Path, user_data_dir: Path, model: ChatModel,
@@ -228,7 +243,7 @@ def learn_skills(data_dir: Path, user_data_dir: Path, model: ChatModel,
         return LearnResult(reason="model_failed")
     parsed = _parse_candidates(reply.content or "")
     if parsed is None:
-        return LearnResult(reason="model_failed")
+        return LearnResult(reason="model_failed", usage=reply.usage)
 
     existing = {s.name for s in load_skills(data_dir)}
     accepted: list[dict] = []
@@ -253,9 +268,9 @@ def learn_skills(data_dir: Path, user_data_dir: Path, model: ChatModel,
         state["positions"] = collected.positions
         _save_state(user_data_dir, state)
     if not accepted:
-        return LearnResult(reason="nothing")
+        return LearnResult(reason="nothing", usage=reply.usage)
     if dry_run:
-        return LearnResult(candidates=accepted)
+        return LearnResult(candidates=accepted, usage=reply.usage)
 
     learned: list[str] = []
     for candidate in accepted:
@@ -269,13 +284,54 @@ def learn_skills(data_dir: Path, user_data_dir: Path, model: ChatModel,
         names = "、".join(f"「{name}」" for name in learned)
         append_feed_entry(user_data_dir, KIND_PROACTIVE,
                           f"手順書 {names} を新しく覚えました")
-    return LearnResult(learned=learned, candidates=accepted)
+    return LearnResult(learned=learned, candidates=accepted,
+                       usage=reply.usage)
+
+
+def _record_background_run(user_data_dir: Path, result: LearnResult,
+                           model: ChatModel,
+                           provider_of: Callable[[], str] | None,
+                           now: datetime) -> None:
+    """巡回の自動学習の実行を、活動の記録と使用量へ残す（L3 の直し）。
+
+    活動の記録には成功・失敗と保存件数だけを残し（プロンプトや
+    会話の全文は残さない）、使用量には応答に含まれる usage を
+    流す。使用量は、モデルから応答が返った場合だけ記録する
+    （例外で応答が無い場合は、Session の記録と同じく残さない。
+    応答は返ったが形が壊れていた場合は usage が読めた分だけ
+    残る）。provider_of は使用量に載せる頭脳名を引く関数で、
+    モデルを引いた後にだけ呼ばれる。記録の失敗で巡回を落とさ
+    ないよう、例外は外へ出さない。
+    """
+    failed = result.reason == "model_failed"
+    if failed:
+        summary = "モデル呼び出しに失敗"
+    elif result.learned:
+        names = "、".join(f"「{name}」" for name in result.learned)
+        summary = f"保存 {len(result.learned)} 件（{names}）"
+    else:
+        summary = "保存 0 件"
+    try:
+        record_background_model(
+            user_data_dir, "skill_learn", summary,
+            ok=not failed, result=result.reason or "learned", now=now)
+    except Exception:
+        pass  # 記録の失敗で巡回全体は落とさない
+    if failed and result.usage is None:
+        return  # 応答が返らなかった呼び出しは使用量に残さない
+    try:
+        provider = provider_of() if provider_of is not None else ""
+        record_usage(user_data_dir, provider, model_name_of(model),
+                     result.usage, BACKGROUND_SESSION_ID, now=now)
+    except Exception:
+        pass  # 記録の失敗で巡回全体は落とさない
 
 
 def auto_learn_skills(
         data_dir: Path, user_data_dir: Path,
         model_provider: Callable[[], ChatModel | None],
-        now: datetime | None = None) -> LearnResult | None:
+        now: datetime | None = None,
+        provider_of: Callable[[], str] | None = None) -> LearnResult | None:
     """巡回用の自動学習。条件を満たさなければ None（何もしない）。
 
     条件はすべて満たす場合だけ実行する:
@@ -289,7 +345,9 @@ def auto_learn_skills(
     試行日はモデルを呼ぶ前に記録する（失敗してもその日は
     再試行しないため）。処理済み位置は learn_skills が
     成功・候補なしのときだけ進める。適用しても会話への
-    投稿はしない（フィードにだけ残す）。
+    投稿はしない（フィードにだけ残す）。実行したら、活動の
+    記録と使用量へ残す（巡回分だけ。provider_of は使用量に
+    載せる頭脳名を引く関数）。
     """
     now = now or datetime.now()
     if not learn_enabled():
@@ -306,4 +364,10 @@ def auto_learn_skills(
         return None  # モデルなし経路では試行も記録しない
     state["last_attempt_on"] = today
     _save_state(user_data_dir, state)
-    return learn_skills(data_dir, user_data_dir, model, now=now)
+    result = learn_skills(data_dir, user_data_dir, model, now=now)
+    if result.reason != "no_new_turns":
+        # 材料があることを確認してから呼んでいるため通常は
+        # 起きないが、モデルを呼んでいない実行は記録しない
+        _record_background_run(user_data_dir, result, model,
+                               provider_of, now)
+    return result

@@ -1531,8 +1531,16 @@ def check_and_post(cfg: Config, now: datetime | None = None,
         model = get_session().model
         return None if isinstance(model, _UnusedModel) else model
 
+    # 抽出・学習の実行は活動の記録と使用量にも残す（L3 の直し）。
+    # 使用量に載せる頭脳名は、モデルを引いたセッションの実効の
+    # 頭脳（テナント別頭脳の解決後）が正なので、provider_of で
+    # 遅れて引く（モデルを引いた後にだけ呼ばれる）
+    def extract_provider() -> str:
+        return get_session().cfg.provider
+
     try:
-        auto_extract_memory(user_data_dir, extract_model, now=now)
+        auto_extract_memory(user_data_dir, extract_model, now=now,
+                            provider_of=extract_provider)
     except Exception:
         pass  # 抽出の失敗で巡回全体は落とさない
 
@@ -1542,7 +1550,7 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     # フィードにだけ残す。モデルの引き方は自動抽出と同じ
     try:
         auto_learn_skills(cfg.data_dir, user_data_dir, extract_model,
-                          now=now)
+                          now=now, provider_of=extract_provider)
     except Exception:
         pass  # 学習の失敗で巡回全体は落とさない
 

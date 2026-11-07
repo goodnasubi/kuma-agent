@@ -7,13 +7,20 @@
 activity.jsonl へ 1 行 1 件で追記する。記録の失敗で会話や送信を
 落とさないよう、例外は外へ出さない。
 
-記録する種別は 4 つ:
+記録する種別は 5 つ:
 - tool_call: 道具の呼び出し（引数の要約と結果の抜粋）
 - approval: 承認対象の道具への承認・却下
 - external_send: Telegram / LINE への能動発信の配信
 - cli_launch: CLI 系の頭脳の起動。CLI 系では道具の実行が外部
   CLI の側で行われるため、道具単位の記録はできず、起動した
   ことだけを残す（記録の粒度が粗くなる限界がある）
+- background_model: 巡回の裏側のモデル呼び出し（長期記憶の
+  自動抽出・手順書の自動学習）の実行。Session を経由しない
+  単発呼び出しのため、成功・失敗と件数などの要点だけを残す
+  （プロンプトや会話の全文は残さない）。対象は巡回分だけで、
+  CLI の明示実行（memory-extract / skill-learn）は残さない。
+  使用量は usage.py 側にも併せて記録する（歯止めの漏れ点検
+  L3 の直し、0.88.0）
 
 引数は承認画面向けの要約（tools.summarize_tool_args）を再利用し、
 引数全体は記録しない（秘密情報を持ち込む道具があるため）。
@@ -46,6 +53,7 @@ KIND_TOOL_CALL = "tool_call"
 KIND_APPROVAL = "approval"
 KIND_EXTERNAL_SEND = "external_send"
 KIND_CLI_LAUNCH = "cli_launch"
+KIND_BACKGROUND_MODEL = "background_model"
 
 # 道具の失敗の種類（error_kind）。結果文字列の出どころごとに
 # 分ける（AF-1）。成功した呼び出しの記録には付けない
@@ -209,6 +217,21 @@ def record_cli_launch(user_data_dir: Path, session_id: str, mode: str,
     record_activity(
         user_data_dir, KIND_CLI_LAUNCH, session_id=session_id, mode=mode,
         tool=provider, summary=model, now=now)
+
+
+def record_background_model(user_data_dir: Path, process: str,
+                            summary: str, *, ok: bool, result: str = "",
+                            now: datetime | None = None) -> None:
+    """巡回の裏側のモデル呼び出し（自動抽出・自動学習）を記録する。
+
+    process は処理の名前（memory_extract / skill_learn）、summary
+    は件数などの要点だけ（プロンプトや会話の全文は渡さない）。
+    失敗した実行には error_kind として error を付ける。
+    """
+    record_activity(
+        user_data_dir, KIND_BACKGROUND_MODEL, tool=process,
+        summary=_excerpt(summary), result=result, ok=ok,
+        error_kind="" if ok else ERROR_KIND_ERROR, now=now)
 
 
 def _normalize_limit(limit: object) -> int:

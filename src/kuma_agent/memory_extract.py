@@ -31,6 +31,11 @@ MEMORY.md へ足す仕組み（詳細は docs/DESIGN.md の「長期記憶の
 - モデルが要る処理なので、モデルなしの一時 Session の巡回
   （CLI の `kuma-agent proactive` 経路）では実行せず、試行の
   記録も残さない。自動抽出は会話への投稿をしない
+- 巡回での実行は、活動の記録（activity の background_model、
+  成功・失敗と追加件数だけ）と使用量（usage、セッション ID は
+  background:memory_extract）に残す（歯止めの漏れ点検 L3 の
+  直し、0.88.0）。CLI の明示実行（extract_memory の直接呼び
+  出し）は記録しない。記録の失敗で巡回は落とさない
 """
 from __future__ import annotations
 
@@ -42,10 +47,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from .llm import ChatModel, Message
+from .activity import record_background_model
+from .llm import ChatModel, Message, Usage, model_name_of
 from .memory import Memory, split_memory_segments
 from .memory_meta import record_memory_items
 from .memory_tidy import _segment_key, backup_memory_file, dedupe_memory_text
+from .usage import record_usage
+
+# 使用量の記録で使う、裏側の抽出呼び出しのセッション ID
+BACKGROUND_SESSION_ID = "background:memory_extract"
 
 # 状態ファイル（ユーザーの置き場に置く。memory_tidy_state.json
 # と同じ「日付と進捗を JSON で記録する」流儀）
@@ -333,13 +343,17 @@ class ExtractResult:
     モデルが返した箇条書き（dry-run の表示と件数の報告に使う）。
     items は bullets に期限（AM-2）を組にしたもの。reason は
     書き換えなかった理由（"" / "no_new_turns" / "nothing" /
-    "no_change" / "model_failed"）。
+    "no_change" / "model_failed"）。usage はモデルが応答に
+    含めていた使用量（応答が返った場合だけ。例外で応答が無い
+    場合と、材料が無くてモデルを呼ばなかった場合は None）。
+    巡回側が使用量の記録へ流すために持つ。
     """
     applied: bool
     bullets: list[str] = field(default_factory=list)
     backup_path: Path | None = None
     reason: str = ""
     items: list[tuple[str, str | None]] = field(default_factory=list)
+    usage: Usage | None = None
 
     @property
     def added_count(self) -> int:
@@ -381,15 +395,17 @@ def extract_memory(memory: Memory, model: ChatModel,
         return ExtractResult(False, reason="model_failed")
     items = _parse_items(reply.content or "")
     if items is None:
-        return ExtractResult(False, reason="model_failed")
+        return ExtractResult(False, reason="model_failed",
+                             usage=reply.usage)
     bullets = [bullet for bullet, _until in items]
     if not bullets:
         if not dry_run:
             state["positions"] = collected.positions
             _save_state(user_data_dir, state)
-        return ExtractResult(False, reason="nothing")
+        return ExtractResult(False, reason="nothing", usage=reply.usage)
     if dry_run:
-        return ExtractResult(False, bullets=bullets, items=items)
+        return ExtractResult(False, bullets=bullets, items=items,
+                             usage=reply.usage)
     # 末尾へ足してから機械的な重複除去を通す
     base = memory_text
     if base and not base.endswith("\n"):
@@ -415,7 +431,7 @@ def extract_memory(memory: Memory, model: ChatModel,
         now=now)
     if final == memory_text:
         return ExtractResult(False, bullets=bullets, reason="no_change",
-                             items=items)
+                             items=items, usage=reply.usage)
     backup_path = None
     if memory.memory_file.exists():
         backup_path = backup_memory_file(memory.memory_file, memory_text,
@@ -423,13 +439,48 @@ def extract_memory(memory: Memory, model: ChatModel,
     memory.memory_file.parent.mkdir(parents=True, exist_ok=True)
     memory.memory_file.write_text(final, encoding="utf-8")
     return ExtractResult(True, bullets=bullets, backup_path=backup_path,
-                         items=items)
+                         items=items, usage=reply.usage)
+
+
+def _record_background_run(user_data_dir: Path, result: ExtractResult,
+                           model: ChatModel,
+                           provider_of: Callable[[], str] | None,
+                           now: datetime) -> None:
+    """巡回の自動抽出の実行を、活動の記録と使用量へ残す（L3 の直し）。
+
+    活動の記録には成功・失敗と追加件数だけを残し（プロンプトや
+    会話の全文は残さない）、使用量には応答に含まれる usage を
+    流す。使用量は、モデルから応答が返った場合だけ記録する
+    （例外で応答が無い場合は、Session の記録と同じく残さない。
+    応答は返ったが形が壊れていた場合は usage が読めた分だけ
+    残る）。provider_of は使用量に載せる頭脳名を引く関数で、
+    モデルを引いた後にだけ呼ばれる。記録の失敗で巡回を落とさ
+    ないよう、例外は外へ出さない。
+    """
+    failed = result.reason == "model_failed"
+    try:
+        record_background_model(
+            user_data_dir, "memory_extract",
+            "モデル呼び出しに失敗" if failed
+            else f"追加 {result.added_count} 件",
+            ok=not failed, result=result.reason or "applied", now=now)
+    except Exception:
+        pass  # 記録の失敗で巡回全体は落とさない
+    if failed and result.usage is None:
+        return  # 応答が返らなかった呼び出しは使用量に残さない
+    try:
+        provider = provider_of() if provider_of is not None else ""
+        record_usage(user_data_dir, provider, model_name_of(model),
+                     result.usage, BACKGROUND_SESSION_ID, now=now)
+    except Exception:
+        pass  # 記録の失敗で巡回全体は落とさない
 
 
 def auto_extract_memory(
         user_data_dir: Path,
         model_provider: Callable[[], ChatModel | None],
-        now: datetime | None = None) -> ExtractResult | None:
+        now: datetime | None = None,
+        provider_of: Callable[[], str] | None = None) -> ExtractResult | None:
     """巡回用の自動抽出。条件を満たさなければ None（何もしない）。
 
     条件はすべて満たす場合だけ実行する:
@@ -443,7 +494,8 @@ def auto_extract_memory(
     試行日はモデルを呼ぶ前に記録する（失敗してもその日は
     再試行しないため）。処理済み位置は extract_memory が
     成功・「なし」のときだけ進める。適用しても会話への投稿は
-    しない。
+    しない。実行したら、活動の記録と使用量へ残す（巡回分だけ。
+    provider_of は使用量に載せる頭脳名を引く関数）。
     """
     now = now or datetime.now()
     if not extraction_enabled():
@@ -460,4 +512,10 @@ def auto_extract_memory(
         return None  # モデルなし経路では試行も記録しない
     state["last_attempt_on"] = today
     _save_state(user_data_dir, state)
-    return extract_memory(Memory(user_data_dir), model, now=now)
+    result = extract_memory(Memory(user_data_dir), model, now=now)
+    if result.reason != "no_new_turns":
+        # 材料があることを確認してから呼んでいるため通常は
+        # 起きないが、モデルを呼んでいない実行は記録しない
+        _record_background_run(user_data_dir, result, model,
+                               provider_of, now)
+    return result
