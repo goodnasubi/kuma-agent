@@ -87,11 +87,15 @@ from .worksteps import WorkSteps
 from .telegram import build_proactive_notifier
 from .telegram import start_polling_thread as start_telegram_polling
 from .brain import (
+    MAX_BRAIN_API_KEY_CHARS,
     MAX_BRAIN_MODEL_CHARS,
     TENANT_BRAIN_PROVIDERS,
+    brain_key_status,
+    delete_brain_credentials,
     effective_brain,
+    has_tenant_brain_override,
     resolve_brain,
-    tenant_brain_setting,
+    save_brain_credentials,
 )
 from .settings import (
     approvals_enabled_for,
@@ -2677,6 +2681,50 @@ async function buildTenantRow(name) {
     }
   });
   row.appendChild(brainResetBtn);
+  const brainKeyLabel = document.createElement('label');
+  brainKeyLabel.appendChild(document.createTextNode('API キー: '));
+  const brainKey = document.createElement('input');
+  brainKey.type = 'password';
+  brainKey.size = 18;
+  brainKey.autocomplete = 'off';
+  // キーの値そのものは画面へ出さない。欄は常に空で、入力した
+  // ときだけ保存される（空のまま保存しても変更されない）
+  brainKey.placeholder = settings.brain_key_set
+    ? '設定済み（変更する場合だけ入力）' : '全体のキーを使う';
+  brainKeyLabel.appendChild(brainKey);
+  const brainKeyState = document.createElement('span');
+  if (settings.brain_key_invalid) {
+    brainKeyState.textContent = '（キーの保存が壊れています）';
+  } else if (settings.brain_key_set) {
+    brainKeyState.textContent = '（設定済み'
+      + (settings.brain_key_provider
+         ? ': ' + settings.brain_key_provider + ' 用' : '') + '）';
+  } else {
+    brainKeyState.textContent = '（未設定）';
+  }
+  brainKeyLabel.appendChild(brainKeyState);
+  row.appendChild(brainKeyLabel);
+  if (settings.brain_key_set || settings.brain_key_invalid) {
+    const brainKeyDeleteBtn = document.createElement('button');
+    brainKeyDeleteBtn.type = 'button';
+    brainKeyDeleteBtn.textContent = 'キーを消す';
+    brainKeyDeleteBtn.title = 'このテナントの API キーを消し、全体のキーを使うように戻す';
+    brainKeyDeleteBtn.addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/tenant_settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({tenant: name, brain_key_delete: true}),
+        });
+        if (!res.ok) throw new Error('delete failed');
+        window.alert('「' + name + '」の API キーを消しました');
+        loadTenantAdmin();
+      } catch (e) {
+        window.alert('キーを消すのに失敗しました');
+      }
+    });
+    row.appendChild(brainKeyDeleteBtn);
+  }
   const saveBtn = document.createElement('button');
   saveBtn.type = 'button';
   setIcon(saveBtn, 'check', '保存');
@@ -2685,7 +2733,8 @@ async function buildTenantRow(name) {
                   approvals_enabled: approvalToggle.checked,
                   retention_days: days.value === '' ? null : Number(days.value),
                   brain: {provider: brainSelect.value || null,
-                          model: brainModel.value.trim() || null}};
+                          model: brainModel.value.trim() || null},
+                  brain_api_key: brainKey.value};
     try {
       const res = await fetch('/api/tenant_settings', {
         method: 'POST',
@@ -3948,11 +3997,14 @@ class TenantStore:
         # （設定を直せば次のアクセスで作り直せる）
         self._brain_cache: dict[str, tuple[Config, object]] = {}
         self._brain_lock = threading.Lock()
-        if tenant_brain_setting(self._cfg.data_dir, self.default_tenant):
+        if has_tenant_brain_override(self._cfg.data_dir,
+                                      self.default_tenant,
+                                      self._cfg.provider):
             # 起動時の組み合わせも同じ解決を通す（起動時だけ特別
             # 扱いしない）。渡された Session は全体の既定で作られ
-            # ているため、起動時テナントに頭脳の指定があれば、
-            # 解決した組で作り直してから抱える。生成に失敗したら
+            # ているため、起動時テナントに頭脳の上書き（指定または
+            # テナントのキー）があれば、解決した組で作り直してから
+            # 抱える。生成に失敗したら
             # 全体の既定のまま抱える（そのテナントの新しい部屋は
             # 次のアクセス時に解決をやり直す）
             try:
@@ -4292,11 +4344,15 @@ def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
     brain_effective_model は全体の既定まで解決した実効値。
     brain_cli は実効頭脳が CLI 系かどうか（注意表示の出し分け
     用）。brain_providers はテナント指定で選べる頭脳の一覧
-    （第1段は API 系のみ）。API キーの値はどの項目にも含めない。
+    （第1段は API 系のみ）。brain_key_set はテナントの API
+    キーが設定済みか、brain_key_provider はそのキーの対象
+    プロバイダ、brain_key_invalid はキーの保存が壊れているか
+    （第2段）。API キーの値はどの項目にも含めない。
     """
     locked = tenants._cfg.require_approvals
     brain = brain_setting_for(tenants.data_dir, name)
     eff_provider, eff_model, eff_cli = tenants.effective_brain_for(name)
+    key_status = brain_key_status(tenants.data_dir, name)
     return {
         "tenant": name,
         "proactive_enabled": proactive_enabled_for(tenants.data_dir, name),
@@ -4312,6 +4368,9 @@ def _tenant_settings_payload(tenants: TenantStore, name: str) -> dict:
         "brain_effective_model": eff_model,
         "brain_cli": eff_cli,
         "brain_providers": list(TENANT_BRAIN_PROVIDERS),
+        "brain_key_set": key_status["state"] == "set",
+        "brain_key_provider": key_status["provider"],
+        "brain_key_invalid": key_status["state"] == "invalid",
     }
 
 
@@ -5097,8 +5156,13 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             "model": ...} の辞書か null で、項目ごとに null が
             「その項目の指定を取り除く」、brain 自体が null なら
             指定ごと取り除く。渡されていない項目は変更しない。
-            頭脳を保存したら、そのテナントの Session を破棄して
-            即時反映する。保存後の最新の設定を返す。
+            テナントの API キー（第2段）は brain_api_key で受け取り、
+            settings.json ではなく資格情報ファイル（brain/
+            credentials.json）へだけ書く。空文字は「変更しない」で、
+            消す場合は brain_key_delete: true を使う。キーの値は
+            応答にも記録にも残さない。
+            頭脳（キーだけの変更を含む）を保存したら、そのテナントの
+            Session を破棄して即時反映する。保存後の最新の設定を返す。
             """
             data = self._read_json_body()
             if data is None:
@@ -5137,6 +5201,7 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                         "error": "retention_days は 0 以上の整数か null で指定してください"})
                     return
                 save_retention_override(tenants.data_dir, name, days)
+            brain_changed = False
             if "brain" in data:
                 brain_value = data["brain"]
                 if brain_value is None:
@@ -5161,6 +5226,46 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                         "error": "brain は辞書か null で指定してください"})
                     return
                 set_brain_setting(tenants.data_dir, name, provider, model)
+                brain_changed = True
+            key_saved = False
+            if "brain_api_key" in data:
+                key_value = data["brain_api_key"]
+                if not isinstance(key_value, str) \
+                        or len(key_value) > MAX_BRAIN_API_KEY_CHARS:
+                    self._send_json(400, {
+                        "error": "API キーが不正です"})
+                    return
+                key_value = key_value.strip()
+                if key_value:
+                    # キーは保存後の実効プロバイダ用として記録する
+                    # （頭脳の指定が同じリクエストで変わる場合に、
+                    # 新しいプロバイダへひも付けるため）
+                    eff_provider, _eff_model, eff_cli = \
+                        tenants.effective_brain_for(name)
+                    if eff_cli:
+                        self._send_json(400, {
+                            "error": "CLI 系の頭脳には API キーは"
+                                     "設定できません"})
+                        return
+                    save_brain_credentials(
+                        tenant_dir(tenants.data_dir, name),
+                        eff_provider, key_value)
+                    key_saved = True
+                    brain_changed = True
+                # 空文字は「変更しない」（既存のキーはそのまま残す）
+            if "brain_key_delete" in data:
+                if not isinstance(data["brain_key_delete"], bool):
+                    self._send_json(400, {
+                        "error": "brain_key_delete は true / false で"
+                                 "指定してください"})
+                    return
+                if data["brain_key_delete"] and not key_saved:
+                    # 新しいキーが同時に渡されていたらそちらを優先し、
+                    # 削除はしない
+                    if delete_brain_credentials(
+                            tenant_dir(tenants.data_dir, name)):
+                        brain_changed = True
+            if brain_changed:
                 # 保存時に即時反映する: そのテナントの Session を
                 # 破棄し、次に開いたときに新しい頭脳で作り直させる
                 tenants.discard_tenant_sessions(name)

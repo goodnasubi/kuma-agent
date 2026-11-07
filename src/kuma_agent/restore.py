@@ -19,10 +19,13 @@ export-info.json で、kuma-agent の書き出しであることを確かめて
 置き換えで消してしまわないため）。
 
 資格情報の扱いも書き出しとそろえる。Google カレンダー連携の
-資格情報ファイル（google-calendar/credentials.json）は、ZIP
+資格情報ファイル（google-calendar/credentials.json）と、
+テナントの頭脳の API キー（brain/credentials.json）は、ZIP
 に含まれていても書き込まず（注入・上書きの防止）、置き換えの
 際も既存のファイルを消さずに保全する（パス定義は
-google_calendar.py が正）。
+google_calendar.py と brain.py がそれぞれ正）。頭脳のキーは
+テナントの置き場の直下にあるため、既定ユーザーの復元（置き場
+＝テナントの置き場）で同名の項目が現れ得る。
 
 安全のため、ZIP の項目は書き出す前にすべて検証する。絶対パス
 や `..` を含む項目、シンボリックリンクの項目が 1 つでもあれば、
@@ -46,6 +49,7 @@ from .export import (
     build_export_zip,
     iter_export_files,
 )
+from .brain import BRAIN_CREDENTIALS_PATH_PARTS
 from .google_calendar import CREDENTIALS_PATH_PARTS
 from .memory import (
     normalize_tenant_name,
@@ -268,7 +272,8 @@ def restore_user_data(data_dir: Path, tenant: str, user: str,
         for entry in entries:
             if entry[1][0] in excluded:
                 result.skipped_files += 1
-            elif entry[1] == CREDENTIALS_PATH_PARTS:
+            elif entry[1] in (CREDENTIALS_PATH_PARTS,
+                              BRAIN_CREDENTIALS_PATH_PARTS):
                 # 資格情報は ZIP からは書き戻さない
                 result.skipped_files += 1
             else:
@@ -288,7 +293,8 @@ def restore_user_data(data_dir: Path, tenant: str, user: str,
         if udir == data_dir:
             preserved.add(BACKUPS_DIRNAME)
         _clear_user_dir(udir, preserved,
-                        preserved_files={CREDENTIALS_PATH_PARTS})
+                        preserved_files={CREDENTIALS_PATH_PARTS,
+                                         BRAIN_CREDENTIALS_PATH_PARTS})
         udir.mkdir(parents=True, exist_ok=True)
         for zip_info, parts in accepted:
             dest = udir.joinpath(*parts)

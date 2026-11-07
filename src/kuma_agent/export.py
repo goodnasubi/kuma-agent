@@ -13,10 +13,13 @@
 ユーザーのデータではないため、書き出しには含めない。
 
 資格情報の除外: Google カレンダー連携の資格情報ファイル
-（google-calendar/credentials.json）は、ユーザーのデータでは
-あっても資格情報そのものであるため、書き出し・控えのどちら
-にも含めない（パス定義は google_calendar.py が正。復元側の
-扱いは restore.py）。
+（google-calendar/credentials.json）と、テナントの頭脳の
+API キー（brain/credentials.json）は、データではあっても
+資格情報そのものであるため、書き出し・控えのどちらにも含め
+ない（パス定義は google_calendar.py と brain.py がそれぞれ
+正。復元側の扱いは restore.py）。頭脳のキーはテナントの置き
+場の直下にあるため、既定ユーザーの書き出し（置き場＝テナント
+の置き場）にも混ざり得る点に注意する。
 
 書き出しは読み取り専用で、サーバー側にファイルは残さない（Web は
 メモリ上で組み立てて返す）。読み込み（復元）は restore.py が担う
@@ -36,6 +39,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+from .brain import BRAIN_CREDENTIALS_PATH_PARTS
 from .google_calendar import CREDENTIALS_PATH_PARTS
 from .memory import (
     TENANTS_DIRNAME,
@@ -130,7 +134,8 @@ def iter_export_files(data_dir: Path, tenant: str,
             path = root_path / name
             if not path.is_file():
                 continue
-            if path.relative_to(udir).parts == CREDENTIALS_PATH_PARTS:
+            if path.relative_to(udir).parts in (
+                    CREDENTIALS_PATH_PARTS, BRAIN_CREDENTIALS_PATH_PARTS):
                 continue  # 資格情報は書き出しに含めない
             files.append(path)
     return files
@@ -188,8 +193,9 @@ def build_tenant_backup_zip(data_dir: Path, tenant: str,
     そのテナントの全ユーザー分を置き場からの相対パスのまま収める
     （テナントの置き場の中身はすべてそのテナントのデータなので、
     書き出しのような他テナント／他ユーザーの除外は要らない。
-    ただし資格情報ファイル（google-calendar/credentials.json）
-    だけは、各ユーザーの分を含め、控えにも含めない）。
+    ただし資格情報ファイル（google-calendar/credentials.json と
+    brain/credentials.json）だけは、各ユーザーの分とテナント
+    直下の分を含め、控えにも含めない）。
     先頭には export-info.json の形で、控えである旨・テナント名・
     ユーザー一覧を入れる。置き場が無い・空でも、情報ファイルだけ
     の ZIP ができる。読み込み中に消えた・読めないファイルは飛ばす。
@@ -221,8 +227,9 @@ def build_tenant_backup_zip(data_dir: Path, tenant: str,
                     arcname = path.relative_to(tdir).as_posix()
                     if arcname == EXPORT_INFO_NAME:
                         continue
-                    if path.relative_to(tdir).parts[-2:] \
-                            == CREDENTIALS_PATH_PARTS:
+                    if path.relative_to(tdir).parts[-2:] in (
+                            CREDENTIALS_PATH_PARTS,
+                            BRAIN_CREDENTIALS_PATH_PARTS):
                         continue  # 資格情報は控えに含めない
                     try:
                         zf.write(path, arcname)
