@@ -14,7 +14,14 @@ from pathlib import Path
 from kuma_agent import cli
 from kuma_agent.config import Config
 from kuma_agent.delegate import DELEGATE_NOTICE
-from kuma_agent.jobs import Job, JobBoard, build_schedule, is_due
+from kuma_agent.jobs import (
+    EMPTY_RESULT_HASH,
+    Job,
+    JobBoard,
+    build_schedule,
+    is_due,
+    result_hash,
+)
 from kuma_agent.llm import Message
 from kuma_agent.notify_prefs import set_quiet_hours
 from kuma_agent.proactive import check_and_post, run_sweep
@@ -581,3 +588,102 @@ def test_sweep_without_model_does_not_consume_jobs(tmp_path: Path,
     jobs = JobBoard(tmp_path).list()
     assert jobs[0].last_run_at == ""  # 実行済みになっていない
     assert _records(tmp_path) == []  # 失敗の知らせも投稿されていない
+
+
+# ------------------------------------------ 棚卸しの材料（0.90.0）
+
+def test_result_hash_normalizes_surrounding_space():
+    # 投稿本文の形で取るため、前後の空白の違いは同じ結果扱い
+    assert result_hash("異常なし") == result_hash(" 異常なし \n")
+    assert result_hash("異常なし") != result_hash("異常あり")
+    # 空の結果（空白だけも含む）は常に空のハッシュになる
+    assert result_hash("") == EMPTY_RESULT_HASH
+    assert result_hash("  \n ") == EMPTY_RESULT_HASH
+
+
+def test_job_materials_default_for_old_format(tmp_path: Path):
+    # 材料の項目が無い旧形式では、初期値として読む
+    _write_jobs(tmp_path, [_job_record()])
+    job = JobBoard(tmp_path).list()[0]
+    assert job.last_result_hash == ""
+    assert job.same_result_streak == 0
+    assert job.error_count == 0
+    assert job.first_error_at == ""
+    assert job.last_error == ""
+
+
+def test_job_materials_broken_values_fall_back(tmp_path: Path):
+    # 壊れた値でもジョブ自体は落とさず、初期値として読む
+    record = _job_record()
+    record.update({"same_result_streak": "abc", "error_count": -2,
+                   "first_error_at": 123})
+    _write_jobs(tmp_path, [record])
+    job = JobBoard(tmp_path).list()[0]
+    assert job.same_result_streak == 0
+    assert job.error_count == 0
+    assert job.first_error_at == "123"  # 文字列化して読む（見張りと同じ）
+
+
+def test_mark_run_records_same_result_streak(tmp_path: Path):
+    board = JobBoard(tmp_path)
+    job = board.add("集計", "集計する", {"kind": "interval", "hours": 6})
+    board.mark_run(job.id, NOW, result="異常なし")
+    saved = JobBoard(tmp_path).get(job.id)
+    assert saved is not None
+    assert saved.same_result_streak == 0
+    assert saved.last_result_hash == result_hash("異常なし")
+    # 同じ結果（空白の違いは同じ本文）が続くと連続が増える
+    board.mark_run(job.id, NOW, result="異常なし")
+    board.mark_run(job.id, NOW, result=" 異常なし ")
+    saved = JobBoard(tmp_path).get(job.id)
+    assert saved is not None and saved.same_result_streak == 2
+    # 結果が変われば連続は切れる
+    board.mark_run(job.id, NOW, result="異常あり")
+    saved = JobBoard(tmp_path).get(job.id)
+    assert saved is not None and saved.same_result_streak == 0
+    assert saved.last_result_hash == result_hash("異常あり")
+
+
+def test_mark_run_records_error_streak_and_resets(tmp_path: Path):
+    board = JobBoard(tmp_path)
+    job = board.add("集計", "集計する", {"kind": "interval", "hours": 6})
+    board.mark_run(job.id, NOW, result="結果")
+    board.mark_run(job.id, NOW, result="結果")
+    later = NOW + timedelta(hours=1)
+    board.mark_run(job.id, later, error="error: 接続できません")
+    saved = JobBoard(tmp_path).get(job.id)
+    assert saved is not None
+    assert saved.error_count == 1
+    assert saved.first_error_at == later.isoformat(timespec="seconds")
+    assert saved.last_error == "接続できません"
+    # 失敗で同じ結果の連続は数え直しになる
+    assert saved.same_result_streak == 0
+    assert saved.last_result_hash == ""
+    # 失敗が続いても連続の始まりは変わらない
+    board.mark_run(job.id, NOW + timedelta(hours=2),
+                   error="error: 再び失敗")
+    saved = JobBoard(tmp_path).get(job.id)
+    assert saved is not None and saved.error_count == 2
+    assert saved.first_error_at == later.isoformat(timespec="seconds")
+    # 成功したら失敗の記録は戻り、連続は新しい結果から数える
+    board.mark_run(job.id, NOW + timedelta(hours=3), result="結果")
+    saved = JobBoard(tmp_path).get(job.id)
+    assert saved is not None
+    assert saved.error_count == 0
+    assert saved.first_error_at == ""
+    assert saved.last_error == ""
+    assert saved.same_result_streak == 0
+    assert saved.last_result_hash == result_hash("結果")
+
+
+def test_mark_run_without_outcome_keeps_materials(tmp_path: Path):
+    # 結果も失敗も渡さなければ、時刻だけが更新される（従来どおり）
+    board = JobBoard(tmp_path)
+    job = board.add("集計", "集計する", {"kind": "interval", "hours": 6})
+    board.mark_run(job.id, NOW, error="error: 失敗")
+    board.mark_run(job.id, NOW + timedelta(hours=1))
+    saved = JobBoard(tmp_path).get(job.id)
+    assert saved is not None
+    assert saved.error_count == 1  # 材料はそのまま
+    assert saved.last_run_at == (
+        NOW + timedelta(hours=1)).isoformat(timespec="seconds")

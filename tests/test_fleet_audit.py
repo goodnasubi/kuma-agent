@@ -1,4 +1,4 @@
-"""定期実行の棚卸し（フリート監査、第1段）のテスト。
+"""定期実行の棚卸し（フリート監査、第1段・第2段）のテスト。
 
 印5種それぞれの検出と境界（閾値の前後）、月1回の頻度制御、
 指紋による重複抑制と悪化時の再提示、朝のまとめ材料とフィード
@@ -6,6 +6,11 @@
 次回実行時刻を壊さないこと、棚卸しの失敗が巡回本体を落とさない
 ことを確認する。モデルは使わない仕組みなので、巡回の確認も
 スタブで差し替える。
+
+第2段（0.90.0）では、ジョブの結果の印3種（同じ結果／空の
+結果／失敗続き）の検出と境界、run_due_jobs が実行のたびに
+材料（結果のハッシュと連続、失敗の連続）を記録することも
+確認する。
 """
 import json
 from datetime import datetime, timedelta
@@ -15,15 +20,18 @@ import kuma_agent.proactive as proactive_mod
 from kuma_agent.config import Config
 from kuma_agent.feed import load_feed_entries
 from kuma_agent.fleet_audit import (
+    MARK_JOB_EMPTY_RESULT,
+    MARK_JOB_ERROR_STREAK,
+    MARK_JOB_SAME_RESULT,
     STATE_FILENAME,
     audit_fleet,
     mark_fleet_briefing_used,
     pending_fleet_text,
 )
-from kuma_agent.jobs import JobBoard
+from kuma_agent.jobs import EMPTY_RESULT_HASH, JobBoard
 from kuma_agent.llm import Message
 from kuma_agent.notification_triage import QueueEvent, enqueue_event
-from kuma_agent.proactive import check_and_post
+from kuma_agent.proactive import check_and_post, run_due_jobs
 from kuma_agent.session import Session
 from kuma_agent.tools import READ_ONLY_TOOLS, ToolBox
 from kuma_agent.watches import WatchBoard
@@ -604,3 +612,235 @@ def test_check_and_post_survives_fleet_failure(
     cfg = Config(data_dir=tmp_path)
     # 棚卸しが例外を出しても、巡回全体は落ちずに終わる
     assert check_and_post(cfg, now=NOW) is None
+
+
+# ------------------------------------------------- 印6: 同じ結果（第2段）
+
+def _same_result_job(**overrides) -> dict:
+    base = {
+        "title": "朝の集計",
+        "last_result_hash": "a" * 64,  # 空ではない何らかのハッシュ
+        "same_result_streak": 3,
+    }
+    base.update(overrides)
+    return _job_record(**base)
+
+
+def test_same_result_mark(tmp_path: Path):
+    _write_jobs(tmp_path, [_same_result_job()])
+    result = audit_fleet(tmp_path, now=NOW)
+    assert result is not None and len(result.marks) == 1
+    mark = result.marks[0]
+    assert mark.kind == MARK_JOB_SAME_RESULT
+    assert "同じ結果が 4 回続いています" in mark.text
+    # 結果の本文は文面に写さない（ハッシュしか材料に無い）
+    assert "a" * 64 not in mark.text
+    entries = _audit_entries(tmp_path)
+    assert len(entries) == 1
+    assert "朝の集計" in entries[0].body
+
+
+def test_same_result_below_threshold(tmp_path: Path):
+    # streak 2（同じ結果 3 回）ではまだ印にならない
+    _write_jobs(tmp_path, [_same_result_job(same_result_streak=2)])
+    result = audit_fleet(tmp_path, now=NOW)
+    assert result is not None and result.marks == []
+    assert _audit_entries(tmp_path) == []
+
+
+def test_same_result_disabled_job_is_not_marked(tmp_path: Path):
+    _write_jobs(tmp_path, [_same_result_job(enabled=False)])
+    result = audit_fleet(tmp_path, now=NOW)
+    assert result is not None and result.marks == []
+
+
+def test_same_result_suppression_and_worsening(tmp_path: Path):
+    _write_jobs(tmp_path, [_same_result_job()])
+    first = audit_fleet(tmp_path, now=NOW)
+    assert first is not None and len(first.marks) == 1
+    # 翌月、同じ連続のままなら指紋が同じで繰り返さない
+    second = audit_fleet(tmp_path, now=DEC)
+    assert second is not None and second.marks == []
+    # 連続が伸びたら（指紋が変わったら）改めて出す
+    _write_jobs(tmp_path, [_same_result_job(same_result_streak=4)])
+    third = audit_fleet(tmp_path, now=JAN)
+    assert third is not None and len(third.marks) == 1
+    assert "同じ結果が 5 回続いています" in third.marks[0].text
+    assert len(_audit_entries(tmp_path)) == 2
+
+
+# ------------------------------------------------- 印7: 空の結果（第2段）
+
+def _empty_result_job(**overrides) -> dict:
+    base = {
+        "title": "空のジョブ",
+        "last_result_hash": EMPTY_RESULT_HASH,
+        "same_result_streak": 1,
+    }
+    base.update(overrides)
+    return _job_record(**base)
+
+
+def test_empty_result_mark(tmp_path: Path):
+    _write_jobs(tmp_path, [_empty_result_job()])
+    result = audit_fleet(tmp_path, now=NOW)
+    assert result is not None and len(result.marks) == 1
+    mark = result.marks[0]
+    assert mark.kind == MARK_JOB_EMPTY_RESULT
+    assert "結果が空のまま 2 回続いています" in mark.text
+
+
+def test_empty_result_once_is_not_marked(tmp_path: Path):
+    # 空が 1 回だけ（streak 0）では偶然の範囲として印にしない
+    _write_jobs(tmp_path, [_empty_result_job(same_result_streak=0)])
+    result = audit_fleet(tmp_path, now=NOW)
+    assert result is not None and result.marks == []
+
+
+def test_empty_streak_is_not_same_result(tmp_path: Path):
+    # 空が長く続いても、印6ではなく印7だけが担当する
+    _write_jobs(tmp_path, [_empty_result_job(same_result_streak=5)])
+    result = audit_fleet(tmp_path, now=NOW)
+    assert result is not None and len(result.marks) == 1
+    assert result.marks[0].kind == MARK_JOB_EMPTY_RESULT
+    assert "6 回" in result.marks[0].text
+
+
+# ------------------------------------------------- 印8: 失敗続き（第2段）
+
+def _error_job(**overrides) -> dict:
+    base = {
+        "title": "失敗するジョブ",
+        "error_count": 3,
+        "first_error_at": _stamp(NOW - timedelta(days=2)),
+        "last_error": "接続できません",
+    }
+    base.update(overrides)
+    return _job_record(**base)
+
+
+def test_job_error_streak_mark(tmp_path: Path):
+    _write_jobs(tmp_path, [_error_job()])
+    result = audit_fleet(tmp_path, now=NOW)
+    assert result is not None and len(result.marks) == 1
+    mark = result.marks[0]
+    assert mark.kind == MARK_JOB_ERROR_STREAK
+    assert "3 回続けて失敗しています" in mark.text
+    # 失敗の理由そのものは文面に写さない（件数と日付まで）
+    assert "接続できません" not in mark.text
+
+
+def test_job_error_streak_below_threshold(tmp_path: Path):
+    _write_jobs(tmp_path, [_error_job(error_count=2)])
+    result = audit_fleet(tmp_path, now=NOW)
+    assert result is not None and result.marks == []
+
+
+def test_job_error_streak_disabled_job_is_not_marked(tmp_path: Path):
+    _write_jobs(tmp_path, [_error_job(enabled=False)])
+    result = audit_fleet(tmp_path, now=NOW)
+    assert result is not None and result.marks == []
+
+
+def test_job_error_streak_without_first_time(tmp_path: Path):
+    # 連続の始まりが読めなくても、回数だけで印になる（時刻条件なし）
+    _write_jobs(tmp_path, [_error_job(first_error_at="")])
+    result = audit_fleet(tmp_path, now=NOW)
+    assert result is not None and len(result.marks) == 1
+    assert "から）" not in result.marks[0].text
+
+
+# --------------------------------------- 巡回での記録と検出の連携（第2段）
+
+class _JobSession:
+    """run_due_jobs が使う範囲だけを持つ Session の代わり。"""
+
+    def __init__(self):
+        self.model = object()
+        self.posted: list[str] = []
+
+    def post_proactive_message(self, text: str) -> None:
+        self.posted.append(text)
+
+
+def _due_job(tmp_path: Path, **overrides) -> None:
+    record = _job_record(last_run_at="",
+                         created_at=_stamp(NOW - timedelta(days=1)),
+                         **overrides)
+    _write_jobs(tmp_path, [record])
+
+
+def _run_days(cfg: Config, session: _JobSession,
+              executor, days: int) -> None:
+    day = NOW
+    for _ in range(days):
+        run_due_jobs(cfg, day, lambda: session, job_executor=executor)
+        day += timedelta(days=1)
+
+
+def test_run_due_jobs_records_same_result_and_audit_detects(
+        tmp_path: Path):
+    _due_job(tmp_path, title="天気", prompt="天気を調べて")
+    cfg = Config(data_dir=tmp_path)
+    session = _JobSession()
+    _run_days(cfg, session, lambda parent, prompt: "晴れです", 4)
+    saved = JobBoard(tmp_path).list()[0]
+    assert saved.same_result_streak == 3
+    assert saved.last_result_hash != ""
+    # 翌月の棚卸しで印6が出る
+    result = audit_fleet(tmp_path, now=DEC)
+    assert result is not None
+    assert [m.kind for m in result.marks] == [MARK_JOB_SAME_RESULT]
+
+
+def test_run_due_jobs_records_empty_result_and_audit_detects(
+        tmp_path: Path):
+    _due_job(tmp_path, title="空のジョブ", prompt="何か調べて")
+    cfg = Config(data_dir=tmp_path)
+    session = _JobSession()
+    _run_days(cfg, session, lambda parent, prompt: "  ", 2)
+    saved = JobBoard(tmp_path).list()[0]
+    assert saved.last_result_hash == EMPTY_RESULT_HASH
+    assert saved.same_result_streak == 1
+    # 空の結果は見出しだけで投稿されている
+    assert session.posted == ["定期ジョブ「空のジョブ」の結果です。"] * 2
+    result = audit_fleet(tmp_path, now=DEC)
+    assert result is not None
+    assert [m.kind for m in result.marks] == [MARK_JOB_EMPTY_RESULT]
+
+
+def test_run_due_jobs_records_failures_and_audit_detects(
+        tmp_path: Path):
+    _due_job(tmp_path, title="失敗ジョブ", prompt="調べて")
+    cfg = Config(data_dir=tmp_path)
+    session = _JobSession()
+    _run_days(cfg, session,
+              lambda parent, prompt: "error: 接続できません", 3)
+    saved = JobBoard(tmp_path).list()[0]
+    assert saved.error_count == 3
+    assert saved.first_error_at == _stamp(NOW)
+    # 失敗は従来どおり、その都度その場で知らせる（強制規則は不変）
+    assert len(session.posted) == 3
+    assert all("実行に失敗しました" in text for text in session.posted)
+    result = audit_fleet(tmp_path, now=DEC)
+    assert result is not None
+    assert [m.kind for m in result.marks] == [MARK_JOB_ERROR_STREAK]
+
+
+def test_run_due_jobs_success_clears_error_streak(tmp_path: Path):
+    _due_job(tmp_path, title="復帰ジョブ", prompt="調べて")
+    cfg = Config(data_dir=tmp_path)
+    session = _JobSession()
+    outcomes = iter(["error: 失敗", "error: 失敗", "持ち直しました"])
+    day = NOW
+    for _ in range(3):
+        run_due_jobs(cfg, day, lambda: session,
+                     job_executor=lambda parent, prompt: next(outcomes))
+        day += timedelta(days=1)
+    saved = JobBoard(tmp_path).list()[0]
+    assert saved.error_count == 0
+    assert saved.first_error_at == ""
+    assert saved.same_result_streak == 0
+    # 棚卸しでも失敗続きの印は出ない
+    result = audit_fleet(tmp_path, now=DEC)
+    assert result is not None and result.marks == []

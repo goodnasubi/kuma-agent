@@ -1092,8 +1092,10 @@ def run_due_jobs(cfg: Config, now: datetime, get_session: Callable[[], Session],
     既定は委任の仕組み（delegate.run_delegated_task: 子セッションが
     仕事をして最終応答を返す）。実行したら成功・失敗にかかわらず
     last_run_at を実行時刻に更新する（実行の消費は届け方と
-    独立。設計 第3段「変えないもの」）。実行の例外や error の
-    結果は失敗として扱う。
+    独立。設計 第3段「変えないもの」）。あわせて、mark_run の
+    呼び出し点で棚卸しの材料（成功結果のハッシュと連続、失敗
+    の連続）も記録する（定期実行の棚卸し 第2段、0.90.0）。
+    実行の例外や error の結果は失敗として扱う。
 
     届け方（成功結果だけが対象。通知の取捨 第3段、0.86.0）:
 
@@ -1149,7 +1151,7 @@ def run_due_jobs(cfg: Config, now: datetime, get_session: Callable[[], Session],
                 session.post_proactive_message(text)
             finally:
                 # 投稿まで進んだら、成否にかかわらず実行済みを記録する
-                board.mark_run(job.id, now)
+                board.mark_run(job.id, now, error=result)
             append_feed_entry(cfg.user_data_dir, KIND_PROACTIVE, text)
             posted.append(text)
             _notify(notify, cfg.tenant, cfg.user, text)
@@ -1199,7 +1201,7 @@ def run_due_jobs(cfg: Config, now: datetime, get_session: Callable[[], Session],
                         f"定期ジョブ「{job.title}」の結果は、"
                         "朝の知らせでまとめてお知らせします。"
                         f"{note}")
-                board.mark_run(job.id, now)
+                board.mark_run(job.id, now, result=result)
                 continue
             reason = REASON_QUEUE_FAILED_IMMEDIATE
             if judged_reason is not None:
@@ -1209,7 +1211,7 @@ def run_due_jobs(cfg: Config, now: datetime, get_session: Callable[[], Session],
             session.post_proactive_message(text)
         finally:
             # 投稿まで進んだら、成否にかかわらず実行済みを記録する
-            board.mark_run(job.id, now)
+            board.mark_run(job.id, now, result=result)
         append_feed_entry(cfg.user_data_dir, KIND_PROACTIVE, text)
         if judged_reason is not None:
             # auto の判定で即時になった記録は、置き場ではなく

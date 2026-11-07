@@ -4,7 +4,7 @@
 見直しをおすすめするものに印を付けて、直し案と一緒に知らせる
 仕組み。能動発信の巡回（proactive.py）の裏の仕事として、月1回
 まで行う。設計は goals の fleet-audit-design-2026-11-07.md
-（取り込み第4弾、第1段＝0.89.0）。
+（取り込み第4弾、第1段＝0.89.0、第2段＝0.90.0）。
 
 長期記憶の棚卸し（memory_audit）が「記憶の中身の古さ」を対象に
 するのに対し、こちらは「定期実行の定義と履歴」が対象である。
@@ -29,6 +29,16 @@
   時刻、weekly 同士の曜日＋時刻。interval は対象外）
 - queue_stale: 未配信のまま滞った知らせ（最古の出来事から
   3 日以上）
+- job_same_result: いつも同じ結果のジョブ（第2段。同じ成功
+  結果が 4 回以上続いている。空の結果は印7の担当として除く）
+- job_empty_result: いつも空の結果のジョブ（第2段。成功結果
+  が空のまま 2 回以上続いている。空の結果は投稿本文のハッシュ
+  が常に同じになるため、専用の項目は足さず、空のハッシュと
+  same_result_streak の組み合わせで数える）
+- job_error_streak: 実行の失敗が続くジョブ（第2段。失敗の
+  連続が 3 回以上。時刻条件は使わず回数だけ。失敗そのものは
+  従来どおりその場で知らせる決まりで、こちらは束ねて繰り返し
+  のパターンとして見せる追加分）
 
 加えて「印ではない提示」として、止めたままの見張り・ジョブの
 一覧と、有効な見張り・ジョブの総数や届け方の分布などの集計を、
@@ -69,7 +79,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .feed import KIND_PROACTIVE, append_feed_entry
-from .jobs import Job, JobBoard, schedule_description
+from .jobs import EMPTY_RESULT_HASH, Job, JobBoard, schedule_description
 from .notification_triage import QueueEvent, pending_events
 from .watches import DELIVERY_LABELS, KIND_LABELS, Watch, WatchBoard
 
@@ -89,6 +99,9 @@ MARK_WATCH_NO_CHANGE = "watch_no_change"
 MARK_WATCH_DUPLICATE_TARGET = "watch_duplicate_target"
 MARK_JOB_TIME_CLASH = "job_time_clash"
 MARK_QUEUE_STALE = "queue_stale"
+MARK_JOB_SAME_RESULT = "job_same_result"
+MARK_JOB_EMPTY_RESULT = "job_empty_result"
+MARK_JOB_ERROR_STREAK = "job_error_streak"
 
 # 印1（失敗続き）: 連続回数の下限と、連続が始まってからの時間
 ERROR_STREAK_MIN_COUNT = 3
@@ -100,6 +113,15 @@ NO_CHANGE_STAGE_DAYS = 30
 NO_CHANGE_MAX_STAGE = 3
 # 印5（未配信の滞留）: 最古の出来事からの日数の下限
 QUEUE_STALE_MIN_DAYS = 3
+# 印6（同じ結果）: 同じ成功結果が続いている回数の下限
+# （streak 3 = 同じ結果が 4 回以上）
+SAME_RESULT_MIN_STREAK = 3
+# 印7（空の結果）: 空が続いている回数の下限（streak 1 = 空が
+# 2 回以上。streak は「前回と同じ結果が続いた回数」なので、
+# 回数そのものは streak + 1）
+EMPTY_RESULT_MIN_STREAK = 1
+# 印8（失敗続き）: 失敗の連続回数の下限（時刻条件は使わない）
+JOB_ERROR_STREAK_MIN_COUNT = 3
 
 
 def audit_enabled() -> bool:
@@ -387,6 +409,114 @@ def _detect_queue_stale(pending: list[QueueEvent],
     )]
 
 
+def _detect_job_same_result(jobs: list[Job]) -> list[FleetMark]:
+    """印6: いつも同じ結果のジョブ。
+
+    同じ結果であること自体は異常ではなく、印は「止めるべき
+    もの」ではなく「届け方を見直す候補」として出す。空の結果
+    の連続は印7の担当なので、ここでは対象にしない。
+    """
+    marks: list[FleetMark] = []
+    for job in jobs:
+        if not job.enabled:
+            continue
+        if job.same_result_streak < SAME_RESULT_MIN_STREAK:
+            continue
+        if (not job.last_result_hash
+                or job.last_result_hash == EMPTY_RESULT_HASH):
+            continue
+        count = job.same_result_streak + 1
+        marks.append(FleetMark(
+            kind=MARK_JOB_SAME_RESULT,
+            source_kind="job",
+            source_id=job.id,
+            source_title=job.title,
+            key=f"{MARK_JOB_SAME_RESULT}:{job.id}",
+            detail={"same_result_streak": job.same_result_streak,
+                    "count": count},
+            fingerprint=str(job.same_result_streak),
+            suggestion="digest_or_revise",
+            text=(f"定期ジョブ「{job.title}」は、同じ結果が "
+                  f"{count} 回続いています。その都度届くのが"
+                  "負担であれば、届け方を朝のまとめに寄せるか、"
+                  "止めるか、指示文を見直すかできます。"),
+            headline=(f"定期ジョブ「{job.title}」の結果が "
+                      f"{count} 回同じです"),
+        ))
+    return marks
+
+
+def _detect_job_empty_result(jobs: list[Job]) -> list[FleetMark]:
+    """印7: いつも空の結果のジョブ。
+
+    空の結果は投稿本文のハッシュが常に同じ（EMPTY_RESULT_HASH）
+    になるため、「空が続いている回数」は same_result_streak
+    そのもので数えられる（専用の材料は足していない）。
+    """
+    marks: list[FleetMark] = []
+    for job in jobs:
+        if not job.enabled:
+            continue
+        if job.last_result_hash != EMPTY_RESULT_HASH:
+            continue
+        if job.same_result_streak < EMPTY_RESULT_MIN_STREAK:
+            continue
+        count = job.same_result_streak + 1
+        marks.append(FleetMark(
+            kind=MARK_JOB_EMPTY_RESULT,
+            source_kind="job",
+            source_id=job.id,
+            source_title=job.title,
+            key=f"{MARK_JOB_EMPTY_RESULT}:{job.id}",
+            detail={"empty_streak": job.same_result_streak,
+                    "count": count},
+            fingerprint=str(job.same_result_streak),
+            suggestion="revise_prompt_or_stop",
+            text=(f"定期ジョブ「{job.title}」は、結果が空のまま "
+                  f"{count} 回続いています（見出しだけで届いて"
+                  "います）。実行が何も返していない可能性が"
+                  "あります。指示文を見直すか、止めるか、"
+                  "消すかできます。"),
+            headline=(f"定期ジョブ「{job.title}」の結果が "
+                      f"{count} 回空です"),
+        ))
+    return marks
+
+
+def _detect_job_error_streak(jobs: list[Job]) -> list[FleetMark]:
+    """印8: 実行の失敗が続くジョブ。
+
+    失敗はその都度その場で知らせる決まり（強制規則）がある
+    ため、こちらの役割は流れて行く失敗を束ねて、繰り返しの
+    パターンとして見せることにある。ジョブの予定は日次・
+    週次を含むため、時刻条件は使わず回数だけで判定する。
+    """
+    marks: list[FleetMark] = []
+    for job in jobs:
+        if not job.enabled or job.error_count < JOB_ERROR_STREAK_MIN_COUNT:
+            continue
+        first = _parse_time(job.first_error_at)
+        since = f"（{_date_text(first)}から）" if first is not None else ""
+        marks.append(FleetMark(
+            kind=MARK_JOB_ERROR_STREAK,
+            source_kind="job",
+            source_id=job.id,
+            source_title=job.title,
+            key=f"{MARK_JOB_ERROR_STREAK}:{job.id}",
+            detail={"error_count": job.error_count,
+                    "first_error_at": job.first_error_at},
+            fingerprint=str(job.error_count),
+            suggestion="inspect_or_stop",
+            text=(f"定期ジョブ「{job.title}」は、実行に "
+                  f"{job.error_count} 回続けて失敗しています"
+                  f"{since}。指示文や対象を確認するか、"
+                  "止めるか、消すかできます。"),
+            headline=(f"定期ジョブ「{job.title}」の実行が"
+                      "続けて失敗しています"),
+        ))
+    return marks
+
+
 def detect_marks(watches: list[Watch], jobs: list[Job],
                  pending: list[QueueEvent],
                  now: datetime) -> list[FleetMark]:
@@ -397,6 +527,9 @@ def detect_marks(watches: list[Watch], jobs: list[Job],
     marks += _detect_watch_duplicate_target(watches)
     marks += _detect_job_time_clash(jobs)
     marks += _detect_queue_stale(pending, now)
+    marks += _detect_job_same_result(jobs)
+    marks += _detect_job_empty_result(jobs)
+    marks += _detect_job_error_streak(jobs)
     return marks
 
 

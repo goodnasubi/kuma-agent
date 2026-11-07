@@ -31,6 +31,25 @@ jobs.json に保持する。能動発信の巡回（proactive.py）が期限の�
 - last_run_at: 前回実行した時刻（ISO 8601）。未実行なら空文字列
 - created_at: 作成時刻（ISO 8601）。未実行ジョブの期限判定の
   基準にも使う
+- last_result_hash: 前回の成功結果の本文のハッシュ。結果の
+  同一性の判定用で、定期実行の棚卸し（fleet_audit.py）の材料
+  （第2段、0.90.0 で追加）。ハッシュは投稿本文の形（前後の
+  空白を除いた本文）で取るため、空の結果（空白だけの結果も
+  含む）は常に同じ値（EMPTY_RESULT_HASH）になり、「空の
+  結果が続いている」ことも下記の連続回数と組み合わせて
+  数えられる。失敗のときは、同じ結果の連続が途切れるため
+  空へ戻す（連続を数え直す）
+- same_result_streak: 前回と同じ成功結果が続いている回数。
+  結果が変わるか失敗したら 0 に戻す（失敗したときは
+  last_result_hash も空へ戻し、連続を数え直す）
+- error_count / first_error_at / last_error: 見張り
+  （watches.py）と同じ意味の、失敗の連続の記録。成功したら
+  0 / 空に戻る。失敗そのものは従来どおりその場で知らせる
+  決まりであり、この記録は棚卸しが「繰り返しのパターン」
+  として束ねて見せるための材料である
+  上記の材料はすべて、項目が無い旧形式のファイルでは初期値
+  として読み、壊れた値でもジョブ自体は落とさない（届け方の
+  読み込みと同じ考え方。見張りの失敗の記録と同じ作法）
 
 期限判定（is_due）:
 - daily / weekly は、基準時刻（last_run_at、未実行なら created_at）
@@ -46,6 +65,7 @@ jobs.json に保持する。能動発信の巡回（proactive.py）が期限の�
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -99,6 +119,21 @@ def _as_local_naive(moment: datetime) -> datetime:
 
 def _format_hhmm(hour: int, minute: int) -> str:
     return f"{hour:02d}:{minute:02d}"
+
+
+def result_hash(result: str) -> str:
+    """成功結果の同一性を判定するためのハッシュ。
+
+    投稿本文の形（前後の空白を除いた本文）で取る。結果そのもの
+    は保存しない（棚卸しの材料は、同じかどうかだけが分かれば
+    足りるため）。
+    """
+    return hashlib.sha256(
+        result.strip().encode("utf-8")).hexdigest()
+
+
+# 空の成功結果（空白だけの結果も含む）のハッシュ
+EMPTY_RESULT_HASH = result_hash("")
 
 
 def _as_int(raw: object) -> int | None:
@@ -273,6 +308,12 @@ class Job:
     enabled: bool = True
     last_run_at: str = ""
     created_at: str = field(default_factory=_now)
+    # 棚卸しの材料（0.90.0）。モジュールの冒頭の項目説明を参照
+    last_result_hash: str = ""
+    same_result_streak: int = 0
+    error_count: int = 0
+    first_error_at: str = ""
+    last_error: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -284,6 +325,11 @@ class Job:
             "enabled": self.enabled,
             "last_run_at": self.last_run_at,
             "created_at": self.created_at,
+            "last_result_hash": self.last_result_hash,
+            "same_result_streak": self.same_result_streak,
+            "error_count": self.error_count,
+            "first_error_at": self.first_error_at,
+            "last_error": self.last_error,
         }
 
     @classmethod
@@ -302,6 +348,8 @@ class Job:
         except ValueError:
             return None
         enabled = record.get("enabled")
+        same_streak = _as_int(record.get("same_result_streak"))
+        error_count = _as_int(record.get("error_count"))
         return cls(
             id=job_id,
             title=title,
@@ -313,6 +361,16 @@ class Job:
             enabled=enabled if isinstance(enabled, bool) else True,
             last_run_at=str(record.get("last_run_at") or ""),
             created_at=str(record.get("created_at") or _now()),
+            # 棚卸しの材料が無い・壊れていてもジョブ自体は
+            # 落とさず初期値として読む（見張りの失敗の記録と
+            # 同じ作法）
+            last_result_hash=str(record.get("last_result_hash") or ""),
+            same_result_streak=(same_streak if same_streak is not None
+                                and same_streak > 0 else 0),
+            error_count=(error_count if error_count is not None
+                         and error_count > 0 else 0),
+            first_error_at=str(record.get("first_error_at") or ""),
+            last_error=str(record.get("last_error") or ""),
         )
 
 
@@ -458,11 +516,27 @@ class JobBoard:
         return job
 
     def mark_run(self, job_id: str,
-                 when: datetime | None = None) -> Job | None:
+                 when: datetime | None = None,
+                 result: str | None = None,
+                 error: str | None = None) -> Job | None:
         """前回実行時刻（last_run_at）を記録して保存する。無ければ None。
 
         成功・失敗にかかわらず実行したこと自体を記録し、同じ予定で
         二重に実行しないために使う。
+
+        result（成功結果の本文）か error（失敗の理由）のどちらか
+        が渡された場合は、棚卸しの材料も合わせて更新する（呼び
+        出し側は成否でどちらか一方だけを渡す）:
+
+        - 成功: 結果のハッシュを比べ、前回と同じなら
+          same_result_streak を増やし、変わったら 0 に戻して
+          ハッシュを差し替える。失敗の連続の記録は 0 / 空に戻す
+        - 失敗: error_count を増やす（連続の始まりなら
+          first_error_at に実行時刻を残す）。同じ結果の連続は
+          途切れるため、same_result_streak を 0 に戻し、
+          last_result_hash も空へ戻して連続を数え直す
+
+        どちらも渡されなければ、時刻だけを記録する（従来どおり）。
         """
         self._jobs = self._load()
         job = self.get(job_id)
@@ -470,5 +544,24 @@ class JobBoard:
             return None
         moment = when or datetime.now()
         job.last_run_at = moment.isoformat(timespec="seconds")
+        if error is not None:
+            detail = error.removeprefix("error:").strip()
+            if not job.first_error_at:
+                job.first_error_at = job.last_run_at
+            job.error_count = max(job.error_count, 0) + 1
+            job.last_error = detail[:200]
+            job.same_result_streak = 0
+            job.last_result_hash = ""
+        elif result is not None:
+            digest = result_hash(result)
+            if job.last_result_hash and digest == job.last_result_hash:
+                job.same_result_streak = (
+                    max(job.same_result_streak, 0) + 1)
+            else:
+                job.same_result_streak = 0
+                job.last_result_hash = digest
+            job.error_count = 0
+            job.first_error_at = ""
+            job.last_error = ""
         self._save()
         return job
