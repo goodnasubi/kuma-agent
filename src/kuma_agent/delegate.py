@@ -16,6 +16,12 @@
 能動発信の巡回など、失敗時の受け皿が呼び出し側にある経路では、
 retry=False で立て直しを抑えられる。
 
+委任には型（role）があり、子が使える道具集合の上限を決める:
+調べ役（research、読み取り専用の道具だけ）／計画役（plan、道具
+ゼロで計画文だけを返す）／通常役（general、道具一式）。省略時
+は通常役で従来と完全に同じ挙動。型の上限が実効を持つのは API
+系の頭脳に限る（CLI 系では委任の道具自体が呼ばれない）。
+
 Session への import は循環参照を避けるため関数内（遅延）で行う。
 """
 from __future__ import annotations
@@ -37,6 +43,28 @@ DELEGATE_NOTICE = (
     "あなたは別のエージェントから仕事を委ねられた担当エージェントです。"
     "渡された仕事を完了し、最後の応答で結果を簡潔に報告してください"
     "（その応答がそのまま依頼元への報告になります）。"
+)
+
+# 委任の型（権限の上限）。型は「子が使える道具集合の上限」を
+# 決めるもので、承認の仕組みを置き換えない。型から道具の上限
+# 集合への対応づけは Session 側（道具の分類表 READ_ONLY_TOOLS
+# は tools.py が正）が行う
+# - research（調べ役）: 読み取り専用の道具だけ
+# - plan（計画役）: 道具ゼロ。計画文だけを返す
+# - general（通常役）: 現行どおり道具一式（既定）
+DELEGATE_ROLES = frozenset({"research", "plan", "general"})
+DEFAULT_DELEGATE_ROLE = "general"
+
+# 調べ役の子のシステムプロンプトに足す指示
+RESEARCH_NOTICE = (
+    "使えるのは読み取り専用の道具だけです。変更や実行はできません。"
+    "調べた結果を報告してください。"
+)
+
+# 計画役の子のシステムプロンプトに足す指示
+PLAN_NOTICE = (
+    "あなたは計画だけを担当します。道具は使えません。実行はせず、"
+    "目的・前提・進め方（手順）・注意点を含む計画を文章で返してください。"
 )
 
 # 子セッション ID の連番（同一プロセス・同一秒の委任を一意にする）
@@ -96,7 +124,8 @@ def _child_model(parent: Session):
 
 
 def run_delegated_task(parent: Session, task: str,
-                       retry: bool = True) -> str:
+                       retry: bool = True,
+                       role: str = DEFAULT_DELEGATE_ROLE) -> str:
     """仕事を子エージェントへ委ね、子の最終応答を返す。
 
     1 回目の委任が失敗（error の結果）したら、失敗の理由を添えた
@@ -107,15 +136,28 @@ def run_delegated_task(parent: Session, task: str,
     があるため）。retry=False では立て直し自体をしない（朝の
     まとめ・定期ジョブ・見張りなど、失敗時の受け皿が呼び出し
     側にある能動発信の巡回から使う）。
+
+    role は委任の型（research=調べ役／plan=計画役／general=
+    通常役）で、子の道具集合の上限を決める。省略時は通常役
+    （従来どおり）。型の値が不正な場合は、通常役へ静かに倒さず
+    error の結果を返す（広い権限へ黙って倒れることを避ける）。
+    委ね直しは同じ型で行い、失敗を理由に自動で広い型へは
+    切り替えない。
     """
-    result, timed_out = _run_delegated_once(parent, task)
+    if role not in DELEGATE_ROLES:
+        return ("error: 型の指定が不正です"
+                f"（role={role}）。"
+                "使える型は research（調べ役）・plan（計画役）・"
+                "general（通常役）です")
+    result, timed_out = _run_delegated_once(parent, task, role)
     if not retry or timed_out or not result.startswith("error:"):
         return result
     retry_task = (
         f"前回の試みはこう失敗しました: {result}\n"
         "別の進め方で、同じ目的を果たしてください。\n\n"
         f"元の依頼:\n{task}")
-    second, _second_timed_out = _run_delegated_once(parent, retry_task)
+    second, _second_timed_out = _run_delegated_once(parent, retry_task,
+                                                    role)
     if second.startswith("error:"):
         return ("error: 委ね直しましたが、再試行も失敗しました。"
                 f"再試行の結果: {second[len('error:'):].strip()}")
@@ -123,7 +165,9 @@ def run_delegated_task(parent: Session, task: str,
             "委ね直しました）\n" + second)
 
 
-def _run_delegated_once(parent: Session, task: str) -> tuple[str, bool]:
+def _run_delegated_once(parent: Session, task: str,
+                        role: str = DEFAULT_DELEGATE_ROLE,
+                        ) -> tuple[str, bool]:
     """仕事を子エージェントへ 1 回だけ委ね、(結果, 時間切れか) を返す。
 
     承認は親の承認者を子にも配線し、親と同じ仕組みが子の道具でも
@@ -163,6 +207,7 @@ def _run_delegated_once(parent: Session, task: str) -> tuple[str, bool]:
                 mcp_manager=parent.mcp_manager,
                 approver=parent.approver,
                 delegate_child=True,
+                delegate_role=role,
                 cancel_event=cancel_event)
             outcome["result"] = child.say(task)
         except Exception as e:  # 子の失敗で親の会話を落とさない

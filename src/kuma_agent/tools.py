@@ -120,6 +120,37 @@ def activity_label(name: str, args: dict | None = None) -> str:
 # にする。ファイル読み書き・用事・記憶などの通常の道具は対象外
 APPROVAL_TARGET_NAMES = frozenset({"run_shell"})
 
+# 読み取り専用の道具の一覧（委任の「調べ役」の子が持てる道具の
+# 上限）。分類の正はここ1か所だけにする。分類は道具の名前では
+# なく実体の振る舞いで決める（例: set_work_steps は自分の作業
+# メモだが書き込みなので入れない。tidy_memory は長期記憶の全文
+# を書き直すので入れない）。この表に名前の無い道具（MCP 道具を
+# 含む）は、調べ役・計画役の子には出ない（安全側に倒す。新しい
+# 道具を足すときは、読み取り専用であることを確認してこの表へ
+# 足さない限り、その道具は通常役にだけ出る）
+READ_ONLY_TOOLS = frozenset({
+    "now",
+    "read_file",
+    "web_search",
+    "fetch_page",
+    "list_tasks",
+    "list_calendar_events",
+    "search_memory",
+    "search_conversations",
+    "read_skill",
+    "list_jobs",
+    "list_watches",
+    "list_spaces",
+    "list_notify_prefs",
+})
+
+# 委任の型 → 活動の記録などに残す日本語の役割名
+DELEGATE_ROLE_LABELS: dict[str, str] = {
+    "research": "調べ役",
+    "plan": "計画役",
+    "general": "通常役",
+}
+
 # 承認が下りなかったときに道具の結果として返す文言。例外ではなく
 # 結果文字列にすることで、モデルが受けて会話を続けられる
 APPROVAL_DENIED_RESULT = "error: 承認されませんでした"
@@ -149,6 +180,16 @@ def summarize_tool_args(name: str, args: dict, limit: int = 200) -> str:
     """
     if name == "run_shell":
         text = str(args.get("command", ""))
+    elif name == "delegate":
+        # 委任は、どの型で委ねたかを親の記録だけで追えるように、
+        # 型の役割名と課題の冒頭を残す（list_calendar_events の
+        # 専用要約と同じ流儀）。型の指定が無ければ通常役
+        role = str(args.get("role") or "general")
+        label = DELEGATE_ROLE_LABELS.get(role, role)
+        task = " ".join(str(args.get("task") or "").split())
+        text = f"型: {label}"
+        if task:
+            text += f"／課題: {task}"
     elif name == "list_calendar_events":
         # Google カレンダーの道具は、期間とカレンダーの種別だけを
         # 残す（実カレンダー ID はメールアドレスを含み得るため、
@@ -194,7 +235,8 @@ class ToolBox:
                  work_steps: WorkSteps | None = None,
                  watch_board: WatchBoard | None = None,
                  space_store: SpaceStore | None = None,
-                 shell_enabled: bool = True) -> None:
+                 shell_enabled: bool = True,
+                 allowed_tools: frozenset[str] | None = None) -> None:
         self.work_dir = work_dir.resolve()
         self.task_board = task_board
         # 作業の手順（エージェント自身の作業メモ）。用事系と違い、
@@ -231,6 +273,11 @@ class ToolBox:
         # 変数 KUMA_SHELL_ENABLED=0 で無効化した場合は道具自体を
         # 出さない（Session が Config から伝える）。既定は有効
         self.shell_enabled = shell_enabled
+        # 使える道具の上限（委任の型による絞り込み）。None は上限
+        # なし＝従来どおり。集合が与えられた場合は、その集合に
+        # 無い道具を register の段階で登録しない（委任の子にだけ
+        # Session が渡す。通常のセッションでは渡らない）
+        self.allowed_tools = allowed_tools
         self._tools: dict[str, Tool] = {}
         # 承認フック: 承認対象の道具を実行する前に呼ばれる
         # （道具名, 引数）→ 真偽 の callable。None の間は承認を
@@ -1054,6 +1101,14 @@ class ToolBox:
         return f"保存しました: 手順書「{name}」"
 
     def register(self, tool: Tool) -> None:
+        # 道具の登録はすべてこの1つの口を通るため、上限の強制は
+        # ここに寄せる。上限の外の道具は登録しない（モデルに
+        # 見せず、呼ばれても call が unknown tool を返す）。組み
+        # 込み・モード別・MCP・カレンダー・履歴検索など、後から
+        # 追加される道具もこの口を通るため漏れない
+        if (self.allowed_tools is not None
+                and tool.name not in self.allowed_tools):
+            return
         self._tools[tool.name] = tool
 
     def schemas(self) -> list[dict]:

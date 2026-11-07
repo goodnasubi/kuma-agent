@@ -41,7 +41,12 @@ from .activity import (
     record_tool_call,
 )
 from .config import Config, normalize_mode
-from .delegate import DELEGATE_NOTICE, run_delegated_task
+from .delegate import (
+    DELEGATE_NOTICE,
+    PLAN_NOTICE,
+    RESEARCH_NOTICE,
+    run_delegated_task,
+)
 from .goals import STATUS_ACTIVE as GOAL_STATUS_ACTIVE
 from .goals import GoalBoard, progress_of
 from .google_calendar import (
@@ -68,7 +73,13 @@ from .settings import approvals_enabled_for
 from .skills import load_skills
 from .spaces import SpaceStore
 from .tasks import TaskBoard, format_remind_at
-from .tools import Tool, ToolBox, activity_label, summarize_tool_args
+from .tools import (
+    READ_ONLY_TOOLS,
+    Tool,
+    ToolBox,
+    activity_label,
+    summarize_tool_args,
+)
 from .usage import record_usage
 from .watches import WatchBoard
 from .worksteps import WorkSteps, format_steps
@@ -240,6 +251,7 @@ class Session:
                  mcp_manager: McpManager | None = None,
                  approver: Callable[[str, dict], bool] | None = None,
                  delegate_child: bool = False,
+                 delegate_role: str = "general",
                  cancel_event: threading.Event | None = None,
                  responder: ChoiceResponder | None = None) -> None:
         self.cfg = cfg
@@ -268,6 +280,13 @@ class Session:
         # delegate- で始まる自分のセッション ID をそのまま使う。
         # また子には delegate 道具自体を登録しない（委任は1段まで）
         self.delegate_child = delegate_child
+        # 委任の型（delegate_child のときだけ意味を持つ）。
+        # research=調べ役（読み取り専用の道具だけ）／plan=計画役
+        # （道具ゼロ）／general=通常役（道具一式）。型は道具集合
+        # の上限を決めるだけで、承認の仕組みは置き換えない。
+        # delegate.py が値の検証をしてから渡すため、ここでは
+        # そのまま上限集合への対応づけに使う
+        self.delegate_role = delegate_role
         # 協調キャンセルの印。委任の子にだけ親（delegate.py）が
         # 制限時間切れの打ち切り用に渡す。say の道具ループと
         # モデル呼び出しの前、ToolBox の呼び出し冒頭で確認し、
@@ -311,6 +330,20 @@ class Session:
         # 進行中の用事もプロンプトへ注入しない。長期記憶の検索道具も
         # 用事系と同じ条件（相棒モードのときだけ）で出す。
         board = None if self.mode == "wall" else self.task_board
+        # 委任の型による道具の上限。型は「上限」であり下限では
+        # ないため、モードによる出し分け（board 等）の結果を
+        # さらに狭めるだけに働く。親セッション（委任の子でない）
+        # と通常役は上限なし（None＝従来どおり）。調べ役は分類表
+        # （tools.READ_ONLY_TOOLS）にある道具だけ、計画役は空
+        # （道具ゼロ）。上限の強制は ToolBox.register の1点に
+        # 寄せるため、この後に登録されるカレンダー・MCP・履歴
+        # 検索の道具にも同じ上限が効く
+        allowed_tools: frozenset[str] | None = None
+        if delegate_child:
+            if delegate_role == "research":
+                allowed_tools = READ_ONLY_TOOLS
+            elif delegate_role == "plan":
+                allowed_tools = frozenset()
         # 手順書（スキル）の置き場はデータ置き場ルート（全テナント
         # 共通）なので cfg.data_dir を渡す。道具を出す条件は用事系と
         # 同じ（相棒モードのときだけ）
@@ -324,7 +357,8 @@ class Session:
             work_steps=self.work_steps,
             watch_board=self.watch_board,
             space_store=self.space_store,
-            shell_enabled=cfg.shell_enabled)
+            shell_enabled=cfg.shell_enabled,
+            allowed_tools=allowed_tools)
         # 道具の連鎖の途中でも早く止まれるよう、ToolBox にも同じ
         # 印を差し込む（call の冒頭で確認される）
         self.tools.cancel_event = self.cancel_event
@@ -426,6 +460,11 @@ class Session:
             # 子には「委ねられた仕事の担当である」ことを伝え、
             # 最後の応答が依頼元への報告になるようにする
             self.system_prompt += f"\n\n# 委任された作業\n{DELEGATE_NOTICE}"
+            # 型に合わせた指示を足す（通常役は従来のまま変えない）
+            if delegate_role == "research":
+                self.system_prompt += f"\n{RESEARCH_NOTICE}"
+            elif delegate_role == "plan":
+                self.system_prompt += f"\n{PLAN_NOTICE}"
 
     # -------------------------------------------------- 選択肢での質問
 
@@ -638,25 +677,34 @@ class Session:
 
         実体は delegate.run_delegated_task で、新しい Session を
         子として作って仕事を渡し、子の最終応答を結果として返す。
-        子には道具一式（ファイル・用事・記憶・MCP・手順書など親と
-        同じ構成）を使わせるが、delegate 自体は登録しない
+        子に渡す道具の範囲は role（型）で選べる（省略時は通常役
+        ＝道具一式で従来どおり）。delegate 自体は子に登録しない
         （__init__ で delegate_child の場合はここを通らない）。
         """
         self.tools.register(Tool(
             "delegate",
             "別のエージェントに仕事を委ねる。独立して進められる仕事を、"
             "前提や期待する成果物まで含めて自己完結した文章で task に"
-            "書いて渡すこと。委ねた先のエージェントは同じ道具（ファイル・"
-            "用事・記憶・手順書など）を使え、作業が終わると最終報告が"
-            "この道具の結果として返る。",
+            "書いて渡すこと。委ねた先のエージェントは作業が終わると、"
+            "最終報告がこの道具の結果として返る。role で委ねる相手の"
+            "型を選ぶこと。調べるだけで完結する仕事（検索・読み取り・"
+            "確認）は research（調べ役: 読み取り専用の道具だけを使え、"
+            "変更や実行はできない）。進め方の検討だけが欲しいときは "
+            "plan（計画役: 道具を使わず、計画だけが返る。返ってきた"
+            "計画を実行するかどうかは自分で判断すること）。変更や"
+            "実行を伴う仕事は general（通常役: ファイル・用事・記憶・"
+            "手順書など親と同じ道具一式を使える）。",
             {"type": "object", "properties": {
                 "task": {"type": "string",
-                         "description": "委ねる仕事の内容（自己完結した文章）"}},
+                         "description": "委ねる仕事の内容（自己完結した文章）"},
+                "role": {"type": "string",
+                         "enum": ["research", "plan", "general"],
+                         "description": "委ねる相手の型（省略時は general＝通常役）"}},
              "required": ["task"]},
             self._run_delegate))
 
-    def _run_delegate(self, task: str) -> str:
-        return run_delegated_task(self, task)
+    def _run_delegate(self, task: str, role: str = "general") -> str:
+        return run_delegated_task(self, task, role=role)
 
     def _register_history_search_tool(self) -> None:
         """会話記録の横断検索（search_conversations）の道具を登録する。

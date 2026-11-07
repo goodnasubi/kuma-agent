@@ -3288,7 +3288,7 @@ def render_page(provider: str, avatar_svg: str | None = None,
 _CLI_PROVIDER_NOTE_HTML = (
     '\n    <div class="provider">この頭脳では、道具の実行は外部の'
     '道具の側で行われます。クマ側の承認確認や道具の制限は効きま'
-    'せん</div>')
+    'せん（委任の型による道具の上限も効きません）</div>')
 
 
 # ログイン有効時にヘッダーへ差し込むログアウトボタン。押すと
@@ -5583,7 +5583,8 @@ def cli_provider_note(cfg: Config) -> str | None:
     return (
         f"注意: 頭脳（{cfg.provider}）では、道具の実行は外部の道具"
         "（CLI）の側で行われます。クマ側の承認確認や道具の制限は"
-        "効かないため、その前提で使ってください")
+        "効かないため、その前提で使ってください"
+        "（委任の型による道具の上限も効きません）")
 
 
 def build_server(session: Session, host: str = "127.0.0.1",
