@@ -56,11 +56,16 @@ class CliAgentClient:
     PROVIDER: str = ""
 
     def __init__(self, model: str | None = None, work_dir: Path | None = None,
-                 command: str | None = None, timeout: float = 1800.0) -> None:
+                 command: str | None = None, timeout: float = 1800.0,
+                 extra_args: list[str] | None = None) -> None:
         self.model = model
         self.work_dir = work_dir or Path.cwd()
         self.command = command or self.COMMAND
         self.timeout = timeout
+        # 運用者が環境変数 KUMA_CLI_EXTRA_ARGS で渡す追加の引数
+        # （全 CLI 共通）。権限モード等の指定は CLI のバージョン
+        # 依存のため、kuma-agent は中身の意味を解釈しない
+        self.extra_args = list(extra_args or [])
 
     def build_args(self, prompt: str) -> list[str]:
         raise NotImplementedError
@@ -118,6 +123,7 @@ class ClaudeCodeClient(CliAgentClient):
         model = self.model or self.DEFAULT_MODEL
         if model:
             args += ["--model", model]
+        args += self.extra_args
         return args
 
 
@@ -133,6 +139,7 @@ class GeminiCliClient(CliAgentClient):
         model = self.model or self.DEFAULT_MODEL
         if model:
             args += ["--model", model]
+        args += self.extra_args
         return args
 
 
@@ -141,22 +148,35 @@ class CodexClient(CliAgentClient):
 
     exec は既定で読み取り専用サンドボックス＋承認なしのため、
     作業できるよう workspace-write と承認ポリシー never を明示する
-    （--full-auto は CLI 0.151 で廃止された）。
+    （--full-auto は CLI 0.151 で廃止された）。承認ポリシーを
+    never にするのは、ヘッドレス実行では承認する相手がおらず、
+    承認待ちにしても止まるだけだからで、権限を絞る手段は
+    サンドボックス側に寄せている。サンドボックスは環境変数
+    KUMA_CODEX_SANDBOX（既定 workspace-write、read-only を
+    選択可）で指定できる。
     """
 
     COMMAND = "codex"
     PROVIDER = "codex"
     DEFAULT_MODEL = None  # CLI 側の推奨既定（GPT-6 系）に任せる
 
+    def __init__(self, *args, sandbox: str = "workspace-write",
+                 **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.sandbox = sandbox or "workspace-write"
+
     def build_args(self, prompt: str) -> list[str]:
         args = [
             self.command, "exec",
-            "--sandbox", "workspace-write",
+            "--sandbox", self.sandbox,
             "-c", 'approval_policy="never"',
             "--skip-git-repo-check",
         ]
         if self.model:
             args += ["--model", self.model]
+        # 追加の引数はプロンプトより前（引数列の末尾）へ足し、
+        # プロンプトが最後の引数である形を保つ
+        args += self.extra_args
         args.append(prompt)
         return args
 
@@ -174,4 +194,15 @@ def create_cli_client(provider: str, model: str | None = None, **kwargs) -> CliA
     cls = _CLI_CLIENTS.get(provider)
     if cls is None:
         raise ValueError(f"未知の CLI プロバイダ: {provider}")
+    # サンドボックス指定は Codex 専用。他の CLI へは渡さない
+    sandbox = kwargs.pop("sandbox", None)
+    if cls is CodexClient:
+        return cls(model=model, sandbox=sandbox or "workspace-write",
+                   **kwargs)
     return cls(model=model, **kwargs)
+
+
+def cli_command_name(provider: str) -> str | None:
+    """プロバイダに対応する CLI コマンド名（CLI 系でなければ None）。"""
+    cls = _CLI_CLIENTS.get(provider)
+    return cls.COMMAND if cls is not None else None

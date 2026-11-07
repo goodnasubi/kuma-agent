@@ -194,7 +194,7 @@ def _run_cli_chat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
         raise EOFError
 
     monkeypatch.setattr(cli, "Session", _FakeSession)
-    monkeypatch.setattr(cli, "create_client", lambda *args: object())
+    monkeypatch.setattr(cli, "create_client", lambda *args, **kwargs: object())
     monkeypatch.setenv("KUMA_LLM_PROVIDER", "claude-code")  # API キー不要の系統
     monkeypatch.setenv("KUMA_DATA_DIR", str(tmp_path))
     monkeypatch.setattr("builtins.input", _eof)

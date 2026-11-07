@@ -225,6 +225,30 @@ class Config:
     # 有効＝従来動作
     shell_enabled: bool = field(
         default_factory=lambda: os.environ.get("KUMA_SHELL_ENABLED", "") != "0")
+    # CLI 系の頭脳の設定固定（公開前チェックの指摘1 (b)）: Codex の
+    # サンドボックス段階。既定は従来どおり workspace-write で、
+    # 絞りたいときは read-only を指定する。空なら既定に倒す
+    codex_sandbox: str = field(
+        default_factory=lambda: os.environ.get(
+            "KUMA_CODEX_SANDBOX", "").strip() or "workspace-write")
+    # CLI 系の頭脳へ渡す追加の引数（空白区切り、全 CLI 共通）。
+    # 権限モード等の指定は導入先の CLI のバージョンに依存する
+    # ため、kuma-agent が意味を知っている引数は勝手に付けず、
+    # 運用者が CLI のヘルプで確認して入れる逃げ道として用意する
+    cli_extra_args: str = field(
+        default_factory=lambda: os.environ.get("KUMA_CLI_EXTRA_ARGS", ""))
+
+    def cli_client_kwargs(self) -> dict:
+        """CLI 系の頭脳を作るときの追加引数（API 系では空）。
+
+        Codex のサンドボックスと全 CLI 共通の追加引数を、クライ
+        アント生成（llm.create_client）へそのまま渡せる形で返す。
+        API 系の頭脳では余分な引数を渡さないよう空にする。
+        """
+        if not self.is_cli_provider:
+            return {}
+        return {"sandbox": self.codex_sandbox,
+                "extra_args": self.cli_extra_args.split()}
 
     @property
     def tenant_data_dir(self) -> Path:

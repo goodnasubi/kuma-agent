@@ -73,3 +73,61 @@ def test_factory_codex():
     from kuma_agent.agent_cli import CodexClient
 
     assert isinstance(create_client("codex"), CodexClient)
+
+
+# ------------------------------------------ 設定固定（0.69.0、指摘1 (b)）
+
+def test_codex_sandbox_default_is_workspace_write():
+    from kuma_agent.agent_cli import CodexClient
+
+    client = CodexClient(command="codex", work_dir=Path("."))
+    args = client.build_args("x")
+    assert args[args.index("--sandbox") + 1] == "workspace-write"
+    # 承認ポリシーは従来どおり never で固定
+    assert 'approval_policy="never"' in args
+
+
+def test_codex_sandbox_read_only():
+    from kuma_agent.agent_cli import CodexClient
+
+    client = CodexClient(command="codex", work_dir=Path("."),
+                         sandbox="read-only")
+    args = client.build_args("x")
+    assert args[args.index("--sandbox") + 1] == "read-only"
+
+
+def test_codex_sandbox_via_factory():
+    client = create_client("codex", sandbox="read-only")
+    args = client.build_args("x")
+    assert args[args.index("--sandbox") + 1] == "read-only"
+
+
+def test_sandbox_kwarg_ignored_for_other_cli():
+    # sandbox は Codex 専用。他の CLI へ渡しても落ちない
+    client = create_client("claude-code", sandbox="read-only")
+    assert isinstance(client, ClaudeCodeClient)
+    assert "read-only" not in client.build_args("x")
+
+
+def test_extra_args_appended_for_all_cli():
+    cc = ClaudeCodeClient(command="claude", work_dir=Path("."),
+                          extra_args=["--foo", "bar"])
+    assert cc.build_args("x")[-2:] == ["--foo", "bar"]
+
+    gem = GeminiCliClient(command="gemini", work_dir=Path("."),
+                          extra_args=["--baz"])
+    assert gem.build_args("x")[-1] == "--baz"
+
+    client = create_client("gemini-cli", extra_args=["--qux"])
+    assert client.build_args("x")[-1] == "--qux"
+
+
+def test_codex_extra_args_come_before_prompt():
+    from kuma_agent.agent_cli import CodexClient
+
+    client = CodexClient(command="codex", work_dir=Path("."),
+                         extra_args=["--foo"])
+    args = client.build_args("プロンプト本文")
+    # プロンプトが最後の引数のまま、追加引数はその直前に来る
+    assert args[-1] == "プロンプト本文"
+    assert args[-2] == "--foo"

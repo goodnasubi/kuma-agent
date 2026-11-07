@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, quote, urlsplit
 
+from .agent_cli import CLI_PROVIDERS, cli_command_name
 from .config import Config, mode_label, normalize_mode
 from .export import (
     build_export_zip,
@@ -630,7 +631,7 @@ _PAGE_TEMPLATE = """\
        title="いまの状況を見る">__AVATAR__</div>
   <div>
     <h1>クマ</h1>
-    <div class="provider">provider: __PROVIDER__</div>
+    <div class="provider">provider: __PROVIDER__</div>__CLI_PROVIDER_NOTE__
     <div class="provider" id="modeName"></div>
   </div>
   <div class="sessions">
@@ -3141,6 +3142,9 @@ def render_page(provider: str, avatar_svg: str | None = None,
         .replace("__AVATAR__", avatar_svg if avatar_svg is not None
                  else _AVATAR_IMG_HTML)
         .replace("__PROVIDER__", provider)
+        .replace("__CLI_PROVIDER_NOTE__",
+                 _CLI_PROVIDER_NOTE_HTML if provider in CLI_PROVIDERS
+                 else "")
         .replace("__LOGOUT_BUTTON__",
                  _LOGOUT_BUTTON_HTML if web_auth else "")
         .replace("__HONEY__", HONEY)
@@ -3148,6 +3152,16 @@ def render_page(provider: str, avatar_svg: str | None = None,
         .replace("__CREAM__", CREAM)
         .replace("__LINE__", LINE)
     )
+
+
+# CLI 系の頭脳のときにヘッダーの頭脳表示の下へ差し込む注意書き。
+# CLI 系では道具の実行が外部 CLI の側で行われ、kuma-agent 側の
+# 承認確認や道具の制限が効かないことを、画面でも誤解のないよう
+# 伝える（公開前チェックの指摘1 (a) 明示）。API 系では出さない
+_CLI_PROVIDER_NOTE_HTML = (
+    '\n    <div class="provider">この頭脳では、道具の実行は外部の'
+    '道具の側で行われます。クマ側の承認確認や道具の制限は効きま'
+    'せん</div>')
 
 
 # ログイン有効時にヘッダーへ差し込むログアウトボタン。押すと
@@ -5282,6 +5296,27 @@ def startup_guard_warning(host: str, cfg: Config) -> str | None:
         "設定してから起動し直してください（起動はこのまま続けます）")
 
 
+def cli_provider_note(cfg: Config) -> str | None:
+    """CLI 系の頭脳が実際に使える状態のときの起動時注意（1行）。
+
+    頭脳が CLI 系（claude-code / gemini-cli / codex）で、その
+    コマンドがこのマシンに入っているときだけ返す。CLI 系では
+    道具の実行が外部 CLI の側で行われ、kuma-agent 側の承認確認
+    や道具の制限は効かない。その誤解を防ぐための明示で、挙動は
+    変えない（公開前チェックの指摘1 (a)）。API 系の頭脳、または
+    CLI が入っていない環境（Docker 等）では None。
+    """
+    if not cfg.is_cli_provider:
+        return None
+    command = cli_command_name(cfg.provider)
+    if command is None or shutil.which(command) is None:
+        return None
+    return (
+        f"注意: 頭脳（{cfg.provider}）では、道具の実行は外部の道具"
+        "（CLI）の側で行われます。クマ側の承認確認や道具の制限は"
+        "効かないため、その前提で使ってください")
+
+
 def build_server(session: Session, host: str = "127.0.0.1",
                  port: int = 8765,
                  session_factory: Callable[[str], Session] | None = None,
@@ -5369,6 +5404,9 @@ def serve(session: Session, host: str = "127.0.0.1", port: int = 8765) -> None:
     guard_warning = startup_guard_warning(host, cfg)
     if guard_warning is not None:
         print(guard_warning)
+    cli_note = cli_provider_note(cfg)
+    if cli_note is not None:
+        print(cli_note)
     if cfg.web_password:
         print("Web UI のログインが有効です（パスワードは環境変数 KUMA_WEB_PASSWORD）")
     _start_proactive_loop(server.tenants, cfg)  # type: ignore[attr-defined]

@@ -79,6 +79,15 @@ kuma-agent web           # Web UI を http://127.0.0.1:8765 で起動する
 | `gemini-cli` | Gemini CLI | 不要（CLI のログインを使う） |
 | `codex` | Codex CLI | 不要（CLI のログインを使う） |
 
+CLI 系の頭脳（`claude-code` / `gemini-cli` / `codex`）では、道具の
+実行は外部 CLI の側で行われます。kuma-agent 側の承認確認や道具の
+制限は効かないので、その前提で選んでください。Codex のサンド
+ボックスは `KUMA_CODEX_SANDBOX` で指定できます（既定は
+`workspace-write`。`read-only` にすると読み取りだけになります）。
+CLI へ渡す追加の引数は `KUMA_CLI_EXTRA_ARGS`（空白区切り、全 CLI
+共通）で指定できます。指定できる引数は導入先の CLI のバージョン
+によるので、CLI のヘルプで確認してから入れてください。
+
 ### モードを選ぶ
 
 環境変数 `KUMA_MODE`、または `chat` / `web` の `--mode` で選びます。
@@ -283,6 +292,7 @@ docker compose logs cloudflared   # https://〜.trycloudflare.com の URL を確
 - `KUMA_WEB_PASSWORD` の設定が前提です。あわせて `.env` の `KUMA_WEB_SECURE_COOKIE=1` も有効にしてください（HTTPS で公開するときにログインの Cookie を守るため）。
 - ログインは画面全体への入口の守りです。ログインできる人は、画面の切り替えで全テナント・全ユーザー分のデータ（用事や会話、長期記憶など）に届きます。人ごとに分けられる前提ではないので、パスワードは信頼できる相手の範囲にだけ渡してください。
 - 公開する画面を 1 つのテナント／ユーザーだけに絞りたいときは、`.env` の `KUMA_WEB_TENANT` / `KUMA_WEB_USER` を設定してください（どちらか片方だけでも構いません）。その組み合わせ以外へのアクセスはエラー（403）になり、一覧にも固定した分だけが出ます。設定しなければ従来どおり切り替えられます。
+- CLI 系の頭脳はこのコンテナでは使えません。ホストへ直接入れた kuma-agent を外に出す場合は、道具の実行が外部 CLI の側で行われ、こちらの承認確認や道具の制限が効かない点を前提にしてください。
 
 URL は起動のたびに変わります。止めるときは `docker compose --profile tunnel down` です。LINE の webhook の受け口にも使えますが、URL が変わるたびに LINE 側の登録も直す必要があります。固定の URL で続けたい場合は、Cloudflare のアカウントとドメインを使う名前付きトンネルか、逆プロキシを用意してください。
 

@@ -619,7 +619,8 @@ def main(argv: list[str] | None = None) -> int:
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)
         return 2
-    client = create_client(cfg.provider, api_key, cfg.model)
+    client = create_client(cfg.provider, api_key, cfg.model,
+                           **cfg.cli_client_kwargs())
 
     if args.command == "memory-tidy":  # モデル統合が要るため API キー必須
         return _run_memory_tidy(cfg, client, dry_run=args.dry_run)

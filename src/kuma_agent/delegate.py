@@ -84,7 +84,8 @@ def _child_model(parent: Session):
     cfg = parent.cfg
     if cfg.delegate_model:
         return create_client(cfg.provider, cfg.resolve_api_key(),
-                             model=cfg.delegate_model)
+                             model=cfg.delegate_model,
+                             **cfg.cli_client_kwargs())
     return parent.model
 
 
