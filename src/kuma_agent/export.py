@@ -9,8 +9,13 @@
 分離のための除外: 既定ユーザーの置き場はテナントの置き場そのもの
 であり、その配下の users/ は他のユーザーの置き場である。同様に、
 既定テナント×既定ユーザーの置き場はデータ置き場そのもので、
-配下の tenants/ は他のテナントの置き場である。これらは対象
-ユーザーのデータではないため、書き出しには含めない。
+配下の tenants/ は他のテナントの置き場であり、backups/ は
+全テナント・全ユーザーの控え ZIP の置き場である（他組のデータ
+そのもの）。これらは対象ユーザーのデータではないため、書き出し
+には含めない。テナント削除前の控えでも、既定テナントについては
+同じ考え方で直下の tenants/ と backups/ を除外する（直下の
+users/ はそのテナント自身のユーザーの置き場なので含める。
+歯止めの漏れ点検 L1、0.87.0）。
 
 資格情報の除外: Google カレンダー連携の資格情報ファイル
 （google-calendar/credentials.json）と、テナントの頭脳の
@@ -19,7 +24,11 @@ API キー（brain/credentials.json）は、データではあっても
 ない（パス定義は google_calendar.py と brain.py がそれぞれ
 正。復元側の扱いは restore.py）。頭脳のキーはテナントの置き
 場の直下にあるため、既定ユーザーの書き出し（置き場＝テナント
-の置き場）にも混ざり得る点に注意する。
+の置き場）にも混ざり得る点に注意する。MCP の設定ファイル
+（mcp.json）も、サーバーごとの env に秘密情報を持ち得るため、
+資格情報と同じ扱いにして書き出し・控えに含めない（置き場
+ルートとテナント置き場の分。ファイル名の定義は mcp_client.py
+が正。設定の移行は手作業になる）。
 
 書き出しは読み取り専用で、サーバー側にファイルは残さない（Web は
 メモリ上で組み立てて返す）。読み込み（復元）は restore.py が担う
@@ -41,6 +50,7 @@ from pathlib import Path
 
 from .brain import BRAIN_CREDENTIALS_PATH_PARTS
 from .google_calendar import CREDENTIALS_PATH_PARTS
+from .mcp_client import MCP_FILENAME
 from .memory import (
     TENANTS_DIRNAME,
     USERS_DIRNAME,
@@ -57,6 +67,11 @@ EXPORT_INFO_NAME = "export-info.json"
 # の配下）。控えはテナントの置き場の外に作るため、置き場を丸ごと
 # 消しても控えは残る
 BACKUPS_DIRNAME = "backups"
+
+# MCP の設定ファイル（mcp.json）の、置き場からの相対パスの要素。
+# 置き場ルートとテナントの置き場にだけ置かれる設定ファイルで、
+# 資格情報と同じく書き出し・控え・復元の対象から外す
+MCP_CONFIG_PATH_PARTS = (MCP_FILENAME,)
 
 
 def app_version() -> str:
@@ -103,14 +118,39 @@ def _excluded_subdirs(data_dir: Path, tenant_data_dir: Path,
 
     既定ユーザーの置き場（＝テナントの置き場）配下の users/ は他の
     ユーザーの置き場、データ置き場そのものが置き場になる場合の
-    tenants/ は他のテナントの置き場である。
+    tenants/ は他のテナントの置き場、backups/ は全組の控えの
+    置き場（他組のデータそのもの）である。
     """
     excluded: set[Path] = set()
     if user_data_dir == tenant_data_dir:
         excluded.add(user_data_dir / USERS_DIRNAME)
     if user_data_dir == data_dir:
         excluded.add(user_data_dir / TENANTS_DIRNAME)
+        excluded.add(user_data_dir / BACKUPS_DIRNAME)
     return excluded
+
+
+def _tenant_backup_excluded_subdirs(data_dir: Path,
+                                    tenant_data_dir: Path) -> set[Path]:
+    """テナント控えから外す、他の置き場の入口（既定テナント用）。
+
+    既定テナントの置き場はデータ置き場そのものなので、直下の
+    tenants/ は他のテナントの置き場、backups/ は全組の控えの
+    置き場であり、対象テナントのデータではない（ユーザー単位
+    の書き出しの分離規則（_excluded_subdirs）と同じ考え方。
+    L1、0.87.0）。直下の users/ はそのテナント自身のユーザー
+    の置き場なので、控えには含める（ユーザー単位の書き出しで
+    users/ を外すのは、対象ユーザー以外の置き場だからであり、
+    対象がテナントの場合は意味が変わる）。それ以外のテナント
+    では、置き場の中身はすべてそのテナントのデータなので
+    除外は要らない。
+    """
+    if tenant_data_dir != data_dir:
+        return set()
+    return {
+        tenant_data_dir / TENANTS_DIRNAME,
+        tenant_data_dir / BACKUPS_DIRNAME,
+    }
 
 
 def iter_export_files(data_dir: Path, tenant: str,
@@ -135,8 +175,9 @@ def iter_export_files(data_dir: Path, tenant: str,
             if not path.is_file():
                 continue
             if path.relative_to(udir).parts in (
-                    CREDENTIALS_PATH_PARTS, BRAIN_CREDENTIALS_PATH_PARTS):
-                continue  # 資格情報は書き出しに含めない
+                    CREDENTIALS_PATH_PARTS, BRAIN_CREDENTIALS_PATH_PARTS,
+                    MCP_CONFIG_PATH_PARTS):
+                continue  # 資格情報と MCP 設定は書き出しに含めない
             files.append(path)
     return files
 
@@ -190,12 +231,18 @@ def build_tenant_backup_zip(data_dir: Path, tenant: str,
     """テナントの置き場全体の控え ZIP をメモリ上で組み立てて返す。
 
     テナント削除の前に取る控えで、ユーザー単位の書き出しと違い、
-    そのテナントの全ユーザー分を置き場からの相対パスのまま収める
-    （テナントの置き場の中身はすべてそのテナントのデータなので、
-    書き出しのような他テナント／他ユーザーの除外は要らない。
-    ただし資格情報ファイル（google-calendar/credentials.json と
-    brain/credentials.json）だけは、各ユーザーの分とテナント
-    直下の分を含め、控えにも含めない）。
+    そのテナントの全ユーザー分を置き場からの相対パスのまま収める。
+    対象が既定テナントの場合は置き場＝データ置き場そのものに
+    なるため、ユーザー単位の書き出しと同じ考え方で、直下の
+    tenants/（他のテナント）と backups/（全組の控え）は含め
+    ない（L1、0.87.0。直下の users/ はそのテナント自身の
+    ユーザーの置き場なので含める。それ以外のテナントでは、
+    置き場の中身はすべてそのテナントのデータなので、この
+    除外は要らない）。
+    資格情報ファイル（google-calendar/credentials.json と
+    brain/credentials.json）は、各ユーザーの分とテナント直下の
+    分を含め、控えにも含めない。テナント直下の MCP 設定
+    （mcp.json）も資格情報と同じ扱いで含めない。
     先頭には export-info.json の形で、控えである旨・テナント名・
     ユーザー一覧を入れる。置き場が無い・空でも、情報ファイルだけ
     の ZIP ができる。読み込み中に消えた・読めないファイルは飛ばす。
@@ -217,17 +264,22 @@ def build_tenant_backup_zip(data_dir: Path, tenant: str,
         zf.writestr(EXPORT_INFO_NAME,
                     json.dumps(info, ensure_ascii=False, indent=2) + "\n")
         if tdir.is_dir():
+            excluded = _tenant_backup_excluded_subdirs(data_dir, tdir)
             for root, dirs, names in os.walk(tdir):
                 root_path = Path(root)
-                dirs[:] = sorted(dirs)
+                dirs[:] = sorted(
+                    d for d in dirs if root_path / d not in excluded)
                 for name in sorted(names):
                     path = root_path / name
                     if not path.is_file():
                         continue
-                    arcname = path.relative_to(tdir).as_posix()
+                    relative = path.relative_to(tdir)
+                    arcname = relative.as_posix()
                     if arcname == EXPORT_INFO_NAME:
                         continue
-                    if path.relative_to(tdir).parts[-2:] in (
+                    if relative.parts == MCP_CONFIG_PATH_PARTS:
+                        continue  # MCP 設定は控えに含めない
+                    if relative.parts[-2:] in (
                             CREDENTIALS_PATH_PARTS,
                             BRAIN_CREDENTIALS_PATH_PARTS):
                         continue  # 資格情報は控えに含めない

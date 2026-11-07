@@ -25,7 +25,13 @@ export-info.json で、kuma-agent の書き出しであることを確かめて
 際も既存のファイルを消さずに保全する（パス定義は
 google_calendar.py と brain.py がそれぞれ正）。頭脳のキーは
 テナントの置き場の直下にあるため、既定ユーザーの復元（置き場
-＝テナントの置き場）で同名の項目が現れ得る。
+＝テナントの置き場）で同名の項目が現れ得る。MCP の設定
+ファイル（mcp.json）も、env に秘密情報を持ち得るため資格
+情報と同じ扱いにし、書き戻さず既存の設定を保全する
+（0.87.0）。また、データ置き場そのものが対象の場合、書き
+出しの分離規則（export._excluded_subdirs）に backups/ が
+含まれるため、ZIP 内の backups/ 配下の項目も書き戻さない
+（控え置き場は復元の対象外）。
 
 安全のため、ZIP の項目は書き出す前にすべて検証する。絶対パス
 や `..` を含む項目、シンボリックリンクの項目が 1 つでもあれば、
@@ -45,6 +51,7 @@ from pathlib import Path, PurePosixPath
 from .export import (
     BACKUPS_DIRNAME,
     EXPORT_INFO_NAME,
+    MCP_CONFIG_PATH_PARTS,
     _excluded_subdirs,
     build_export_zip,
     iter_export_files,
@@ -236,9 +243,9 @@ def restore_user_data(data_dir: Path, tenant: str, user: str,
     手順は、検証（サイズ・書き出し情報・全項目のパス）→ 対象に
     データがあれば控え → 置き場を空にする → 項目の書き出し。
     検証で落ちる場合は何も変更しない。除外対象（他のユーザー／
-    テナントの置き場）と資格情報ファイルにあたる項目は書き込
-    まず、skipped_files に数える。既存の資格情報ファイルは
-    置き換えでも消さずに保全する。
+    テナントの置き場）と資格情報ファイル・MCP 設定にあたる項目
+    は書き込まず、skipped_files に数える。既存の資格情報ファイル
+    と MCP 設定は置き換えでも消さずに保全する。
     """
     if len(zip_bytes) > MAX_IMPORT_BYTES:
         raise ValueError(
@@ -273,8 +280,9 @@ def restore_user_data(data_dir: Path, tenant: str, user: str,
             if entry[1][0] in excluded:
                 result.skipped_files += 1
             elif entry[1] in (CREDENTIALS_PATH_PARTS,
-                              BRAIN_CREDENTIALS_PATH_PARTS):
-                # 資格情報は ZIP からは書き戻さない
+                              BRAIN_CREDENTIALS_PATH_PARTS,
+                              MCP_CONFIG_PATH_PARTS):
+                # 資格情報と MCP 設定は ZIP からは書き戻さない
                 result.skipped_files += 1
             else:
                 accepted.append(entry)
@@ -294,7 +302,8 @@ def restore_user_data(data_dir: Path, tenant: str, user: str,
             preserved.add(BACKUPS_DIRNAME)
         _clear_user_dir(udir, preserved,
                         preserved_files={CREDENTIALS_PATH_PARTS,
-                                         BRAIN_CREDENTIALS_PATH_PARTS})
+                                         BRAIN_CREDENTIALS_PATH_PARTS,
+                                         MCP_CONFIG_PATH_PARTS})
         udir.mkdir(parents=True, exist_ok=True)
         for zip_info, parts in accepted:
             dest = udir.joinpath(*parts)
