@@ -270,20 +270,24 @@ def _run_import(cfg: Config, archive: str, tenant: str | None = None,
     return 0
 
 
-def _run_google_calendar(cfg: Config, action: str) -> int:
-    """Google カレンダー連携の認可・状態確認・解除（運用者向け）。
+def _run_google_calendar(cfg: Config, action: str,
+                         targets: list[str] | None = None) -> int:
+    """Google カレンダー連携の認可・状態確認・解除・一覧・選択。
 
     対象は cfg が指すテナント×ユーザーの置き場。auth はブラウザ
     認可（デスクトップアプリ型 OAuth、PKCE・ループバック戻り先）
     を回して資格情報を保存し、保存できたら接続確認まで行う。
     status は保存済みの資格情報で主カレンダーの読み取りまでを
     確認した状態を表示する。revoke は Google 側の取り消しを
-    試みてから資格情報ファイルを削除する。トークンの値はどの
-    経路でも表示しない。モデルも API キーも要らない。
+    試みてから資格情報ファイルを削除する。calendars は見られる
+    カレンダーの一覧を番号つきで表示し、select はその番号で
+    対象カレンダー（朝のまとめと道具の既定の対象）を選んで
+    保存する。実カレンダー ID とトークンの値はどの経路でも
+    表示しない。モデルも API キーも要らない。
 
     終了コード: 状態確認と解除は 0。認可は、設定の不備
     （連携が無効・クライアント設定が無い／読めない）なら 2、
-    認可や接続確認の失敗なら 1。
+    認可や接続確認の失敗なら 1。一覧・選択も同じ分けにする。
     """
     import webbrowser
 
@@ -306,6 +310,11 @@ def _run_google_calendar(cfg: Config, action: str) -> int:
         return 0
     if action == "revoke":
         return _run_google_calendar_revoke(cfg, client)
+    if action == "calendars":
+        return _run_google_calendar_calendars(cfg, client)
+    if action == "select":
+        return _run_google_calendar_select(cfg, client,
+                                           targets or [])
     # action == "auth"
     if not cfg.google_calendar_enabled:
         print("Google カレンダー連携は無効になっています"
@@ -322,7 +331,7 @@ def _run_google_calendar(cfg: Config, action: str) -> int:
         return 2
     print("ブラウザで Google の認可画面を開きます。"
           "対象の Google アカウントでサインインし、"
-          "予定の読み取りを許可してください")
+          "予定とカレンダー一覧の読み取りを許可してください")
 
     def open_url(url: str) -> None:
         print(f"認可画面: {url}")
@@ -371,6 +380,138 @@ def _run_google_calendar_revoke(cfg: Config, client) -> int:
               "Google のサードパーティアクセスから削除してください")
     else:
         print("保存されている資格情報はありませんでした")
+    return 0
+
+
+def _fetch_calendar_entries(client):
+    """一覧・選択で使うカレンダー一覧を取得する（CLI 用）。
+
+    取得できれば (一覧, 0)。状態や失敗で止める場合は
+    (None, 終了コード) で、理由の表示まで済ませる。未設定・
+    無効は 2、未認可・許可の範囲不足・通信失敗は 1。一覧を
+    読むには追加の読み取り専用スコープが要り、足りない場合は
+    再認可（auth の再実行）の案内を出す。
+    """
+    from .google_calendar import (
+        GoogleCalendarError,
+        fetch_calendar_list,
+    )
+
+    status = client.status()
+    if status.state == "disabled":
+        print("Google カレンダー連携は無効になっています"
+              "（環境変数 KUMA_GOOGLE_CALENDAR=0）")
+        return None, 2
+    if status.state == "not_configured":
+        print(status.message)
+        return None, 2
+    if status.state != "authorized":
+        print(status.message)
+        return None, 1
+    try:
+        return fetch_calendar_list(client), 0
+    except GoogleCalendarError as exc:
+        if exc.kind == "insufficient_scope":
+            print("カレンダー一覧を読む許可が足りません。"
+                  "google-calendar auth を再実行して、追加の許可を"
+                  "行ってください")
+        elif exc.kind == "revoked":
+            print("Google カレンダーの許可が無効になっています。"
+                  "google-calendar auth を再実行してください")
+        else:
+            print("カレンダーの一覧を取得できませんでした")
+        return None, 1
+
+
+def _calendar_entry_key(entry) -> str:
+    """選択保存で使うカレンダーの鍵。
+
+    主カレンダーは実 ID ではなく別名 primary で表す（実 ID は
+    メールアドレスに近い値になり得るため、設定ファイルにも
+    持ち回らない）。
+    """
+    return "primary" if entry.primary else entry.id
+
+
+def _selected_entry_names(entries, selected: list[str]) -> list[str]:
+    """選択に含まれるカレンダーの名前（選択の並び順）。"""
+    by_key: dict[str, str] = {}
+    for entry in entries:
+        by_key.setdefault(_calendar_entry_key(entry), entry.summary)
+        by_key.setdefault(entry.id, entry.summary)
+    return [by_key[key] for key in selected if key in by_key]
+
+
+def _run_google_calendar_calendars(cfg: Config, client) -> int:
+    """カレンダー一覧の表示（google-calendar calendars の本体）。
+
+    番号つきで名前だけを出し、実 ID は表示しない。選択中の
+    ものと主カレンダーには印を付ける。
+    """
+    from .google_calendar import selected_calendar_ids
+
+    entries, code = _fetch_calendar_entries(client)
+    if entries is None:
+        return code
+    selected = selected_calendar_ids(cfg.user_data_dir)
+    print("見られるカレンダー:")
+    for index, entry in enumerate(entries, start=1):
+        marks = []
+        if _calendar_entry_key(entry) in selected \
+                or entry.id in selected:
+            marks.append("対象")
+        if entry.primary:
+            marks.append("主カレンダー")
+        suffix = f"（{'・'.join(marks)}）" if marks else ""
+        print(f"{index}. {entry.summary}{suffix}")
+    print("朝のまとめや道具の対象にするには、"
+          "google-calendar select <番号...> で選んでください")
+    return 0
+
+
+def _run_google_calendar_select(cfg: Config, client,
+                                targets: list[str]) -> int:
+    """対象カレンダーの選択保存（google-calendar select の本体）。
+
+    引数は calendars の表示番号（複数可）。保存先は連携の
+    非秘密設定（google-calendar/settings.json）。番号が無い
+    場合は現在の選択を表示するだけにする。
+    """
+    from .google_calendar import (
+        CalendarSettings,
+        save_calendar_settings,
+        selected_calendar_ids,
+    )
+
+    entries, code = _fetch_calendar_entries(client)
+    if entries is None:
+        return code
+    if not targets:
+        names = _selected_entry_names(
+            entries, selected_calendar_ids(cfg.user_data_dir))
+        print("現在の対象カレンダー: "
+              + ("、".join(names) if names else "（なし）"))
+        print("変えるには google-calendar calendars で番号を"
+              "確かめ、google-calendar select <番号...> を"
+              "実行してください")
+        return 0
+    chosen: list[str] = []
+    for text in targets:
+        try:
+            index = int(text)
+        except ValueError:
+            index = 0
+        if not 1 <= index <= len(entries):
+            print(f"番号が正しくありません: {text}"
+                  "（google-calendar calendars で確かめてください）")
+            return 1
+        key = _calendar_entry_key(entries[index - 1])
+        if key not in chosen:
+            chosen.append(key)
+    save_calendar_settings(cfg.user_data_dir,
+                           CalendarSettings(calendar_ids=chosen))
+    names = _selected_entry_names(entries, chosen)
+    print("対象カレンダーを保存しました: " + "、".join(names))
     return 0
 
 
@@ -723,11 +864,18 @@ def main(argv: list[str] | None = None) -> int:
                                help="復元先のユーザー名（既定: ZIP に記録されたユーザー）")
     google_calendar_parser = sub.add_parser(
         "google-calendar",
-        help="Google カレンダーの読み取り連携（認可・状態確認・解除）")
+        help="Google カレンダーの読み取り連携"
+             "（認可・状態確認・解除・一覧・選択）")
     google_calendar_parser.add_argument(
-        "action", choices=["auth", "status", "revoke"],
+        "action",
+        choices=["auth", "status", "revoke", "calendars", "select"],
         help="auth: ブラウザで許可を取る / status: 状態と接続を確認する"
-             " / revoke: 連携を解除する")
+             " / revoke: 連携を解除する / calendars: 見られるカレンダーの"
+             "一覧 / select: 対象カレンダーを番号で選んで保存する")
+    google_calendar_parser.add_argument(
+        "targets", nargs="*", default=[],
+        help="select のときのカレンダーの番号（calendars の表示番号、"
+             "複数可）")
     google_calendar_parser.add_argument("--tenant", default=None,
                                         help="対象のテナント名（既定: 環境変数 KUMA_TENANT、無ければ default）")
     google_calendar_parser.add_argument("--user", default=None,
@@ -767,7 +915,7 @@ def main(argv: list[str] | None = None) -> int:
         return _run_import(cfg, args.archive, tenant=args.tenant,
                            user=args.user)
     if args.command == "google-calendar":  # 認可・確認もモデルも要らない
-        return _run_google_calendar(cfg, args.action)
+        return _run_google_calendar(cfg, args.action, args.targets)
     api_key = cfg.resolve_api_key()
     if not cfg.is_cli_provider and not api_key:
         print(f"プロバイダ {cfg.provider} の API キーが未設定です", file=sys.stderr)

@@ -156,8 +156,12 @@ def summarize_tool_args(name: str, args: dict, limit: int = 200) -> str:
         start = str(args.get("start_date") or "今日")
         end = str(args.get("end_date") or start)
         calendar = args.get("calendar_id")
-        kind = "primary" if not calendar or calendar == "primary" \
-            else "指定カレンダー"
+        if not calendar or calendar == "all":
+            kind = "選択中"  # 省略時は利用者の選択（既定は主カレンダー）
+        elif calendar == "primary":
+            kind = "primary"
+        else:
+            kind = "指定カレンダー"
         text = f"期間: {start}〜{end}、カレンダー: {kind}"
     elif args:
         try:

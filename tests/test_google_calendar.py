@@ -32,6 +32,7 @@ from kuma_agent.export import (
 )
 from kuma_agent.google_calendar import (
     EVENTS_READONLY_SCOPE,
+    REQUESTED_SCOPES,
     ClientSecrets,
     Credentials,
     GoogleCalendarClient,
@@ -533,7 +534,10 @@ def test_authorize_flow_saves_credentials(tmp_path: Path) -> None:
     run = _AuthRun(tmp_path, _exchange_transport(captured))
     url = run.start_and_wait_url()
     query = _auth_query(url)
-    assert query["scope"] == EVENTS_READONLY_SCOPE
+    # 0.78.0 から、予定とカレンダー一覧の読み取り専用スコープを
+    # 両方要求する（増分認可）
+    assert query["scope"] == " ".join(REQUESTED_SCOPES)
+    assert query["include_granted_scopes"] == "true"
     assert query["access_type"] == "offline"
     assert query["code_challenge_method"] == "S256"
     _callback(url, code="auth-code-1", state=query["state"])

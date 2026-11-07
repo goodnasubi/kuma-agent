@@ -256,8 +256,11 @@ def test_tool_validation_errors(tmp_path: Path) -> None:
         == "予定はありませんでした"
     assert "件数は 1 以上" in call(max_results=0)
     assert "件数の指定が正しくありません" in call(max_results="abc")
-    assert "主カレンダー（primary）だけが対象" in call(
-        calendar_id="work")
+    # 0.78.0 からは calendar_id で主カレンダー以外も指定できる。
+    # このスタブはカレンダー一覧を返せないため、実在確認に失敗
+    # して取得失敗の error になる（指定の詳しい振る舞いは
+    # test_calendar_multi.py で確認する）
+    assert "予定を取得できませんでした" in call(calendar_id="work")
     # 上限を超える件数は 50 に抑えられ、エラーにはならない
     assert call(max_results=100) == "予定はありませんでした"
 

@@ -30,6 +30,15 @@ google-calendar-tool-design-2026-11-07.md、要約は DESIGN.md
 （proactive.py）の両方が同じ整形を使う。道具の失敗は例外
 ではなく、状態に応じた結果文字列（error: …）で返す。
 
+0.78.0 では複数カレンダーへ広げた。認可ではカレンダー一覧
+の読み取り専用スコープを増分認可で足し（`authorize` が両
+スコープを要求する）、一覧の取得（`fetch_calendar_list`）、
+対象カレンダーの選択保存（`google-calendar/settings.json`。
+秘密ではないため書き出し対象でよい。設計 §5.3）、道具の
+`calendar_id` での主カレンダー以外の指定、朝のまとめでの
+複数カレンダーの時刻順への統合を行う。実カレンダー ID は
+活動の記録に残さない扱い（0.77.0 の要約化）は維持する。
+
 クライアント設定（OAuth クライアント ID / シークレット）は
 運用者単位で、Google Cloud で作成したデスクトップ型 OAuth
 クライアントの設定ファイルへのパスを環境変数
@@ -50,7 +59,7 @@ from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Callable
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -63,6 +72,13 @@ CLIENT_SECRETS_FILE_ENV = "KUMA_GOOGLE_CALENDAR_CLIENT_SECRETS_FILE"
 # 予定の読み取り専用スコープ（書き込み可能なスコープは要求しない）
 EVENTS_READONLY_SCOPE = (
     "https://www.googleapis.com/auth/calendar.events.readonly")
+# カレンダー一覧の読み取り専用スコープ（0.78.0 で増分認可で足す。
+# 予定の読み取りだけでは一覧は読めないため、複数カレンダーの
+# 一覧・選択にはこちらが要る。設計 §2.1・§6）
+CALENDARLIST_READONLY_SCOPE = (
+    "https://www.googleapis.com/auth/calendar.calendarlist.readonly")
+# 認可で要求するスコープ（両方の読み取り専用だけ）
+REQUESTED_SCOPES = (EVENTS_READONLY_SCOPE, CALENDARLIST_READONLY_SCOPE)
 
 DEFAULT_AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 DEFAULT_TOKEN_URI = "https://oauth2.googleapis.com/token"
@@ -106,13 +122,19 @@ class GoogleCalendarError(Exception):
 
     kind: not_configured / config_error / not_authorized /
     invalid / revoked / denied / state_mismatch / timeout /
-    network / http / invalid_response
+    network / http / invalid_response / insufficient_scope
+
+    status は HTTP 状態（分かった場合だけ）。文面には含めず、
+    呼び出し側が「そのカレンダーは無い（404）」のような区別に
+    使うためだけに持つ。
     """
 
-    def __init__(self, kind: str, message: str) -> None:
+    def __init__(self, kind: str, message: str,
+                 status: int | None = None) -> None:
         super().__init__(message)
         self.kind = kind
         self.message = message
+        self.status = status
 
 
 @dataclass
@@ -373,16 +395,19 @@ def _authorization_url(client_secrets: ClientSecrets,
                        code_challenge: str) -> str:
     """Google の認可画面の URL を組み立てる。
 
-    スコープは予定の読み取り専用だけ。access_type=offline と
-    prompt=consent で、再認可のときもリフレッシュトークンが
-    確実に返るようにする。
+    スコープは読み取り専用だけ（予定とカレンダー一覧。
+    0.78.0 から一覧分を増分認可で足すため、両方を要求し、
+    include_granted_scopes で既に許可済みの分と合わせて
+    受け取る）。access_type=offline と prompt=consent で、
+    再認可のときもリフレッシュトークンが確実に返るようにする。
     """
     params = {
         "client_id": client_secrets.client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": EVENTS_READONLY_SCOPE,
+        "scope": " ".join(REQUESTED_SCOPES),
         "access_type": "offline",
+        "include_granted_scopes": "true",
         "prompt": "consent",
         "state": state,
         "code_challenge": code_challenge,
@@ -502,7 +527,8 @@ def authorize(user_data_dir: Path, client_secrets: ClientSecrets, *,
     scope = body.get("scope")
     credentials = Credentials(
         refresh_token=refresh_token,
-        scope=scope if isinstance(scope, str) else EVENTS_READONLY_SCOPE,
+        scope=scope if isinstance(scope, str)
+        else " ".join(REQUESTED_SCOPES),
         authorized_at=(now or datetime.now())
         .astimezone().isoformat(timespec="seconds"),
         client_id=client_secrets.client_id)
@@ -536,6 +562,11 @@ class GoogleCalendarClient:
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._access_token: str | None = None
         self._access_expires_at: datetime | None = None
+
+    @property
+    def user_data_dir(self) -> Path:
+        """この利用者の置き場（資格情報・連携設定の解決先）。"""
+        return self._user_data_dir
 
     @property
     def client_secrets(self) -> ClientSecrets | None:
@@ -685,11 +716,21 @@ class GoogleCalendarClient:
             raise GoogleCalendarError(
                 "revoked",
                 "Google カレンダーの許可が無効になっています。"
-                "再度許可してください")
+                "再度許可してください",
+                status=status)
+        if status == 403 and _is_insufficient_scope(body):
+            # 許可の範囲が足りない（例: 一覧のスコープ未追加）。
+            # 直し方は再認可なので、その旨が分かる種類にする
+            raise GoogleCalendarError(
+                "insufficient_scope",
+                "Google カレンダーの許可の範囲が足りません。"
+                "再度許可してください",
+                status=status)
         if status != 200:
             raise GoogleCalendarError(
                 "http",
-                "Google カレンダーの予定を取得できませんでした")
+                "Google カレンダーの予定を取得できませんでした",
+                status=status)
         return body
 
     def _api_get_once(self, path: str,
@@ -713,6 +754,26 @@ class GoogleCalendarClient:
         except ValueError:
             body = {}
         return resp.status_code, body if isinstance(body, dict) else {}
+
+
+def _is_insufficient_scope(body: dict) -> bool:
+    """API の 403 応答が「許可の範囲不足」かどうかを見る。
+
+    応答本文の理由（insufficientPermissions）か文面で判定する。
+    本文そのものは例外文面へ写さない（判定だけに使う）。
+    """
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return False
+    errors = error.get("errors")
+    if isinstance(errors, list):
+        for entry in errors:
+            if isinstance(entry, dict) \
+                    and entry.get("reason") == "insufficientPermissions":
+                return True
+    message = error.get("message")
+    return isinstance(message, str) \
+        and "insufficient authentication scopes" in message.lower()
 
 
 def build_client(user_data_dir: Path, *, enabled: bool,
@@ -764,6 +825,16 @@ REVOKED_RESULT = (
     "error: Google カレンダーの許可が無効になっています。"
     "再度許可してください")
 FETCH_FAILED_RESULT = "error: Google カレンダーの予定を取得できませんでした"
+# 許可の範囲が足りない（例: 一覧のスコープ未追加のまま一覧を
+# 読もうとした）。直し方は再認可（0.78.0）
+INSUFFICIENT_SCOPE_RESULT = (
+    "error: Google カレンダーの許可の範囲が足りません。"
+    "再度許可してください")
+# 道具で指定されたカレンダーが一覧に無い（存在しないか、
+# 読み取る許可がない）
+CALENDAR_NOT_FOUND_RESULT = (
+    "error: そのカレンダーは見つかりませんでした"
+    "（読み取る許可がない場合も含みます）")
 NO_EVENTS_RESULT = "予定はありませんでした"
 
 # 予定一覧で取る項目。参加者・説明・添付・会議情報は初段では
@@ -781,6 +852,9 @@ class CalendarEvent:
     start / end は表示に使うローカルタイムゾーンへ変換済みの
     日時。終日予定は all_day が True で、start は開始日の
     0 時、end は終了日（排他的）の 0 時になる。
+    calendar_name は由来のカレンダーの名前（複数カレンダーを
+    統合して表示するときだけ、整形側が使う。単一カレンダーの
+    取得では空のまま）。
     """
 
     title: str
@@ -788,6 +862,7 @@ class CalendarEvent:
     start: datetime
     end: datetime
     all_day: bool = False
+    calendar_name: str = ""
 
 
 def local_tz() -> tzinfo:
@@ -880,10 +955,12 @@ def _parse_event(item: object, tz: tzinfo) -> CalendarEvent | None:
 
 
 def fetch_events(client: GoogleCalendarClient, start: date,
-                 end: date, *, tz: tzinfo | None = None) \
+                 end: date, *, calendar_id: str = "primary",
+                 tz: tzinfo | None = None) \
         -> tuple[list[CalendarEvent], bool]:
-    """主カレンダーの、start から end（この日を含む）の予定を取る。
+    """1 つのカレンダーの、start から end（この日を含む）の予定を取る。
 
+    対象は calendar_id（既定は主カレンダーの別名 primary）。
     繰り返し予定は singleEvents で個別の予定へ展開し、開始順に
     並べる。ページ送りは最大 MAX_EVENTS_PAGES ページまで追い、
     まだ続きがある場合は第 2 要素を True にする。失敗は
@@ -902,10 +979,11 @@ def fetch_events(client: GoogleCalendarClient, start: date,
         "maxResults": str(_EVENTS_PAGE_SIZE),
         "fields": _EVENTS_FIELDS,
     }
+    path = f"/calendars/{quote(calendar_id, safe='')}/events"
     events: list[CalendarEvent] = []
     has_more = False
     for page in range(MAX_EVENTS_PAGES):
-        body = client.api_get("/calendars/primary/events", params=params)
+        body = client.api_get(path, params=params)
         items = body.get("items")
         if isinstance(items, list):
             for item in items:
@@ -921,6 +999,195 @@ def fetch_events(client: GoogleCalendarClient, start: date,
         params["pageToken"] = token
     events.sort(key=lambda event: event.start)
     return events, has_more
+
+
+# ------------------------------------------------- カレンダー一覧と選択
+
+_CALENDAR_LIST_FIELDS = "items(id,summary,primary,accessRole),nextPageToken"
+
+
+@dataclass
+class CalendarEntry:
+    """カレンダー一覧の 1 件（CalendarList の項目）。
+
+    id は実カレンダー ID で、API 呼び出しと選択保存にだけ使い、
+    活動の記録や画面の要約には出さない。summary はカレンダー
+    の名前（利用者への表示と、統合表示の由来表示に使う）。
+    """
+
+    id: str
+    summary: str
+    primary: bool = False
+    access_role: str = ""
+
+
+def fetch_calendar_list(client: GoogleCalendarClient) \
+        -> list[CalendarEntry]:
+    """利用者が見られるカレンダーの一覧を取る。
+
+    主カレンダーを先頭に、残りは名前順に並べる。ページ送りは
+    予定と同じく最大 MAX_EVENTS_PAGES ページまで追う。一覧を
+    読むには予定とは別の読み取り専用スコープが要り、足りない
+    場合は GoogleCalendarError（kind=insufficient_scope）に
+    なる（直し方は再認可）。失敗は文面にせず例外のまま渡す。
+    """
+    params: dict[str, str] = {
+        "fields": _CALENDAR_LIST_FIELDS,
+        "maxResults": str(_EVENTS_PAGE_SIZE),
+    }
+    entries: list[CalendarEntry] = []
+    for _page in range(MAX_EVENTS_PAGES):
+        body = client.api_get("/users/me/calendarList", params=params)
+        items = body.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                cal_id = item.get("id")
+                if not isinstance(cal_id, str) or not cal_id:
+                    continue
+                summary = item.get("summary")
+                role = item.get("accessRole")
+                entries.append(CalendarEntry(
+                    id=cal_id,
+                    summary=summary.strip()
+                    if isinstance(summary, str) and summary.strip()
+                    else "（名前のないカレンダー）",
+                    primary=item.get("primary") is True,
+                    access_role=role if isinstance(role, str) else ""))
+        token = body.get("nextPageToken")
+        if not isinstance(token, str) or not token:
+            break
+        params["pageToken"] = token
+    entries.sort(key=lambda entry: (not entry.primary, entry.summary))
+    return entries
+
+
+def calendar_names(client: GoogleCalendarClient) \
+        -> dict[str, str]:
+    """カレンダー ID → 名前の対応を取る（表示専用の補助）。
+
+    一覧が取れない場合（スコープ不足・通信失敗など）は空辞書
+    を返し、予定の取得そのものは止めない。主カレンダーの別名
+    primary も、取れた場合は対応に含める。
+    """
+    try:
+        entries = fetch_calendar_list(client)
+    except GoogleCalendarError:
+        return {}
+    names = {entry.id: entry.summary for entry in entries}
+    for entry in entries:
+        if entry.primary:
+            names.setdefault("primary", entry.summary)
+    return names
+
+
+# 対象カレンダーの選択は、資格情報とは別の非秘密設定ファイル
+# （google-calendar/settings.json）に置く（設計 §1・§5.3。
+# 秘密ではないため書き出し対象でよい）
+_SETTINGS_KEY_CALENDAR_IDS = "calendar_ids"
+
+
+def settings_path(user_data_dir: Path) -> Path:
+    """連携の非秘密設定ファイルのパス。"""
+    return credentials_dir(user_data_dir) / SETTINGS_FILENAME
+
+
+@dataclass
+class CalendarSettings:
+    """連携の利用者ごとの非秘密設定。
+
+    calendar_ids は対象カレンダーの選択（実 ID の並び。主
+    カレンダーは別名 primary で表す）。空は「選択なし」で、
+    既定の主カレンダーだけが対象になる（0.77.0 と互換）。
+    """
+
+    calendar_ids: list[str]
+
+
+def load_calendar_settings(user_data_dir: Path) -> CalendarSettings:
+    """連携設定を読み込む。ファイルが無い・壊れている場合は
+    「選択なし」として読む（非秘密設定のため、壊れていても
+    連携全体は止めない）。"""
+    path = settings_path(user_data_dir)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return CalendarSettings(calendar_ids=[])
+    if not isinstance(data, dict):
+        return CalendarSettings(calendar_ids=[])
+    raw = data.get(_SETTINGS_KEY_CALENDAR_IDS)
+    ids: list[str] = []
+    if isinstance(raw, list):
+        for value in raw:
+            if isinstance(value, str) and value and value not in ids:
+                ids.append(value)
+    return CalendarSettings(calendar_ids=ids)
+
+
+def save_calendar_settings(user_data_dir: Path,
+                           settings: CalendarSettings) -> Path:
+    """連携設定を保存し、そのパスを返す。
+
+    資格情報と同じ置き場の別ファイルへ、一時ファイル経由の
+    原子的置換で書く。秘密ではないためファイル権限は通常の
+    ままにする。
+    """
+    directory = credentials_dir(user_data_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    _chmod_quiet(directory, 0o700)
+    path = settings_path(user_data_dir)
+    payload = {
+        _SETTINGS_KEY_CALENDAR_IDS: list(settings.calendar_ids),
+    }
+    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    tmp = directory / (SETTINGS_FILENAME + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def selected_calendar_ids(user_data_dir: Path) -> list[str]:
+    """朝のまとめと道具の既定の対象カレンダー。
+
+    保存された選択があればその並び、無ければ主カレンダー
+    だけ（["primary"]、0.77.0 の動作と互換）。
+    """
+    ids = load_calendar_settings(user_data_dir).calendar_ids
+    return list(ids) if ids else ["primary"]
+
+
+def fetch_events_for_calendars(
+        client: GoogleCalendarClient, calendar_ids: list[str],
+        start: date, end: date, *, tz: tzinfo | None = None,
+        names: dict[str, str] | None = None) \
+        -> tuple[list[CalendarEvent], bool, list[GoogleCalendarError]]:
+    """複数のカレンダーの予定を取り、開始時刻順に統合して返す。
+
+    戻り値は (統合した予定, まだ続きがあるか, 取得に失敗した
+    カレンダーごとの失敗)。一部のカレンダーが失敗しても、
+    取れた分は返す（呼び出し側が「全部失敗」と区別できるよう
+    失敗も返す）。names があれば予定に由来のカレンダー名を
+    付ける（統合表示用）。
+    """
+    merged: list[CalendarEvent] = []
+    has_more = False
+    errors: list[GoogleCalendarError] = []
+    for calendar_id in calendar_ids:
+        try:
+            events, more = fetch_events(
+                client, start, end, calendar_id=calendar_id, tz=tz)
+        except GoogleCalendarError as exc:
+            errors.append(exc)
+            continue
+        if names:
+            name = names.get(calendar_id, "")
+            for event in events:
+                event.calendar_name = name
+        merged.extend(events)
+        has_more = has_more or more
+    merged.sort(key=lambda event: event.start)
+    return merged, has_more, errors
 
 
 # ------------------------------------------------------------ 予定の整形
@@ -954,12 +1221,20 @@ def format_time_range(event: CalendarEvent) -> str:
             f"{event.end:%H:%M}")
 
 
-def _format_event_line(event: CalendarEvent) -> str:
-    """予定 1 件の表示行（設計 §3.4 の整形）。"""
+def _format_event_line(event: CalendarEvent,
+                       show_calendar: bool = False) -> str:
+    """予定 1 件の表示行（設計 §3.4 の整形）。
+
+    show_calendar のときは、由来のカレンダー名を末尾に添える
+    （複数カレンダーの統合表示で、どの予定がどちらのものか
+    分かるようにするため。単一カレンダーでは付けない）。
+    """
     title = _truncate(event.title, _TITLE_LIMIT)
     suffix = ""
     if event.location:
         suffix = f"（場所: {_truncate(event.location, _LOCATION_LIMIT)}）"
+    if show_calendar and event.calendar_name:
+        suffix += f"（{_truncate(event.calendar_name, _LOCATION_LIMIT)}）"
     if event.all_day:
         last_day = (event.end - timedelta(days=1)).date()
         if last_day == event.start.date():
@@ -985,6 +1260,9 @@ def format_events(events: list[CalendarEvent], start: date, end: date,
     overflow = len(events) - len(shown)
     header = (f"{_format_day(start)}から{_format_day(end)}までの"
               f"予定は{len(shown)}件です。")
+    # 複数のカレンダー由来が混ざる場合だけ、由来の名前を行へ添える
+    show_calendar = len({e.calendar_name for e in shown
+                         if e.calendar_name}) >= 2
     groups: dict[date, list[CalendarEvent]] = {}
     for event in shown:
         groups.setdefault(event.start.date(), []).append(event)
@@ -998,7 +1276,8 @@ def format_events(events: list[CalendarEvent], start: date, end: date,
             block.append(f"{_format_day(day)}:")
         day_events = sorted(
             groups[day], key=lambda e: (not e.all_day, e.start))
-        block.extend(_format_event_line(e) for e in day_events)
+        block.extend(_format_event_line(e, show_calendar)
+                     for e in day_events)
         for line in block:
             if used + len(line) + 1 > _EVENTS_TEXT_LIMIT - 32:
                 dropped = True
@@ -1025,6 +1304,9 @@ def _events_error_result(kind: str) -> str:
     if kind in ("revoked", "invalid"):
         # 資格情報の破損も、直し方は再認可なので同じ案内にする
         return REVOKED_RESULT
+    if kind == "insufficient_scope":
+        # 許可の範囲不足も、直し方は再認可（追加の許可）
+        return INSUFFICIENT_SCOPE_RESULT
     return FETCH_FAILED_RESULT
 
 
@@ -1057,8 +1339,19 @@ def list_events_text(client: GoogleCalendarClient, *,
     """道具 list_calendar_events の実処理。結果文字列を返す。
 
     失敗は例外ではなく、状態に応じた error: の文字列にする
-    （設計 §3.5）。未設定・未認可は通信せずに返す。対象は
-    主カレンダー（primary）だけ（複数カレンダーは 0.78.0）。
+    （設計 §3.5）。未設定・未認可は通信せずに返す。対象
+    カレンダーの決め方（0.78.0）:
+
+    - calendar_id の省略または "all": 利用者が選択した
+      カレンダー（選択が無ければ主カレンダーだけ）
+    - "primary": 主カレンダー
+    - それ以外: その ID のカレンダー 1 つ。一覧に無い ID
+      （存在しない・読み取る許可がない）は、その旨の error
+
+    複数カレンダーの予定は開始時刻順に統合して返す。一部の
+    カレンダーの取得が失敗しても、取れた分は返す（全部失敗
+    のときだけ error にする）。実カレンダー ID は結果文字列
+    には出さない。
     """
     state = client.status().state
     if state in ("disabled", "not_configured"):
@@ -1067,9 +1360,9 @@ def list_events_text(client: GoogleCalendarClient, *,
         return NOT_AUTHORIZED_RESULT
     if state == "invalid":
         return REVOKED_RESULT
-    if calendar_id not in (None, "", "primary"):
-        return ("error: 初段では主カレンダー（primary）だけが"
-                "対象です")
+    if calendar_id is not None \
+            and not isinstance(calendar_id, str):
+        return "error: カレンダーの指定が正しくありません"
     now = now or datetime.now()
     try:
         start = _parse_date_arg(start_date, now.date())
@@ -1089,10 +1382,34 @@ def list_events_text(client: GoogleCalendarClient, *,
     if limit <= 0:
         return "error: 件数は 1 以上で指定してください"
     limit = min(limit, MAX_RESULTS_LIMIT)
-    try:
-        events, has_more = fetch_events(client, start, end, tz=tz)
-    except GoogleCalendarError as exc:
-        return _events_error_result(exc.kind)
+    target = (calendar_id or "").strip()
+    names: dict[str, str] = {}
+    if target in ("", "all"):
+        targets = selected_calendar_ids(client.user_data_dir)
+    elif target == "primary":
+        targets = ["primary"]
+    else:
+        # 指定された ID の実在と権限を、一覧で確かめてから取る
+        try:
+            entries = fetch_calendar_list(client)
+        except GoogleCalendarError as exc:
+            return _events_error_result(exc.kind)
+        entry = next((e for e in entries if e.id == target), None)
+        if entry is None:
+            return CALENDAR_NOT_FOUND_RESULT
+        targets = [target]
+        names = {entry.id: entry.summary}
+    if len(targets) > 1:
+        # 統合表示で由来の名前を添えるため、一覧から対応を取る
+        # （取れなければ名前なしで続ける）
+        names = calendar_names(client) or names
+    events, has_more, errors = fetch_events_for_calendars(
+        client, targets, start, end, tz=tz, names=names)
+    if errors and len(errors) >= len(targets):
+        first = errors[0]
+        if len(targets) == 1 and first.status == 404:
+            return CALENDAR_NOT_FOUND_RESULT
+        return _events_error_result(first.kind)
     return format_events(events, start, end, limit=limit,
                          has_more=has_more)
 

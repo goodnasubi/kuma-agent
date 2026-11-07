@@ -60,6 +60,7 @@ ERROR_KIND_ERROR = "error"  # その他の例外
 ERROR_KIND_NOT_CONFIGURED = "not_configured"  # 連携が未設定
 ERROR_KIND_NOT_AUTHORIZED = "not_authorized"  # 利用者が未認可
 ERROR_KIND_REVOKED = "revoked"  # 許可が失効・取り消し
+ERROR_KIND_INSUFFICIENT_SCOPE = "insufficient_scope"  # 許可の範囲不足
 
 # 時間切れと分かる結果文の断片。委任の時間切れ（delegate.py）、
 # MCP の応答待ち（mcp_client.py）、道具の subprocess や Web 取得
@@ -98,6 +99,8 @@ def classify_tool_error(result: str) -> str | None:
             return ERROR_KIND_NOT_AUTHORIZED
         if "許可が無効になっています" in result:
             return ERROR_KIND_REVOKED
+        if "許可の範囲が足りません" in result:
+            return ERROR_KIND_INSUFFICIENT_SCOPE
     if "見つかりません" in result:
         return ERROR_KIND_NOT_FOUND
     if any(marker in result for marker in _TIMEOUT_MARKERS):

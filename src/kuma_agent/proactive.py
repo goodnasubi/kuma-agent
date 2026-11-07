@@ -113,6 +113,10 @@ AF-5）も発言を伴わない仕事として 1 日 1 回まで行う: 進行�
 （同じ出来事を二重に触れない）。連携が未設定・未認可・
 失敗のときは材料に入れず、エラー文も渡さず、従来どおり
 静かに動く。こちらも日報への倒し込みには混ぜない。
+0.78.0 からは、利用者が選択したカレンダー群（選択が無け
+れば主カレンダーだけ）の予定を時刻順に統合して 1 つの節に
+する。一部のカレンダーの取得が失敗しても、取れた分だけで
+節を作る（全部失敗のときだけ従来どおり材料なし）。
 
 投稿先は main の会話記録で、追記は Session が使う既存の保存経路
 （Memory.append_turn）を通す。発言には能動発信の印
@@ -172,11 +176,12 @@ from .memory import (
 from .goal_progress import observe_goal_progress
 from .google_calendar import (
     CalendarEvent,
-    GoogleCalendarError,
     build_client as build_google_calendar_client,
-    fetch_events,
+    calendar_names,
+    fetch_events_for_calendars,
     format_events,
     format_time_range,
+    selected_calendar_ids,
 )
 from .memory_audit import audit_memory, mark_confirm_asked, pending_confirm
 from .memory_extract import auto_extract_memory
@@ -468,10 +473,14 @@ def calendar_briefing_materials(
     """朝のまとめの材料にする、今日の予定（Google カレンダー）。
 
     戻り値は (予定の節の文面, 用事への注記 {用事 ID: 注記},
-    取得できたが予定が 0 件だったか)。連携が未設定・未認可・
-    失敗のときは (None, {}, False) で、節も注記も渡さない
-    （エラー文も渡さない。設計 §4.1・§4.4）。用事と強く
-    重なる予定は節から外し、用事の行への注記（時刻つきは
+    取得できたが予定が 0 件だったか)。対象は利用者が選択した
+    カレンダー群（選択が無ければ主カレンダーだけ、0.77.0 と
+    互換）で、予定は時刻順に統合して 1 つの節にする。連携が
+    未設定・未認可・（全部のカレンダーが）失敗のときは
+    (None, {}, False) で、節も注記も渡さない（エラー文も渡さ
+    ない。設計 §4.1・§4.4）。一部のカレンダーだけ失敗した
+    場合は、取れた分だけで節を作る。用事と強く重なる予定は
+    節から外し、用事の行への注記（時刻つきは
     「予定 HH:MM–HH:MM」、終日は「終日予定あり」）に寄せる。
     client はテスト用の差し替え口で、通常は cfg から組み立てる。
     """
@@ -482,9 +491,11 @@ def calendar_briefing_materials(
     if client.status().state != "authorized":
         return None, {}, False
     today = now.date()
-    try:
-        events, has_more = fetch_events(client, today, today, tz=tz)
-    except GoogleCalendarError:
+    targets = selected_calendar_ids(cfg.user_data_dir)
+    names = calendar_names(client) if len(targets) > 1 else {}
+    events, has_more, errors = fetch_events_for_calendars(
+        client, targets, today, today, tz=tz, names=names)
+    if errors and len(errors) >= len(targets):
         return None, {}, False  # 失効・通信失敗は静かに従来動作へ
     if not events:
         return None, {}, True
