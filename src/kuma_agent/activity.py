@@ -1,0 +1,267 @@
+"""活動の記録（道具の呼び出し・承認・外部送信・CLI の起動）。
+
+何か起きたときに「いつ・どの会話で・どの道具が・何の引数で・
+承認されたか・結果はどうだったか」と「外へ何を送ったか」を、
+モデルの応答文に頼らず後から追えるようにするための記録。
+使用量（usage.py）と同じ流儀で、そのユーザーの置き場の
+activity.jsonl へ 1 行 1 件で追記する。記録の失敗で会話や送信を
+落とさないよう、例外は外へ出さない。
+
+記録する種別は 4 つ:
+- tool_call: 道具の呼び出し（引数の要約と結果の抜粋）
+- approval: 承認対象の道具への承認・却下
+- external_send: Telegram / LINE への能動発信の配信
+- cli_launch: CLI 系の頭脳の起動。CLI 系では道具の実行が外部
+  CLI の側で行われるため、道具単位の記録はできず、起動した
+  ことだけを残す（記録の粒度が粗くなる限界がある）
+
+引数は承認画面向けの要約（tools.summarize_tool_args）を再利用し、
+引数全体は記録しない（秘密情報を持ち込む道具があるため）。
+
+保持期限: 記録は行ごとの時刻で切り、期限より古い行は能動発信の
+巡回（proactive.check_and_post）から 1 日 1 回まで
+auto_cleanup_activity が落とす。保持日数は Config の
+activity_retention_days（環境変数 KUMA_ACTIVITY_RETENTION_DAYS、
+既定 90 日。0 で無期限）。
+"""
+from __future__ import annotations
+
+import json
+import os
+import threading
+from datetime import datetime, timedelta
+from pathlib import Path
+
+ACTIVITY_FILE = "activity.jsonl"
+CLEANUP_STATE_FILE = "activity_cleanup_state.json"
+
+KIND_TOOL_CALL = "tool_call"
+KIND_APPROVAL = "approval"
+KIND_EXTERNAL_SEND = "external_send"
+KIND_CLI_LAUNCH = "cli_launch"
+
+# 一覧で返す件数の既定と上限（feed.py と同じ考え方）
+DEFAULT_LIMIT = 100
+MAX_LIMIT = 500
+
+# 結果や文面の抜粋の上限（引数の要約と同じ 200 字）
+SUMMARY_LIMIT = 200
+
+# 追記と掃除の書き換えを直列化する（Web サーバーは複数スレッド
+# から同時に記録し、巡回も同じファイルを触るため）
+_write_lock = threading.Lock()
+
+
+def _excerpt(text: object, limit: int = SUMMARY_LIMIT) -> str:
+    """記録用の抜粋にする。改行などを空白に潰し、長ければ切り詰める。"""
+    text = " ".join(str(text).split())
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
+
+
+def record_activity(user_data_dir: Path, kind: str, *,
+                    session_id: str = "", mode: str = "",
+                    tool: str = "", summary: str = "",
+                    result: str = "", target: str = "",
+                    ok: bool | None = None,
+                    now: datetime | None = None) -> None:
+    """活動を 1 件、ユーザーの置き場の activity.jsonl へ追記する。
+
+    記録に失敗しても呼び出し側（会話・送信・巡回）を落とさない
+    よう、例外は外へ出さない。
+    """
+    entry: dict[str, object] = {
+        "ts": (now or datetime.now()).isoformat(timespec="seconds"),
+        "kind": kind,
+        "session_id": session_id,
+        "mode": mode,
+        "tool": tool,
+        "summary": summary,
+        "result": result,
+    }
+    if target:
+        entry["target"] = target
+    if ok is not None:
+        entry["ok"] = ok
+    try:
+        with _write_lock:
+            user_data_dir.mkdir(parents=True, exist_ok=True)
+            with open(user_data_dir / ACTIVITY_FILE, "a",
+                      encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # 記録の失敗で本体の動作を落とさない
+
+
+def record_tool_call(user_data_dir: Path, session_id: str, mode: str,
+                     name: str, args_summary: str, result: str,
+                     now: datetime | None = None) -> None:
+    """道具の呼び出しを記録する（引数の要約と結果の抜粋）。"""
+    record_activity(
+        user_data_dir, KIND_TOOL_CALL, session_id=session_id, mode=mode,
+        tool=name, summary=args_summary, result=_excerpt(result),
+        ok=not result.startswith("error"), now=now)
+
+
+def record_approval(user_data_dir: Path, session_id: str, mode: str,
+                    name: str, args_summary: str, approved: bool,
+                    now: datetime | None = None) -> None:
+    """承認対象の道具への承認・却下を記録する。"""
+    record_activity(
+        user_data_dir, KIND_APPROVAL, session_id=session_id, mode=mode,
+        tool=name, summary=args_summary,
+        result="approved" if approved else "denied", ok=approved,
+        now=now)
+
+
+def record_external_send(user_data_dir: Path, channel: str, target: str,
+                         text: str, now: datetime | None = None) -> None:
+    """外部（Telegram / LINE）への送信を記録する。
+
+    宛先（chat id / user id）は利用者向け画面に出すものではない
+    が、記録ファイル自体が利用者の置き場の中にあるため、誰へ
+    送ったかを追えるよう target として残す。
+    """
+    record_activity(
+        user_data_dir, KIND_EXTERNAL_SEND, tool=channel,
+        summary=_excerpt(text), target=target, now=now)
+
+
+def record_cli_launch(user_data_dir: Path, session_id: str, mode: str,
+                      provider: str, model: str,
+                      now: datetime | None = None) -> None:
+    """CLI 系の頭脳を起動したことを記録する（道具単位は追えない）。"""
+    record_activity(
+        user_data_dir, KIND_CLI_LAUNCH, session_id=session_id, mode=mode,
+        tool=provider, summary=model, now=now)
+
+
+def _normalize_limit(limit: object) -> int:
+    """件数の指定を既定・上限の範囲へそろえる。"""
+    try:
+        value = int(limit)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return DEFAULT_LIMIT
+    return max(1, min(value, MAX_LIMIT))
+
+
+def load_activity_records(user_data_dir: Path,
+                          limit: object = None) -> list[dict]:
+    """activity.jsonl の記録を新しい順に返す。壊れた行は読み飛ばす。"""
+    path = user_data_dir / ACTIVITY_FILE
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    records: list[dict] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    records.reverse()
+    return records[:_normalize_limit(limit)]
+
+
+def _record_time(line: str) -> datetime | None:
+    """1 行の記録の時刻を取り出す。読めなければ None。"""
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    ts = record.get("ts")
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+
+
+def cleanup_expired_activity(user_data_dir: Path, retention_days: int,
+                             now: datetime | None = None) -> int:
+    """保持期限より古い行を activity.jsonl から落とし、件数を返す。
+
+    retention_days が 0 以下なら無期限として何もしない。時刻が
+    読めない行（壊れた行を含む）は、古いと判断できないため残す
+    （消す側ではなく残す側に倒す）。書き換えは一時ファイルへ
+    書いてから os.replace で差し替え、追記と競合しないよう
+    記録用のロックの中で行う。失敗しても例外は外へ出さない。
+    """
+    if retention_days <= 0:
+        return 0
+    path = user_data_dir / ACTIVITY_FILE
+    now = now or datetime.now()
+    cutoff = now - timedelta(days=retention_days)
+    removed = 0
+    try:
+        with _write_lock:
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                return 0
+            kept: list[str] = []
+            for line in lines:
+                if not line.strip():
+                    continue
+                ts = _record_time(line)
+                if ts is not None and ts < cutoff:
+                    removed += 1
+                    continue
+                kept.append(line)
+            if not removed:
+                return 0
+            tmp = path.with_name(path.name + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                for line in kept:
+                    f.write(line + "\n")
+            os.replace(tmp, path)
+    except Exception:
+        return 0  # 掃除の失敗で巡回や会話を落とさない
+    return removed
+
+
+def _last_cleanup_on(user_data_dir: Path) -> str | None:
+    """前回の自動掃除の日付（YYYY-MM-DD）。無ければ None。"""
+    try:
+        data = json.loads(
+            (user_data_dir / CLEANUP_STATE_FILE).read_text(
+                encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict):
+        value = data.get("last_cleanup_on")
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def auto_cleanup_activity(user_data_dir: Path, retention_days: int,
+                          now: datetime | None = None) -> int:
+    """巡回用の自動掃除。1 日 1 回まで、期限より古い行を落とす。
+
+    落とせる行が無かった日も掃除済みとして記録する（巡回のたびに
+    ファイルを読み直さないため）。無期限（retention_days が 0
+    以下）のときは何もしない。失敗しても例外は外へ出さない。
+    """
+    if retention_days <= 0:
+        return 0
+    now = now or datetime.now()
+    today = now.date().isoformat()
+    try:
+        if _last_cleanup_on(user_data_dir) == today:
+            return 0  # 本日は掃除済み
+        user_data_dir.mkdir(parents=True, exist_ok=True)
+        (user_data_dir / CLEANUP_STATE_FILE).write_text(
+            json.dumps({"last_cleanup_on": today}), encoding="utf-8")
+    except Exception:
+        return 0
+    return cleanup_expired_activity(user_data_dir, retention_days, now=now)

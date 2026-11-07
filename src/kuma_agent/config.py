@@ -104,6 +104,12 @@ class Config:
     # この日数を過ぎたら自動で掃除される（cleanup_expired）。0 で無期限
     retention_days: int = field(
         default_factory=lambda: _env_int("KUMA_RETENTION_DAYS", 90))
+    # 活動の記録（activity.jsonl）の保持期限（日数）。道具の呼び出し・
+    # 承認・外部送信の記録は、行ごとの時刻がこの日数を過ぎたら能動
+    # 発信の巡回で古い行から落とされる（activity.auto_cleanup_activity）。
+    # 0 で無期限
+    activity_retention_days: int = field(
+        default_factory=lambda: _env_int("KUMA_ACTIVITY_RETENTION_DAYS", 90))
     # 能動発信の巡回間隔（秒）。Web サーバーの裏側で定期的に全テナント×
     # 全ユーザーを巡回し、言うべきことがあるユーザーにだけ発言する
     # （proactive）。0 以下で巡回しない

@@ -93,6 +93,7 @@ from .settings import (
     set_proactive_enabled,
 )
 from .tools import summarize_tool_args
+from .activity import load_activity_records
 from .usage import summarize_usage
 
 # ブランド色（README のイメージカラー）
@@ -406,6 +407,18 @@ _PAGE_TEMPLATE = """\
   #usagePanel th, #usagePanel td { padding: 4px 10px 4px 0;
                text-align: right; }
   #usagePanel th:first-child, #usagePanel td:first-child { text-align: left; }
+  #activityPanel { background: var(--surface); border: 1px solid var(--line);
+                 border-radius: 6px; padding: 16px 20px;
+                 width: min(880px, calc(100% - 24px)); align-self: center;
+                 margin-top: 12px; }
+  #activityPanel[hidden] { display: none; }
+  #activityPanel h2 { font-size: 15px; margin: 0 0 8px; }
+  #activityPanel .activityNote { font-size: 13px; margin: 0 0 8px; }
+  .activityRow { padding: 6px 0; font-size: 14px;
+                 border-bottom: 1px solid var(--line); }
+  .activityRow:last-child { border-bottom: none; }
+  .activityRow .activityTime { white-space: nowrap; }
+  .activityRow .activityKind { font-weight: bold; }
   .notifyRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
                padding: 6px 0; font-size: 14px; }
   .notifyRow .tname { min-width: 8em; }
@@ -477,7 +490,7 @@ _PAGE_TEMPLATE = """\
               border: none; }
     #tabBar button svg { width: 24px; height: 24px; }
     #outputsPanel, #feedPanel, #ideasPanel, #goalsPanel, #profilePanel,
-    #usagePanel, #tenantPanel, #approvalPanel, #statusPanel, .tabNote,
+    #usagePanel, #activityPanel, #tenantPanel, #approvalPanel, #statusPanel, .tabNote,
     #adminMenu,
     #form, #quoteBar {
       width: calc(100% - 16px); }
@@ -660,6 +673,7 @@ _PAGE_TEMPLATE = """\
     <button id="outputsBtn" type="button" class="iconBtn" title="成果物" aria-label="成果物"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5v8l9 5 9-5zM3 8l9 5 9-5M12 13v8"/></svg></button>
     <button id="profileBtn" type="button" class="iconBtn" title="人格・記憶" aria-label="人格・記憶"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V4H6.5A2.5 2.5 0 0 0 4 6.5zM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg></button>
     <button id="usageBtn" type="button" class="iconBtn" title="使用量" aria-label="使用量"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 20v-6M11 20V5M17 20v-9M3 20h18"/></svg></button>
+    <button id="activityBtn" type="button" class="iconBtn" title="活動の記録" aria-label="活動の記録"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></button>
     <button id="exportBtn" type="button" class="iconBtn" title="書き出し" aria-label="書き出し"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M6 10l6-6 6 6M4 20h16"/></svg></button>
     <button id="importBtn" type="button" class="iconBtn" title="復元" aria-label="復元"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M6 10l6 6 6-6M4 20h16"/></svg></button>
     <input id="importFile" type="file" accept=".zip" hidden>
@@ -699,6 +713,11 @@ _PAGE_TEMPLATE = """\
   <div id="usageProviderRows"></div>
   <h3>日別（直近30日）</h3>
   <div id="usageDayRows"></div>
+</section>
+<section id="activityPanel" hidden>
+  <h2>活動の記録</h2>
+  <p class="activityNote">道具の呼び出し・承認・外への送信など、クマの活動の記録です（新しい順）。</p>
+  <div id="activityRows"></div>
 </section>
 <section id="statusPanel" hidden>
   <h2>いまの状況</h2>
@@ -829,6 +848,9 @@ const usagePanel = document.getElementById('usagePanel');
 const usageTotal = document.getElementById('usageTotal');
 const usageProviderRows = document.getElementById('usageProviderRows');
 const usageDayRows = document.getElementById('usageDayRows');
+const activityBtn = document.getElementById('activityBtn');
+const activityPanel = document.getElementById('activityPanel');
+const activityRows = document.getElementById('activityRows');
 const profileTabs = document.getElementById('profileTabs');
 const profileText = document.getElementById('profileText');
 const profileSaveBtn = document.getElementById('profileSave');
@@ -915,6 +937,7 @@ function showTab(name) {
     tenantPanel.hidden = true;
     profilePanel.hidden = true;
     usagePanel.hidden = true;
+    activityPanel.hidden = true;
   }
 }
 
@@ -1581,6 +1604,79 @@ usageBtn.addEventListener('click', () => {
   usagePanel.hidden = !usagePanel.hidden;
   if (!usagePanel.hidden) loadUsage();
 });
+
+// 活動の記録パネル。現在のテナント×ユーザーの活動（道具の呼び
+// 出し・承認・外への送信・CLI の起動）を新しい順に表示する。
+// 読み取りは /api/activity を使い、パネルを開くたびに取り直す
+activityBtn.addEventListener('click', () => {
+  activityPanel.hidden = !activityPanel.hidden;
+  if (!activityPanel.hidden) loadActivity();
+});
+
+const ACTIVITY_KIND_LABELS = {
+  tool_call: '道具の呼び出し',
+  approval: '承認',
+  external_send: '外への送信',
+  cli_launch: 'CLI の起動',
+};
+
+function activityText(entry) {
+  // 1 件分を表示用の 1 行に組み立てる
+  const parts = [];
+  if (entry.kind === 'tool_call') {
+    parts.push(entry.tool || '');
+    if (entry.summary) parts.push(entry.summary);
+    if (entry.result) parts.push('→ ' + entry.result);
+  } else if (entry.kind === 'approval') {
+    parts.push(entry.tool || '');
+    if (entry.summary) parts.push(entry.summary);
+    parts.push(entry.result === 'approved' ? '（承認されました）'
+                                            : '（却下されました）');
+  } else if (entry.kind === 'external_send') {
+    parts.push((entry.tool || '') + ' へ送信');
+    if (entry.summary) parts.push(entry.summary);
+  } else if (entry.kind === 'cli_launch') {
+    parts.push(entry.tool || '');
+    if (entry.summary) parts.push(entry.summary);
+  } else {
+    if (entry.tool) parts.push(entry.tool);
+    if (entry.summary) parts.push(entry.summary);
+    if (entry.result) parts.push(entry.result);
+  }
+  return parts.filter(Boolean).join(' ');
+}
+
+async function loadActivity() {
+  activityRows.innerHTML = '';
+  try {
+    const query = '?tenant=' + encodeURIComponent(currentTenant)
+      + '&user=' + encodeURIComponent(currentUser);
+    const res = await fetch('/api/activity' + query);
+    const data = await res.json();
+    const entries = data.entries || [];
+    if (!entries.length) {
+      const p = document.createElement('p');
+      p.textContent = '活動の記録はまだありません';
+      activityRows.appendChild(p);
+      return;
+    }
+    for (const entry of entries) {
+      const row = document.createElement('div');
+      row.className = 'activityRow';
+      const time = document.createElement('span');
+      time.className = 'activityTime';
+      time.textContent = String(entry.ts || '').replace('T', ' ');
+      row.appendChild(time);
+      row.appendChild(document.createTextNode(' '));
+      const kind = document.createElement('span');
+      kind.className = 'activityKind';
+      kind.textContent = ACTIVITY_KIND_LABELS[entry.kind] || entry.kind || '';
+      row.appendChild(kind);
+      row.appendChild(document.createTextNode(' ' + activityText(entry)));
+      activityRows.appendChild(row);
+    }
+  } catch (e) { /* 取れなければパネルは空のままにする */ }
+}
 
 // 書き出しボタン。現在のテナント×ユーザーの全データを ZIP で
 // ダウンロードする（/api/export。ZIP はサーバー側でメモリ上に
@@ -3619,6 +3715,20 @@ def _usage_payload(tenants: TenantStore, tenant: str,
     return {"tenant": tenant, "user": user, **summary.to_dict()}
 
 
+def _activity_payload(tenants: TenantStore, tenant: str,
+                      user: str, limit: object = None) -> dict:
+    """活動の記録 API の応答（GET /api/activity）。
+
+    活動の記録はユーザーごとの置き場（activity.jsonl）にあり、
+    対象は tenant / user で指した組み合わせ。記録は新しい順で、
+    limit は件数の上限（既定・上限は activity 側でそろえる）。
+    """
+    records = load_activity_records(
+        user_dir(tenant_dir(tenants.data_dir, tenant), user),
+        limit=limit)
+    return {"tenant": tenant, "user": user, "entries": records}
+
+
 def _feed_payload(tenants: TenantStore, tenant: str, user: str,
                   limit: object = None, kind: str | None = None) -> dict:
     """フィード API の応答（GET /api/feed）。
@@ -4036,6 +4146,15 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                     _first(query.get("user")) or tenants.default_user)
                 self._send_json(
                     200, _usage_payload(tenants, tenant, user))
+            elif split.path == "/api/activity":
+                tenant = normalize_tenant_name(
+                    _first(query.get("tenant")) or tenants.default_tenant)
+                user = normalize_user_name(
+                    _first(query.get("user")) or tenants.default_user)
+                self._send_json(
+                    200, _activity_payload(
+                        tenants, tenant, user,
+                        _first(query.get("limit"))))
             elif split.path == "/api/export":
                 tenant = normalize_tenant_name(
                     _first(query.get("tenant")) or tenants.default_tenant)

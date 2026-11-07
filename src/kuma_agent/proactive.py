@@ -100,6 +100,7 @@ from datetime import datetime, time
 from pathlib import Path
 from typing import Callable
 
+from .activity import auto_cleanup_activity
 from .config import Config, normalize_mode
 from .delegate import run_delegated_task
 from .feed import KIND_BRIEFING, KIND_PROACTIVE, append_feed_entry
@@ -670,6 +671,15 @@ def check_and_post(cfg: Config, now: datetime | None = None,
                          now=now)
     except Exception:
         pass  # 整理の失敗で巡回全体は落とさない
+
+    # 活動の記録（activity.jsonl）の保持期限の掃除: 1 日 1 回まで、
+    # 期限（activity_retention_days、既定 90 日）より古い行を落とす。
+    # 会話への投稿はしない。失敗しても巡回自体は続ける
+    try:
+        auto_cleanup_activity(user_data_dir, cfg.activity_retention_days,
+                              now=now)
+    except Exception:
+        pass  # 掃除の失敗で巡回全体は落とさない
 
     posted: list[str] = []
     session: Session | None = None

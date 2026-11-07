@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import transcribe
+from .activity import record_approval, record_cli_launch, record_tool_call
 from .config import Config, normalize_mode
 from .delegate import DELEGATE_NOTICE, run_delegated_task
 from .jobs import JobBoard
@@ -50,7 +51,7 @@ from .settings import approvals_enabled_for
 from .skills import load_skills
 from .spaces import SpaceStore
 from .tasks import TaskBoard, format_remind_at
-from .tools import Tool, ToolBox, activity_label
+from .tools import Tool, ToolBox, activity_label, summarize_tool_args
 from .usage import record_usage
 from .watches import WatchBoard
 from .worksteps import WorkSteps, format_steps
@@ -456,6 +457,13 @@ class Session:
                     args = call.get("args", {})
                     self._notify(activity_label(call["name"], args))
                     result = self.tools.call(call["name"], args)
+                    # 活動の記録: 道具の呼び出しと結果は、モデルの
+                    # 応答文とは別に activity.jsonl へ残す（記録の
+                    # 失敗で会話は落とさない。activity 側で握る）
+                    record_tool_call(
+                        self.cfg.user_data_dir, self.session_id, self.mode,
+                        call["name"],
+                        summarize_tool_args(call["name"], args), result)
                     self.history.append(Message("tool", result, tool_call_id=call.get("id"), tool_name=call["name"]))
             return "（道具の呼び出しが上限に達しました）"
         finally:
@@ -519,12 +527,16 @@ class Session:
         いない経路（テストや組み込み利用）では安全側に倒して常に
         却下する。承認者の例外も却下として扱う。承認されたら表示
         をその道具の作業名に戻す（実行中の表示が承認待ちのままに
-        ならないよう）。
+        ならないよう）。可否の結果は活動の記録（activity.jsonl）
+        にも残す。
         """
         self._notify(approval_waiting_text(name))
         approver = self.approver
         if approver is None:
             self._notify(APPROVAL_DENIED)
+            record_approval(self.cfg.user_data_dir, self.session_id,
+                            self.mode, name,
+                            summarize_tool_args(name, args), False)
             return False
         try:
             approved = bool(approver(name, dict(args)))
@@ -534,6 +546,8 @@ class Session:
             self._notify(activity_label(name, args))
         else:
             self._notify(APPROVAL_DENIED)
+        record_approval(self.cfg.user_data_dir, self.session_id, self.mode,
+                        name, summarize_tool_args(name, args), approved)
         return approved
 
     # ---------------------------------------------------------- 圧縮
@@ -621,7 +635,15 @@ class Session:
         利用も同じユーザーに記録される（session_id で区別できる）。
         記録は応答のたび（道具の往復で複数回呼ぶ場合は呼び出し
         ごと）に行い、失敗しても会話には影響しない。
+
+        CLI 系の頭脳では道具の実行が外部 CLI の側で行われるため
+        道具単位の活動は追えない。代わりに、起動したことだけを
+        活動の記録（cli_launch）として残す。
         """
+        if self.cfg.is_cli_provider:
+            record_cli_launch(self.cfg.user_data_dir, self.session_id,
+                              self.mode, self.cfg.provider,
+                              _model_name(self.model))
         reply = self.model.chat(
             system_prompt, self._with_reaction_notes(messages), tools)
         record_usage(self.cfg.user_data_dir, self.cfg.provider,

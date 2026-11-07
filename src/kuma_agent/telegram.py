@@ -46,11 +46,14 @@ from typing import Callable, Protocol
 import httpx
 
 from .config import Config, normalize_mode
+from .activity import record_external_send
 from .memory import (
     DEFAULT_SESSION_ID,
     normalize_session_id,
     normalize_tenant_name,
     normalize_user_name,
+    tenant_dir,
+    user_dir,
 )
 from .session import Session
 
@@ -418,6 +421,9 @@ def build_proactive_notifier(
         api = HttpxTelegramApi(cfg.telegram_bot_token)
     target = (normalize_tenant_name(cfg.telegram_tenant),
               normalize_user_name(cfg.telegram_user))
+    # 活動の記録の置き場（配信先のユーザーの置き場）
+    target_data_dir = user_dir(tenant_dir(cfg.data_dir, target[0]),
+                               target[1])
 
     def notify(tenant: str, user: str, text: str) -> None:
         if (normalize_tenant_name(tenant),
@@ -428,6 +434,10 @@ def build_proactive_notifier(
                 for chunk in split_message(text):
                     if chunk:
                         api.send_message(chat_id, chunk)
+                # 送れた分は活動の記録にも残す（記録の失敗で
+                # 配信や巡回は止めない。activity 側で握る）
+                record_external_send(target_data_dir, "telegram",
+                                     str(chat_id), text)
             except Exception:
                 # 1 チャットの失敗で他のチャットや巡回は止めない。
                 # 文面にはトークンや本文を含めない
