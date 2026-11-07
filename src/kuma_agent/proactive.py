@@ -96,6 +96,14 @@ AF-5）も発言を伴わない仕事として 1 日 1 回まで行う: 進行�
 なるが、日報への倒し込みには混ぜない（声かけは朝のまとめ経由
 だけ。日報は用事の知らせと役割を分ける）。
 
+期限の近い記憶（AM-4）も朝のまとめの材料に足す: 属性 until
+（AM-2）を持ち、期限まで 3 日以内の項目（最大 3 件）を
+「近づいている期限のある記憶」として子の指示文に含める。
+進行中の用事と強く重なる項目は、用事側の知らせに任せて材料
+から外す（同じことを二重に知らせない）。期限を過ぎた項目は
+棚卸し（AM-3）の担当で、こちらには含めない。こちらも日報
+への倒し込みには混ぜない。
+
 投稿先は main の会話記録で、追記は Session が使う既存の保存経路
 （Memory.append_turn）を通す。発言には能動発信の印
 （proactive: true）を付けるが、読み込み側は role / content /
@@ -142,16 +150,20 @@ from .jobs import Job, JobBoard, is_due
 from .llm import ChatModel
 from .memory import (
     DEFAULT_SESSION_ID,
+    Memory,
+    _query_terms,
     list_tenant_names,
     list_user_names,
     normalize_tenant_name,
     normalize_user_name,
+    split_memory_segments,
     tenant_dir,
 )
 from .goal_progress import observe_goal_progress
 from .memory_audit import audit_memory, mark_confirm_asked, pending_confirm
 from .memory_extract import auto_extract_memory
-from .memory_tidy import auto_tidy_memory
+from .memory_meta import load_memory_meta
+from .memory_tidy import _is_heading_segment, _segment_key, auto_tidy_memory
 from .notify_prefs import load_notify_prefs, parse_hhmm
 from .session import Session
 from .settings import proactive_enabled_for
@@ -375,9 +387,95 @@ def open_steps_text(user_data_dir: Path, now: datetime) -> str | None:
     return "\n".join(lines)
 
 
+# 朝のまとめの材料に挙げる「期限が近い」の窓（AM-4）。設計では
+# 「期限が近い（例: 3 日以内）」とされ、今日からこの日数以内に
+# 期限が来る項目を対象にする（期限当日を含む）
+NEAR_DEADLINE_DAYS = 3
+# 朝のまとめの材料に挙げる、期限の近い記憶の上限（AM-4）。
+# 他の材料の上限（手順の残り 3 件）に合わせる
+_MAX_BRIEFING_DEADLINES = 3
+
+
+def _strongly_overlaps_task(item_text: str, task: Task) -> bool:
+    """記憶の項目と用事が「同じこと」を指すほど強く重なるか（AM-4）。
+
+    判定は記憶の検索（search_memory_text）と同じ、キーワードの
+    部分文字列一致の流儀で、用事の題名・メモから取った語が項目
+    本文にどれだけ含まれるかで見る。知らせを消す側の判定なので
+    保守的にし、はっきり重なる場合だけ True にする:
+    - 一致する語が 2 つ以上ある場合
+    - 語が 1 つしか取れない用事は、その語自体が 4 文字以上
+      （＝それだけで具体的な内容を持つ長さ）で、項目本文に
+      そのまま含まれるときだけ
+    言い換えや弱い重なりは拾わない（その場合は記憶側も知らせる。
+    二重になる代わりに、知らせが消えすぎる事故を避ける）。
+    """
+    terms = _query_terms(f"{task.title} {task.memo}")
+    if not terms:
+        return False
+    matched = [term for term in terms if term in item_text]
+    if len(matched) >= 2:
+        return True
+    return (len(terms) == 1 and len(matched) == 1
+            and len(terms[0]) >= 4)
+
+
+def near_deadline_text(user_data_dir: Path, open_tasks: list[Task],
+                       now: datetime) -> str | None:
+    """朝のまとめの材料にする、期限の近い記憶の文面（AM-4）。
+
+    属性 until（AM-2）を持ち、期限まで NEAR_DEADLINE_DAYS 日
+    以内の項目を、期限の近い順に最大 _MAX_BRIEFING_DEADLINES
+    件、各行に残りの日数を添えて返す。期限を過ぎた項目は
+    棚卸し（AM-3）の担当なので含めない。進行中の用事と強く
+    重なる項目は、用事側の知らせに任せて外す（同じことを
+    二重に知らせない）。対象が無ければ None。
+    """
+    text = Memory(user_data_dir).load_long_term()
+    if not text.strip():
+        return None
+    meta = load_memory_meta(user_data_dir)
+    if not meta:
+        return None
+    today = now.date()
+    picked: list[tuple[str, int, str]] = []
+    for seg in split_memory_segments(text):
+        if _is_heading_segment(seg.text):
+            continue
+        entry = meta.get(_segment_key(seg.text))
+        if not entry or not entry.get("until"):
+            continue
+        try:
+            until = datetime.strptime(entry["until"], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        days = (until - today).days
+        if days < 0 or days > NEAR_DEADLINE_DAYS:
+            continue  # 期限切れは棚卸しの担当。遠い期限はまだ知らせない
+        if any(_strongly_overlaps_task(seg.text, task)
+               for task in open_tasks):
+            continue  # 用事として立っている分は用事側の知らせに任せる
+        picked.append((entry["until"], seg.line, seg.text))
+    if not picked:
+        return None
+    picked.sort()
+    lines = []
+    for until, _line, seg_text in picked[:_MAX_BRIEFING_DEADLINES]:
+        body = seg_text.lstrip()
+        if body.startswith("- "):
+            body = body[2:]
+        days = (datetime.strptime(until, "%Y-%m-%d").date() - today).days
+        if days == 0:
+            lines.append(f"・{body}（期限は今日まで）")
+        else:
+            lines.append(f"・{body}（期限まであと{days}日）")
+    return "\n".join(lines)
+
+
 def build_briefing_prompt(open_tasks: list[Task], now: datetime,
                           confirm_text: str | None = None,
-                          steps_text: str | None = None) -> str:
+                          steps_text: str | None = None,
+                          deadlines_text: str | None = None) -> str:
     """朝のまとめを子へ頼む指示文を組み立てる。
 
     その日の日付と、進行中の用事の一覧（ミュート分は呼び出し側で
@@ -389,6 +487,10 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
     steps_text（AF-3 の手順の残り）があれば、「エージェントの
     作業の手順の残り」として材料に足し、まとめの中で自然に触れる
     よう指示する。こちらも日報の組み立てには混ぜない。
+    deadlines_text（AM-4 の期限の近い記憶）があれば、「近づいて
+    いる期限のある記憶」として材料に足し、まとめの中で自然に
+    期限が近いことに触れるよう指示する。こちらも日報の組み立て
+    には混ぜない。
     """
     date_text = (f"{now.year}年{now.month}月{now.day}日"
                  f"（{_WEEKDAY_NAMES[now.weekday()]}）")
@@ -417,13 +519,20 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
             "確認したい記憶:",
             f"・{confirm_text}",
         ]
+    if deadlines_text:
+        lines += [
+            "",
+            "近づいている期限のある記憶:",
+            deadlines_text,
+        ]
     lines += [
         "",
         "やること:",
         "- カレンダーを確認できる道具（予定の一覧を取る道具）が"
         "あれば、今日の予定を確認してください。",
         "- 今日の予定も進行中の用事も無く、確認したい記憶も"
-        "作業の手順の残りも無ければ、「なし」とだけ答えてください。",
+        "作業の手順の残りも近づいている期限のある記憶も"
+        "無ければ、「なし」とだけ答えてください。",
         "- どちらかあれば、朝の挨拶に続けて、今日の予定（時刻と"
         "題名）と進行中の用事を短くまとめた、利用者への知らせを"
         "書いてください（その文章がそのまま利用者へ投稿されます）。",
@@ -438,6 +547,10 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
             "- 確認したい記憶があれば、知らせの中で自然に、その"
             "内容が今も同じかどうかを尋ねてください（1 件だけ。"
             "例:「そういえば、〜は今も同じですか」）。")
+    if deadlines_text:
+        lines.append(
+            "- 近づいている期限のある記憶があれば、知らせの中で"
+            "自然に、その期限が近いことに触れてください。")
     return "\n".join(lines)
 
 
@@ -462,6 +575,7 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
                    manual: bool = False,
                    confirm_text: str | None = None,
                    steps_text: str | None = None,
+                   deadlines_text: str | None = None,
                    ) -> tuple[str, str] | None:
     """その日の声かけ（朝のまとめ／日報）の文面を決める。
 
@@ -482,11 +596,12 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
     5. 用事もカレンダーらしい道具も無ければ、子を動かす材料が
        無いので何も言わない。ただし確認したい記憶（confirm_text、
        棚卸し AM-3 の候補）や作業の手順の残り（steps_text、
-       AF-3）がある場合は、それ自体が材料になる
+       AF-3）、期限の近い記憶（deadlines_text、AM-4）がある
+       場合は、それ自体が材料になる
     6. 子にまとめさせ、失敗・空応答なら用事がある場合だけ従来の
        日報に倒す。「なし」なら確認済みを記録して何も言わない
-       （日報に倒した場合は確認も手順の残りも混ぜない。候補は
-       翌日以降に回る）
+       （日報に倒した場合は確認も手順の残りも期限の近い記憶も
+       混ぜない。候補は翌日以降に回る）
     """
     def daily_fallback() -> tuple[str, str] | None:
         """従来の日報の組み立てに倒す（種別は能動発信）。"""
@@ -506,7 +621,8 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
     if isinstance(session.model, _UnusedModel):
         return daily_fallback()
     if not visible_tasks and not _has_calendar_tool(session) \
-            and not confirm_text and not steps_text:
+            and not confirm_text and not steps_text \
+            and not deadlines_text:
         return None
     executor = (briefing_executor if briefing_executor is not None
                 else _sweep_executor)
@@ -514,7 +630,8 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
         result = executor(
             session, build_briefing_prompt(visible_tasks, now,
                                            confirm_text=confirm_text,
-                                           steps_text=steps_text))
+                                           steps_text=steps_text,
+                                           deadlines_text=deadlines_text))
     except Exception as e:  # 子の失敗で声かけ自体は欠かさない
         result = f"error: {e}"
     if not isinstance(result, str):
@@ -910,10 +1027,20 @@ def check_and_post(cfg: Config, now: datetime | None = None,
             steps_text = open_steps_text(user_data_dir, now)
         except Exception:
             steps_text = None
+        # 期限の近い記憶（AM-4）: こちらも朝のまとめの材料に
+        # だけ渡す。用事と強く重なる項目は材料の組み立て側で
+        # 外してある。読み取りの失敗で日報自体は落とさない
+        deadlines_text: str | None = None
+        try:
+            deadlines_text = near_deadline_text(
+                user_data_dir, visible_tasks, now)
+        except Exception:
+            deadlines_text = None
         daily = _daily_message(cfg, now, visible_tasks, user_data_dir,
                                get_session, briefing_executor, manual=manual,
                                confirm_text=confirm[1] if confirm else None,
-                               steps_text=steps_text)
+                               steps_text=steps_text,
+                               deadlines_text=deadlines_text)
         if daily is not None:
             text, feed_kind = daily
             get_session().post_proactive_message(text)
