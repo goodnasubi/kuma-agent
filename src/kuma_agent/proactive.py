@@ -89,6 +89,24 @@ AF-5）も発言を伴わない仕事として 1 日 1 回まで行う: 進行�
 いたらフィード（種別 task）にだけ残す。初回の観測は基準を取る
 だけで記録しない。モデルは使わない。
 
+見張りの変化には「通知の取捨」（0.84.0）がある: 見張りごとに
+届け方（delivery）を持ち、immediate（既定）は従来どおり
+その場で知らせ文を作って投稿し、digest はその場では投稿せず
+変化の材料を置き場（notification_triage.py の
+notification_queue.jsonl）へ残す。寄せた変化は、朝のまとめの
+材料に「まとめて知らせる変化」として古い順に最大 5 件入れ、
+投稿された場合だけ配信済みにする。朝のまとめの子が失敗・
+「なし」・モデルなし・無効の場合は、日報の組み立てにも専用の
+節として含めて届ける（届け先を絶やさない）。静かな時間帯や
+その日の声かけ枠が使えない日は未配信のまま翌日以降へ回す。
+置き場へ保存できなかった変化は即時へ倒し、基準は投稿まで
+進んだ場合だけ更新する。スレッドモードでは朝の知らせの
+経路が無いため digest でも即時に倒す。切り戻しとして
+KUMA_NOTIFICATION_TRIAGE=0 の間は新しい変化を寄せず即時に
+倒すが、既にある未配信分は読み続けて届ける。見張りの即時の
+知らせ文は、委任の内部専用の知らせ文作成役（道具なし）が
+作る。
+
 朝のまとめの材料には、main の会話の作業の手順の残り（AF-3）も
 足す: 終わっていない手順のうち進行中・停滞のもの（最大 3 件）を、
 状態と「その状態になってからの日数」（Step.updated_at から数える）
@@ -151,7 +169,7 @@ from .delegate import run_delegated_task
 
 
 def _sweep_executor(session: Session, prompt: str) -> str:
-    """巡回（朝のまとめ・定期ジョブ・見張り）用の委任の実行役。
+    """巡回（朝のまとめ・定期ジョブ）用の委任の実行役。
 
     巡回側には失敗時の受け皿（日報への倒し込み・失敗の知らせ・
     次回の巡回での再確認）が既にあるため、委任の立て直し
@@ -159,6 +177,19 @@ def _sweep_executor(session: Session, prompt: str) -> str:
     抑えた形を巡回の既定の実行役にする。
     """
     return run_delegated_task(session, prompt, retry=False)
+
+
+def _watch_notice_executor(session: Session, prompt: str) -> str:
+    """見張りの知らせ文用の委任の実行役（内部専用の知らせ文作成役）。
+
+    知らせ文の作成は、巡回が集めた材料（前回・今回の要約）だけ
+    で足りるため、道具を持たない内部専用の型（notice）で子を
+    作る。計画役（plan）は役割の指示が違うため流用しない
+    （delegate.py の NOTICE_NOTICE）。立て直しをしない点は
+    _sweep_executor と同じ。
+    """
+    return run_delegated_task(session, prompt, retry=False,
+                              role="notice")
 from .feed import KIND_BRIEFING, KIND_PROACTIVE, append_feed_entry
 from .jobs import Job, JobBoard, is_due
 from .llm import ChatModel
@@ -187,6 +218,21 @@ from .memory_audit import audit_memory, mark_confirm_asked, pending_confirm
 from .memory_extract import auto_extract_memory
 from .memory_meta import load_memory_meta
 from .memory_tidy import _is_heading_segment, _segment_key, auto_tidy_memory
+from .notification_triage import (
+    MAX_BRIEFING_EVENTS,
+    REASON_QUEUE_FAILED_IMMEDIATE,
+    ROUTE_DIGEST,
+    QueueEvent,
+    auto_cleanup_queue,
+    build_digest_daily_section,
+    build_digest_material,
+    build_watch_event,
+    decide_watch_route,
+    enqueue_event,
+    has_event,
+    mark_delivered,
+    pending_events,
+)
 from .notify_prefs import load_notify_prefs, parse_hhmm
 from .session import Session
 from .settings import proactive_enabled_for
@@ -577,15 +623,16 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
                           deadlines_text: str | None = None,
                           calendar_text: str | None = None,
                           task_notes: dict[str, str] | None = None,
-                          calendar_empty: bool = False) -> str:
+                          calendar_empty: bool = False,
+                          digest_text: str | None = None) -> str:
     """朝のまとめを子へ頼む指示文を組み立てる。
 
     その日の日付と、進行中の用事の一覧（ミュート分は呼び出し側で
     除いてある）を含める。用事が無い場合はその旨を明記する
     （カレンダーの予定だけでもまとめられるように）。
     材料の並びは、今日の予定（Google カレンダー）→進行中の
-    用事→作業の手順の残り→確認したい記憶→近づいている期限の
-    ある記憶の順（設計 §4.2）。
+    用事→まとめて知らせる変化→作業の手順の残り→確認したい
+    記憶→近づいている期限のある記憶の順（設計 §4.2）。
     calendar_text（Google カレンダー連携の今日の予定）があれば、
     「今日の予定（Google カレンダー）」の節として最初に足す
     （巡回が直接集めた材料で、子は同じ範囲を取り直さない）。
@@ -603,6 +650,11 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
     いる期限のある記憶」として材料に足し、まとめの中で自然に
     期限が近いことに触れるよう指示する。こちらも日報の組み立て
     には混ぜない。
+    digest_text（通知の取捨 0.84.0 の、朝へ寄せた見張りの変化）
+    があれば、「まとめて知らせる変化」として材料に足し、知らせ
+    の中に必ず含めるよう指示する。寄せた変化は一度きりの出来事
+    で再び集め直せないため、他の材料と違い、日報への倒し込み
+    にも専用の節として含める（倒し込み側は _daily_message）。
     """
     date_text = (f"{now.year}年{now.month}月{now.day}日"
                  f"（{_WEEKDAY_NAMES[now.weekday()]}）")
@@ -631,6 +683,12 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
             lines.append(f"・{task.title}{memo}{note}")
     else:
         lines.append("進行中の用事はありません。")
+    if digest_text:
+        lines += [
+            "",
+            "まとめて知らせる変化:",
+            digest_text,
+        ]
     if steps_text:
         lines += [
             "",
@@ -659,7 +717,8 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
         "予定を確認してください。",
         "- 今日の予定の節も進行中の用事も無く、確認したい記憶も"
         "作業の手順の残りも近づいている期限のある記憶も"
-        "無ければ、「なし」とだけ答えてください。",
+        "まとめて知らせる変化も無ければ、「なし」とだけ"
+        "答えてください。",
         "- どちらかあれば、朝の挨拶に続けて、今日の予定（時刻と"
         "題名）と進行中の用事を短くまとめた、利用者への知らせを"
         "書いてください（その文章がそのまま利用者へ投稿されます）。",
@@ -668,6 +727,12 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
         lines.append(
             "- 予定と用事は別のものとしてまとめ、同じ内容は "
             "1 回だけ触れてください。")
+    if digest_text:
+        lines.append(
+            "- まとめて知らせる変化があれば、知らせの中に必ず"
+            "含めてください。各見張りは原則1行で、変化の要点"
+            "だけを伝えてください。材料に無い原因・重要度・"
+            "影響は推測しないでください。")
     if steps_text:
         lines.append(
             "- エージェントの作業の手順の残りがあれば、知らせの"
@@ -710,21 +775,37 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
                    calendar_text: str | None = None,
                    task_notes: dict[str, str] | None = None,
                    calendar_empty: bool = False,
-                   ) -> tuple[str, str] | None:
+                   digest_events: list[QueueEvent] | None = None,
+                   ) -> tuple[str, str, list[str]] | None:
     """その日の声かけ（朝のまとめ／日報）の文面を決める。
 
-    投稿すべき文面があれば (文面, フィードの種別) を返し、無ければ
-    None を返す。種別は、朝のまとめの子の文章がそのまま文面に
-    なったときだけ KIND_BRIEFING で、従来の日報の組み立てに
-    倒した場合は KIND_PROACTIVE（フィードへ残すときの区別）。
-    朝のまとめで子が「なし」と答えた場合は、確認済みの記録だけを
-    残して None を返す（投稿と声かけ枠の消費は呼び出し側の仕事）。
+    投稿すべき文面があれば (文面, フィードの種別, 配信済みに
+    する寄せた変化の ID 一覧) を返し、無ければ None を返す。
+    種別は、朝のまとめの子の文章がそのまま文面になったときだけ
+    KIND_BRIEFING で、従来の日報の組み立てに倒した場合は
+    KIND_PROACTIVE（フィードへ残すときの区別）。朝のまとめで
+    子が「なし」と答えた場合は、確認済みの記録だけを残して
+    None を返す（投稿と声かけ枠の消費は呼び出し側の仕事）。
+    配信済みの印付け自体も呼び出し側が投稿の確定後に行う。
+
+    digest_events は、朝へ寄せた見張りの変化（通知の取捨
+    0.84.0）のうち材料に選んだ分（古い順、最大
+    MAX_BRIEFING_EVENTS 件。呼び出し側で選ぶ）。他の材料と
+    性質が違い、一度きりの出来事で翌日に集め直せないため:
+    - 朝のまとめの材料に「まとめて知らせる変化」の節として足す
+    - 日報への倒し込みにも、専用の節（コードで組み立てる形）
+      として含める。用事が無くても、この節だけの日報を投稿
+      できる（届け先を絶やさないため）
+    - 子が「なし」と答えても、寄せた変化がある場合は採用せず
+      日報の組み立てに倒す
 
     判断の順序:
-    1. 朝のまとめが無効（off）なら従来の日報（用事があるときだけ）
+    1. 朝のまとめが無効（off）なら従来の日報（用事があるとき
+       だけ。ただし寄せた変化があればその節だけでも出す）
     2. まとめの時刻より前なら、まだ何も言わない（日報も出さない）。
        ただし手動実行（manual）のときはこの制限を受けない
     3. 今日すでに子が確認済み（「なし」）なら何も言わない
+       （寄せた変化も、その日は未配信のまま翌日へ回る）
     4. モデルなしの一時 Session では子を動かさず、従来の日報に
        倒す（日報の組み立てはモデルなしでできるため）
     5. 用事もカレンダーらしい道具も無ければ、子を動かす材料が
@@ -732,19 +813,36 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
        棚卸し AM-3 の候補）や作業の手順の残り（steps_text、
        AF-3）、期限の近い記憶（deadlines_text、AM-4）、今日の
        予定（calendar_text、Google カレンダー連携。用事へ寄せた
-       注記 task_notes だけの場合も含む）がある場合は、それ
-       自体が材料になる。予定が 0 件だった旨（calendar_empty）
-       は文脈として渡すだけで、材料にはしない
-    6. 子にまとめさせ、失敗・空応答なら用事がある場合だけ従来の
-       日報に倒す。「なし」なら確認済みを記録して何も言わない
-       （日報に倒した場合は確認も手順の残りも期限の近い記憶も
-       予定も混ぜない。候補は翌日以降に回る）
+       注記 task_notes だけの場合も含む）、寄せた変化
+       （digest_events）がある場合は、それ自体が材料になる。
+       予定が 0 件だった旨（calendar_empty）は文脈として渡す
+       だけで、材料にはしない
+    6. 子にまとめさせ、失敗・空応答なら日報の組み立てに倒す。
+       「なし」なら確認済みを記録して何も言わない。ただし
+       寄せた変化がある場合の「なし」は採用せず、日報の
+       組み立てに倒す（日報に倒した場合は確認も手順の残りも
+       期限の近い記憶も予定も混ぜない。候補は翌日以降に回る）
     """
-    def daily_fallback() -> tuple[str, str] | None:
-        """従来の日報の組み立てに倒す（種別は能動発信）。"""
-        if not visible_tasks:
+    picked = digest_events or []
+    picked_ids = [event.id for event in picked]
+
+    def daily_fallback() -> tuple[str, str, list[str]] | None:
+        """従来の日報の組み立てに倒す（種別は能動発信）。
+
+        寄せた変化の節だけは、他の朝のまとめ専用の材料と違い
+        ここにも含める（届け先を絶やさないため）。用事も節も
+        無ければ何も言わない。
+        """
+        parts: list[str] = []
+        if visible_tasks:
+            parts.append(build_message(visible_tasks, now))
+        section = build_digest_daily_section(picked, now)
+        if section:
+            parts.append(section)
+        if not parts:
             return None
-        return build_message(visible_tasks, now), KIND_PROACTIVE
+        return "\n".join(parts), KIND_PROACTIVE, \
+            picked_ids if section else []
 
     briefing_at = _briefing_at(cfg)
     if briefing_at is None:
@@ -760,19 +858,21 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
     if not visible_tasks and not _has_calendar_tool(session) \
             and not confirm_text and not steps_text \
             and not deadlines_text and not calendar_text \
-            and not task_notes:
+            and not task_notes and not picked:
         return None
     executor = (briefing_executor if briefing_executor is not None
                 else _sweep_executor)
     try:
         result = executor(
-            session, build_briefing_prompt(visible_tasks, now,
-                                           confirm_text=confirm_text,
-                                           steps_text=steps_text,
-                                           deadlines_text=deadlines_text,
-                                           calendar_text=calendar_text,
-                                           task_notes=task_notes,
-                                           calendar_empty=calendar_empty))
+            session, build_briefing_prompt(
+                visible_tasks, now,
+                confirm_text=confirm_text,
+                steps_text=steps_text,
+                deadlines_text=deadlines_text,
+                calendar_text=calendar_text,
+                task_notes=task_notes,
+                calendar_empty=calendar_empty,
+                digest_text=build_digest_material(picked, now)))
     except Exception as e:  # 子の失敗で声かけ自体は欠かさない
         result = f"error: {e}"
     if not isinstance(result, str):
@@ -781,9 +881,13 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
     if not result or result.startswith("error:"):
         return daily_fallback()
     if result.rstrip("。") == "なし":
+        if picked:
+            # 寄せた変化がある場合の「なし」は採用しない
+            # （一度きりの出来事で、届け先が無くなるため）
+            return daily_fallback()
         _record_briefing_checked(user_data_dir, today)
         return None
-    return result, KIND_BRIEFING
+    return result, KIND_BRIEFING, picked_ids
 
 # 通知コールバックの型: (テナント名, ユーザー名, 投稿文) を受け取る
 NotifyCallback = Callable[[str, str, str], None]
@@ -940,18 +1044,31 @@ def run_due_watches(cfg: Config, now: datetime,
 
     確認はモデルを使わない（対象のハッシュの比較だけ）。最初の
     確認は基準の記録だけで知らせない。確認に失敗したら理由を
-    記録して次回に回す（知らせはしない）。変化があったとき
-    だけ、知らせ文の作成を watch_executor（既定は委任の仕組み）
-    へ頼み、結果を main の会話へ投稿する。投稿した文面の一覧を
-    返す。モデルなしの一時 Session の経路では、変化を消費せず
-    実行できる経路（Web の巡回など）に委ねる（定期ジョブと同じ）。
+    記録して次回に回す（知らせはしない）。変化があったときの
+    届け方は見張りごとの設定（delivery）で決まる:
+
+    - immediate（既定）: 知らせ文の作成を watch_executor（既定は
+      委任の仕組みの内部専用の知らせ文作成役）へ頼み、結果を
+      main の会話へその場で投稿する
+    - digest: その場では投稿せず、変化の材料を置き場
+      （notification_queue.jsonl）へ残して朝の知らせでまとめて
+      届ける。置き場へ保存できた場合だけ基準を更新し、保存
+      できなければ即時へ倒す。スレッドモードや振り分けの
+      無効化中は、朝の知らせの経路が無い／止めているため
+      即時に倒す（notification_triage.decide_watch_route）
+
+    投稿した文面の一覧を返す（digest で寄せた分は含まない）。
+    モデルなしの一時 Session の経路では、即時の変化は消費せず
+    実行できる経路（Web の巡回など）に委ねる（定期ジョブと
+    同じ）。digest の寄せはモデルを使わないため、モデルなしの
+    経路でもそのまま行う。
     """
     board = WatchBoard(cfg.user_data_dir)
     due = [w for w in board.list() if watch_is_due(w, now)]
     if not due:
         return []
     executor = watch_executor if watch_executor is not None \
-        else _sweep_executor
+        else _watch_notice_executor
     posted: list[str] = []
     for watch in due:
         try:
@@ -968,6 +1085,29 @@ def run_due_watches(cfg: Config, now: datetime,
             board.mark_checked(watch.id, now, hash=new_hash,
                                summary=new_summary)
             continue
+        route, reason = decide_watch_route(
+            watch, mode=normalize_mode(cfg.mode),
+            triage_enabled=cfg.notification_triage_enabled)
+        if route == ROUTE_DIGEST:
+            # 朝へ寄せる: 置き場へ保存できた場合だけ基準を更新
+            # する。保存できなければ即時へ倒して下へ続ける
+            event = build_watch_event(watch, watch.last_summary,
+                                      new_summary, new_hash, now,
+                                      reason)
+            already = has_event(cfg.user_data_dir, event.id)
+            if enqueue_event(cfg.user_data_dir, event):
+                if not already:
+                    # 初めて入った出来事だけ、発生時の短い記録を
+                    # フィードに残す（朝まで何も起きていないように
+                    # 見えないように。配信時の文面も別途残る）
+                    append_feed_entry(
+                        cfg.user_data_dir, KIND_PROACTIVE,
+                        f"見張り「{watch.title}」で変化がありました。"
+                        "朝の知らせでまとめてお知らせします。")
+                board.mark_checked(watch.id, now, hash=new_hash,
+                                   summary=new_summary, changed=True)
+                continue
+            reason = REASON_QUEUE_FAILED_IMMEDIATE
         session = get_session()
         if isinstance(session.model, _UnusedModel):
             # モデルなしの経路では知らせ文を作れない。変化を
@@ -1049,6 +1189,15 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     try:
         auto_cleanup_activity(user_data_dir, cfg.activity_retention_days,
                               now=now)
+    except Exception:
+        pass  # 掃除の失敗で巡回全体は落とさない
+
+    # 通知の置き場（notification_queue.jsonl）の掃除: 1 日 1 回
+    # まで、配信済み・取り消し済みで保持期限（90 日）より古い
+    # 出来事を落とす。未配信の出来事はどれだけ古くても落とさ
+    # ない（自動の有効期限は付けない）。失敗しても巡回は続ける
+    try:
+        auto_cleanup_queue(user_data_dir, now=now)
     except Exception:
         pass  # 掃除の失敗で巡回全体は落とさない
 
@@ -1190,6 +1339,18 @@ def check_and_post(cfg: Config, now: datetime | None = None,
                 calendar_briefing_materials(cfg, visible_tasks, now)
         except Exception:
             calendar_text, task_notes, calendar_empty = None, {}, False
+        # 朝へ寄せた見張りの変化（通知の取捨 0.84.0）: この巡回
+        # の見張り処理が終わった後に未配信分を古い順に最大
+        # MAX_BRIEFING_EVENTS 件選ぶ（同じ巡回で検出した変化も、
+        # その日の朝の知らせがまだなら材料に入る）。振り分けが
+        # 無効化されている間も、既にある未配信分は読み続けて
+        # 届ける。読み取りの失敗で日報自体は落とさない
+        digest_events: list[QueueEvent] = []
+        try:
+            digest_events = pending_events(
+                user_data_dir, limit=MAX_BRIEFING_EVENTS)
+        except Exception:
+            digest_events = []
         daily = _daily_message(cfg, now, visible_tasks, user_data_dir,
                                get_session, briefing_executor, manual=manual,
                                confirm_text=confirm[1] if confirm else None,
@@ -1197,9 +1358,10 @@ def check_and_post(cfg: Config, now: datetime | None = None,
                                deadlines_text=deadlines_text,
                                calendar_text=calendar_text,
                                task_notes=task_notes,
-                               calendar_empty=calendar_empty)
+                               calendar_empty=calendar_empty,
+                               digest_events=digest_events)
         if daily is not None:
-            text, feed_kind = daily
+            text, feed_kind, delivered_ids = daily
             get_session().post_proactive_message(text)
             _record_posted(user_data_dir, today)
             append_feed_entry(user_data_dir, feed_kind, text)
@@ -1210,6 +1372,18 @@ def check_and_post(cfg: Config, now: datetime | None = None,
             if confirm is not None and feed_kind == KIND_BRIEFING:
                 try:
                     mark_confirm_asked(user_data_dir, confirm[0], now=now)
+                except Exception:
+                    pass  # 印付けの失敗で投稿や巡回は落とさない
+            # 寄せた変化は、実際に投稿された場合だけ配信済みに
+            # する（投稿前に印を付けない。印付けに失敗したら
+            # 未配信のまま残り、翌日に重複して届く側に倒れる）
+            if delivered_ids:
+                try:
+                    mark_delivered(
+                        user_data_dir, delivered_ids,
+                        via=("briefing" if feed_kind == KIND_BRIEFING
+                             else "daily"),
+                        now=now)
                 except Exception:
                     pass  # 印付けの失敗で投稿や巡回は落とさない
 

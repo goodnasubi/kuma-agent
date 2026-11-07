@@ -122,6 +122,16 @@ class Config:
     # 既定の 07:30 に倒す）は proactive.py 側で行う
     briefing_time: str = field(
         default_factory=lambda: os.environ.get("KUMA_BRIEFING_TIME", "07:30"))
+    # 通知の取捨（見張りの届け方の振り分け、0.84.0）の有効化:
+    # "0" の間は、見張りの delivery が digest でも即時に倒す
+    # （新しい振り分けの切り戻し）。ただし既に置き場
+    # （notification_queue.jsonl）にある未配信分は、無効化中も
+    # 朝の知らせの材料として読み続けて届ける（止める操作で
+    # 未配信分を消さない）。合成は notification_triage.py の
+    # 判定と proactive.py が担う
+    notification_triage_enabled: bool = field(
+        default_factory=lambda: os.environ.get(
+            "KUMA_NOTIFICATION_TRIAGE", "") != "0")
     # MCP サーバーへの要求の応答待ち上限（秒）。サーバーがこの時間に
     # 応答しなければ、その道具の呼び出しは失敗として扱う（接続は
     # 捨てて次回に再起動を試みる）。0 以下は既定値として扱う

@@ -29,6 +29,7 @@ WRITE_TOOLS = {
     "set_work_steps", "tidy_memory", "save_skill",
     "create_job", "delete_job", "set_job_enabled",
     "create_watch", "delete_watch", "set_watch_enabled",
+    "set_watch_delivery",
     "create_space", "update_space", "delete_space",
     "set_notify_mute", "clear_notify_mute",
     "deliver_file", "generate_image",

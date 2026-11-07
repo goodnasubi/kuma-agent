@@ -43,6 +43,8 @@ from .activity import (
 from .config import Config, normalize_mode
 from .delegate import (
     DELEGATE_NOTICE,
+    DELEGATE_ROLES,
+    NOTICE_NOTICE,
     PLAN_NOTICE,
     RESEARCH_NOTICE,
     run_delegated_task,
@@ -334,15 +336,16 @@ class Session:
         # ないため、モードによる出し分け（board 等）の結果を
         # さらに狭めるだけに働く。親セッション（委任の子でない）
         # と通常役は上限なし（None＝従来どおり）。調べ役は分類表
-        # （tools.READ_ONLY_TOOLS）にある道具だけ、計画役は空
-        # （道具ゼロ）。上限の強制は ToolBox.register の1点に
-        # 寄せるため、この後に登録されるカレンダー・MCP・履歴
-        # 検索の道具にも同じ上限が効く
+        # （tools.READ_ONLY_TOOLS）にある道具だけ、計画役と内部
+        # 専用の知らせ文作成役（notice）は空（道具ゼロ）。上限の
+        # 強制は ToolBox.register の1点に寄せるため、この後に
+        # 登録されるカレンダー・MCP・履歴検索の道具にも同じ
+        # 上限が効く
         allowed_tools: frozenset[str] | None = None
         if delegate_child:
             if delegate_role == "research":
                 allowed_tools = READ_ONLY_TOOLS
-            elif delegate_role == "plan":
+            elif delegate_role in ("plan", "notice"):
                 allowed_tools = frozenset()
         # 手順書（スキル）の置き場はデータ置き場ルート（全テナント
         # 共通）なので cfg.data_dir を渡す。道具を出す条件は用事系と
@@ -465,6 +468,8 @@ class Session:
                 self.system_prompt += f"\n{RESEARCH_NOTICE}"
             elif delegate_role == "plan":
                 self.system_prompt += f"\n{PLAN_NOTICE}"
+            elif delegate_role == "notice":
+                self.system_prompt += f"\n{NOTICE_NOTICE}"
 
     # -------------------------------------------------- 選択肢での質問
 
@@ -704,6 +709,14 @@ class Session:
             self._run_delegate))
 
     def _run_delegate(self, task: str, role: str = "general") -> str:
+        # 道具の入り口では公開する型だけを受ける。内部専用の型
+        # （notice など）は巡回のコードからの呼び出し専用で、
+        # スキーマの enum に載せないだけに頼らず、ここでも弾く
+        if role not in DELEGATE_ROLES:
+            return ("error: 型の指定が不正です"
+                    f"（role={role}）。"
+                    "使える型は research（調べ役）・plan（計画役）・"
+                    "general（通常役）です")
         return run_delegated_task(self, task, role=role)
 
     def _register_history_search_tool(self) -> None:

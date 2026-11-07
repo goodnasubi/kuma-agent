@@ -19,6 +19,14 @@
 - interval_hours: 確認の間隔（時間、1 以上。既定 1）
 - note: 知らせるときの指示（任意。例: 価格が下がっていたら
   その金額も添えて）
+- delivery: 届け方。immediate（変化したらその場で知らせる、
+  既定）/ digest（変化の材料を置き場へ残し、朝の知らせで
+  まとめて知らせる）の 2 つ。通知の取捨（0.84.0）で足した
+  項目で、旧形式のファイルに無ければ immediate として読む。
+  保存済みの値が不正な場合も immediate として読む（届け方は
+  通知の好みであり、壊れた好みで見張り自体を落とさないため）。
+  道具や内部の検証で不正な値が渡された場合は error にする
+  （利用者の指定を黙って別の届け方にしないため）
 - enabled: 有効かどうか（既定は有効）
 - last_hash: 前回確認した内容のハッシュ。空文字列は未確認
   （基準がまだ無い）。最初の確認は基準の記録だけで、知らせない
@@ -52,6 +60,19 @@ KIND_LABELS: dict[str, str] = {
     "web": "ページ",
     "search": "検索",
     "file": "ファイル",
+}
+
+# 届け方（通知の取捨、0.84.0）。immediate は現行どおりその場で
+# 知らせ、digest は変化を置き場（notification_queue.jsonl）へ
+# 残して朝の知らせでまとめて届ける。auto（モデル判定）は
+# 第2段で足すため、ここでは受け付けない
+DELIVERY_VALUES = ("immediate", "digest")
+DEFAULT_DELIVERY = "immediate"
+
+# 届け方の表示名（利用者向けの文面で使う）
+DELIVERY_LABELS: dict[str, str] = {
+    "immediate": "その場で知らせる",
+    "digest": "朝のまとめに寄せる",
 }
 
 # 要約として保持する最大の文字数（前後の内容を子へ渡す材料）
@@ -109,6 +130,33 @@ def validate_watch(kind: object, target: object,
             raise ValueError("確認の間隔は 1 時間以上の整数にしてください")
         hours = parsed
     return kind_name, target_text, hours
+
+
+def validate_delivery(raw: object) -> str:
+    """届け方の値を検証し、正規化して返す。不正なら ValueError。
+
+    省略（None・空）は既定の immediate として受ける。道具や
+    内部の入り口で使う検証で、利用者の指定を黙って別の届け方
+    へ倒さないために、不正な値は例外にする。保存済みファイル
+    の読み込み側（Watch.from_dict）はこちらを使わず、不正な
+    値を immediate として読む（見張り自体を落とさないため）。
+    """
+    if raw is None:
+        return DEFAULT_DELIVERY
+    name = str(raw).strip().lower()
+    if not name:
+        return DEFAULT_DELIVERY
+    if name not in DELIVERY_VALUES:
+        raise ValueError(
+            f"届け方は {' / '.join(DELIVERY_VALUES)} のいずれかです"
+            "（immediate=その場で知らせる、digest=朝のまとめに寄せる）")
+    return name
+
+
+def stored_delivery(raw: object) -> str:
+    """保存済みの届け方を読む。不正な値は immediate として読む。"""
+    name = str(raw or "").strip().lower()
+    return name if name in DELIVERY_VALUES else DEFAULT_DELIVERY
 
 
 def is_due(watch: Watch, now: datetime) -> bool:
@@ -182,6 +230,7 @@ class Watch:
     target: str
     interval_hours: int = 1
     note: str = ""
+    delivery: str = DEFAULT_DELIVERY
     enabled: bool = True
     last_hash: str = ""
     last_summary: str = ""
@@ -198,6 +247,7 @@ class Watch:
             "target": self.target,
             "interval_hours": self.interval_hours,
             "note": self.note,
+            "delivery": self.delivery,
             "enabled": self.enabled,
             "last_hash": self.last_hash,
             "last_summary": self.last_summary,
@@ -232,6 +282,7 @@ class Watch:
             target=target,
             interval_hours=hours,
             note=str(record.get("note") or ""),
+            delivery=stored_delivery(record.get("delivery")),
             enabled=enabled if isinstance(enabled, bool) else True,
             last_hash=str(record.get("last_hash") or ""),
             last_summary=str(record.get("last_summary") or ""),
@@ -280,13 +331,15 @@ class WatchBoard:
         return str(n)
 
     def add(self, title: str, kind: str, target: str,
-            interval_hours: int = 1, note: str = "") -> Watch:
-        """見張りを追加して保存する。部品の検証は validate_watch 済みの
-        前提（種別・対象・間隔は検証を通った値を渡すこと）。"""
+            interval_hours: int = 1, note: str = "",
+            delivery: str = DEFAULT_DELIVERY) -> Watch:
+        """見張りを追加して保存する。部品の検証は validate_watch /
+        validate_delivery 済みの前提（種別・対象・間隔・届け方は
+        検証を通った値を渡すこと）。"""
         self._watches = self._load()  # 他のセッションの追加を消さない
         watch = Watch(id=self._next_id(), title=title, kind=kind,
                       target=target, interval_hours=interval_hours,
-                      note=note)
+                      note=note, delivery=delivery)
         self._watches.append(watch)
         self._save()
         return watch
@@ -336,6 +389,19 @@ class WatchBoard:
         if watch is None:
             return None
         watch.enabled = enabled
+        self._save()
+        return watch
+
+    def set_delivery(self, key: str, delivery: str) -> Watch | None:
+        """ID または名前で届け方を切り替える。対象がなければ None。
+
+        delivery は validate_delivery 済みの前提。
+        """
+        self._watches = self._load()
+        watch = self.find(key)
+        if watch is None:
+            return None
+        watch.delivery = delivery
         self._save()
         return watch
 

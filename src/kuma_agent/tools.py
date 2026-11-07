@@ -25,7 +25,12 @@ from .notify_prefs import (
 from .skills import is_valid_skill_name, load_skill
 from .skills import save_skill as save_skill_file
 from .tasks import format_remind_at
-from .watches import KIND_LABELS, validate_watch
+from .watches import (
+    DELIVERY_LABELS,
+    KIND_LABELS,
+    validate_delivery,
+    validate_watch,
+)
 from .webtools import fetch_page, web_search
 from .worksteps import format_steps
 
@@ -78,6 +83,7 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "list_watches": "見張りを確認中",
     "delete_watch": "見張りを記録中",
     "set_watch_enabled": "見張りを記録中",
+    "set_watch_delivery": "見張りを記録中",
     "create_space": "画面を作成中",
     "update_space": "画面を更新中",
     "list_spaces": "画面を確認中",
@@ -677,9 +683,11 @@ class ToolBox:
             "トリ内のファイルの出現・変化）のいずれかで、target "
             "には種別に応じた URL / 検索語 / 相対パスを入れる。"
             "interval_hours は確認の間隔（時間、省略時は 1）。"
-            "知らせ方に希望があれば note に入れる（例: 価格が"
-            "下がっていたら金額も添えて）。登録直後の最初の確認は"
-            "基準の記録だけで、知らせはしない。",
+            "知らせ文への希望があれば note に入れる（例: 価格が"
+            "下がっていたら金額も添えて）。delivery は届け方で、"
+            "immediate（変化したらその場で知らせる、省略時）か "
+            "digest（変化を朝のまとめでまとめて知らせる）か。"
+            "登録直後の最初の確認は基準の記録だけで、知らせはしない。",
             {"type": "object", "properties": {
                 "title": {"type": "string",
                           "description": "見張りの名前"},
@@ -691,16 +699,33 @@ class ToolBox:
                 "interval_hours": {"type": "integer",
                                    "description": "確認の間隔（時間、省略時は 1）"},
                 "note": {"type": "string",
-                         "description": "知らせるときの指示（任意）"}},
+                         "description": "知らせるときの指示（任意）"},
+                "delivery": {"type": "string",
+                             "enum": ["immediate", "digest"],
+                             "description": "届け方（省略時は immediate）"}},
              "required": ["title", "kind", "target"]},
             self._create_watch,
         ))
         self.register(Tool(
             "list_watches",
-            "登録した見張りを、対象・間隔・ON/OFF・前回確認と"
-            "前回変化つきですべて返す。",
+            "登録した見張りを、対象・間隔・ON/OFF・届け方・"
+            "前回確認と前回変化つきですべて返す。",
             {"type": "object", "properties": {}},
             self._list_watches,
+        ))
+        self.register(Tool(
+            "set_watch_delivery",
+            "見張りの届け方を切り替える。watch には名前または "
+            "ID を、delivery には immediate（その場で知らせる）"
+            "か digest（朝のまとめに寄せる）を入れること。",
+            {"type": "object", "properties": {
+                "watch": {"type": "string",
+                          "description": "切り替える見張りの名前または ID"},
+                "delivery": {"type": "string",
+                             "enum": ["immediate", "digest"],
+                             "description": "届け方"}},
+             "required": ["watch", "delivery"]},
+            self._set_watch_delivery,
         ))
         self.register(Tool(
             "delete_watch",
@@ -726,7 +751,8 @@ class ToolBox:
 
     def _create_watch(self, title: str, kind: str, target: str,
                       interval_hours: int | None = None,
-                      note: str = "") -> str:
+                      note: str = "",
+                      delivery: str = "immediate") -> str:
         assert self.watch_board is not None
         title = str(title or "").strip()
         if not title:
@@ -734,14 +760,17 @@ class ToolBox:
         try:
             kind_name, target_text, hours = validate_watch(
                 kind, target, interval_hours)
+            delivery_name = validate_delivery(delivery)
         except ValueError as e:
             return f"error: {e}"
         watch = self.watch_board.add(title, kind_name, target_text,
                                      interval_hours=hours,
-                                     note=str(note or ""))
+                                     note=str(note or ""),
+                                     delivery=delivery_name)
         return (f"登録しました: #{watch.id} {watch.title}"
                 f"（{KIND_LABELS[watch.kind]}: {watch.target}、"
-                f"{watch.interval_hours} 時間ごと）。"
+                f"{watch.interval_hours} 時間ごと、"
+                f"知らせ方: {DELIVERY_LABELS[watch.delivery]}）。"
                 "最初の確認は基準の記録だけで、変化があったら知らせます")
 
     def _format_watches(self, watches: list[Watch]) -> str:
@@ -756,6 +785,7 @@ class ToolBox:
                 f"#{w.id} {w.title}"
                 f"（{KIND_LABELS.get(w.kind, w.kind)}: {w.target}、"
                 f"{w.interval_hours} 時間ごと、{state}、"
+                f"知らせ方: {DELIVERY_LABELS.get(w.delivery, w.delivery)}、"
                 f"前回確認: {checked}、前回変化: {changed}）")
             if w.note:
                 lines.append(f"  指示: {w.note}")
@@ -783,6 +813,18 @@ class ToolBox:
             return f"error: 見張り「{watch}」が見つかりません"
         state = "ON" if updated.enabled else "OFF"
         return f"更新しました: #{updated.id} {updated.title}（{state}）"
+
+    def _set_watch_delivery(self, watch: str, delivery: str) -> str:
+        assert self.watch_board is not None
+        try:
+            delivery_name = validate_delivery(delivery)
+        except ValueError as e:
+            return f"error: {e}"
+        updated = self.watch_board.set_delivery(watch, delivery_name)
+        if updated is None:
+            return f"error: 見張り「{watch}」が見つかりません"
+        return (f"更新しました: #{updated.id} {updated.title}"
+                f"（知らせ方: {DELIVERY_LABELS[updated.delivery]}）")
 
     def _register_space_tools(self) -> None:
         # 小さな画面の道具はモードを問わず登録する（置き場は
