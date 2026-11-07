@@ -28,6 +28,7 @@ WRITE_TOOLS = {
     "write_file", "run_shell", "create_task", "update_task",
     "set_work_steps", "tidy_memory", "save_skill",
     "create_job", "delete_job", "set_job_enabled",
+    "set_job_delivery",
     "create_watch", "delete_watch", "set_watch_enabled",
     "set_watch_delivery",
     "create_space", "update_space", "delete_space",

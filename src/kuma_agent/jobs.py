@@ -16,6 +16,17 @@ jobs.json に保持する。能動発信の巡回（proactive.py）が期限の�
   - {"kind": "weekly", "weekday": 0, "time": "09:00"}
     （毎週その曜日。weekday は月曜=0 〜 日曜=6）
   - {"kind": "interval", "hours": 6}（前回実行からその時間ごと）
+- delivery: 成功結果の届け方。immediate（結果をその場で知ら
+  せる、既定）/ digest（結果の要点を置き場へ残し、朝の知らせ
+  でまとめて知らせる）/ auto（結果ごとにモデルが判定し、その
+  場で知らせるか朝の知らせへ寄せるかを決める。判定できない
+  ときはその場で知らせる）の 3 つ。通知の取捨の第3段
+  （0.86.0）で足した項目で、値と検証・表示名は見張り
+  （watches.py）と共通。旧形式のファイルに無ければ immediate
+  として読む。保存済みの値が不正な場合も immediate として
+  読む（見張りと同じ考え方）。**失敗の知らせには効かない**:
+  実行に失敗した場合は、delivery の値にかかわらずその場で
+  知らせる（強制規則。失敗を朝へ回す設定は作らない）
 - enabled: 有効かどうか（既定は有効）
 - last_run_at: 前回実行した時刻（ISO 8601）。未実行なら空文字列
 - created_at: 作成時刻（ISO 8601）。未実行ジョブの期限判定の
@@ -41,6 +52,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .notify_prefs import parse_hhmm
+# 届け方（delivery）の値・検証・表示名は見張りと共通で、正は
+# watches.py にある（通知の取捨で最初に導入した場所）。ここでは
+# ジョブ側からも同じ名前で引けるよう再輸出する
+from .watches import (
+    DELIVERY_LABELS,
+    DELIVERY_VALUES,
+    DEFAULT_DELIVERY,
+    stored_delivery,
+    validate_delivery,
+)
 
 JOBS_FILENAME = "jobs.json"
 
@@ -248,6 +269,7 @@ class Job:
     title: str
     prompt: str
     schedule: dict
+    delivery: str = DEFAULT_DELIVERY
     enabled: bool = True
     last_run_at: str = ""
     created_at: str = field(default_factory=_now)
@@ -258,6 +280,7 @@ class Job:
             "title": self.title,
             "prompt": self.prompt,
             "schedule": dict(self.schedule),
+            "delivery": self.delivery,
             "enabled": self.enabled,
             "last_run_at": self.last_run_at,
             "created_at": self.created_at,
@@ -284,6 +307,9 @@ class Job:
             title=title,
             prompt=str(record.get("prompt") or ""),
             schedule=schedule,
+            # 届け方が無い・壊れている場合は immediate として読む
+            # （ジョブ自体は落とさない。見張りと同じ考え方）
+            delivery=stored_delivery(record.get("delivery")),
             enabled=enabled if isinstance(enabled, bool) else True,
             last_run_at=str(record.get("last_run_at") or ""),
             created_at=str(record.get("created_at") or _now()),
@@ -331,8 +357,13 @@ class JobBoard:
             n += 1
         return str(n)
 
-    def add(self, title: str, prompt: str, schedule: dict) -> Job:
-        """ジョブを追加して保存する。不正な入力は ValueError。"""
+    def add(self, title: str, prompt: str, schedule: dict,
+            delivery: str = DEFAULT_DELIVERY) -> Job:
+        """ジョブを追加して保存する。不正な入力は ValueError。
+
+        delivery は validate_delivery 済みの前提（見張りの
+        WatchBoard.add と同じ流儀）。
+        """
         title = str(title or "").strip()
         prompt = str(prompt or "").strip()
         if not title:
@@ -342,7 +373,7 @@ class JobBoard:
         normalized = normalize_schedule(schedule)
         self._jobs = self._load()  # 他のセッションの追加を消さないよう読み直す
         job = Job(id=self._next_id(), title=title, prompt=prompt,
-                  schedule=normalized)
+                  schedule=normalized, delivery=delivery)
         self._jobs.append(job)
         self._save()
         return job
@@ -391,6 +422,21 @@ class JobBoard:
         if job is None:
             return None
         job.enabled = bool(enabled)
+        self._save()
+        return job
+
+    def set_delivery(self, key: str, delivery: str) -> Job | None:
+        """名前または ID で成功結果の届け方を切り替える。無ければ None。
+
+        delivery は validate_delivery 済みの前提（見張りの
+        WatchBoard.set_delivery と同じ流儀）。失敗の知らせの
+        届け方は変わらない（常にその場で知らせる）。
+        """
+        self._jobs = self._load()
+        job = self.find(key)
+        if job is None:
+            return None
+        job.delivery = delivery
         self._save()
         return job
 

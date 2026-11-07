@@ -141,10 +141,15 @@ def _run_jobs(cfg: Config) -> int:
     """定期ジョブの一覧表示（運用者向けコマンドの本体）。
 
     対象は cfg が指すテナント×ユーザーの置き場。各ジョブの名前・
-    予定・ON/OFF・前回実行と指示文を表示する。モデルも API キーも
-    要らない（読み取り専用）。
+    予定・ON/OFF・届け方・前回実行と指示文を表示する。モデルも
+    API キーも要らない（読み取り専用）。
     """
-    from .jobs import JobBoard, format_last_run, schedule_description
+    from .jobs import (
+        DELIVERY_LABELS,
+        JobBoard,
+        format_last_run,
+        schedule_description,
+    )
 
     board = JobBoard(cfg.user_data_dir)
     jobs = board.list()
@@ -155,6 +160,7 @@ def _run_jobs(cfg: Config) -> int:
         state = "ON" if job.enabled else "OFF"
         print(f"#{job.id} {job.title}"
               f"（{schedule_description(job.schedule)}、{state}、"
+              f"知らせ方: {DELIVERY_LABELS.get(job.delivery, job.delivery)}、"
               f"前回実行: {format_last_run(job.last_run_at)}）")
         print(f"  指示: {job.prompt}")
     return 0

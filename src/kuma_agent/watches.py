@@ -38,6 +38,16 @@
 - last_checked_at: 前回確認した時刻（ISO 8601）
 - last_changed_at: 前回変化を検出した時刻（ISO 8601）
 - last_error: 前回確認に失敗した理由（短い文）。成功したら空
+- error_count: 確認の失敗が連続している回数。成功したら 0 に
+  戻る。旧形式のファイルに無ければ 0 として読む
+- first_error_at: いま連続している失敗が始まった時刻（ISO
+  8601）。失敗していなければ空。旧形式のファイルに無ければ
+  空として読む。error_count と first_error_at は、「確認失敗
+  が繰り返す場合に知らせるか」を後で判断するための材料の
+  記録であり、この段（0.86.0）では知らせる仕組み自体は作ら
+  ない（設計の第3段は検討に留まり、実施する場合は失敗回数
+  を数える項目を別途設計するとされていたため、その項目だけ
+  を先に足す）
 - created_at: 作成時刻（ISO 8601）。未確認の見張りの期限
   判定の基準にも使う
 
@@ -69,7 +79,9 @@ KIND_LABELS: dict[str, str] = {
 # digest は変化を置き場（notification_queue.jsonl）へ残して
 # 朝の知らせでまとめて届ける（以上 0.84.0）。auto は変化ごとに
 # モデル判定で即時か朝へ寄せるかを決める（0.85.0。判定の実体は
-# notification_triage.py と proactive.py が持つ）
+# notification_triage.py と proactive.py が持つ）。届け方の値と
+# 検証・表示名の正はここ（見張りで最初に導入したため）で、定期
+# ジョブ（jobs.py）も第3段（0.86.0）から同じ値を共有する
 DELIVERY_VALUES = ("immediate", "digest", "auto")
 DEFAULT_DELIVERY = "immediate"
 
@@ -243,6 +255,8 @@ class Watch:
     last_checked_at: str = ""
     last_changed_at: str = ""
     last_error: str = ""
+    error_count: int = 0
+    first_error_at: str = ""
     created_at: str = field(default_factory=_now)
 
     def to_dict(self) -> dict:
@@ -260,6 +274,8 @@ class Watch:
             "last_checked_at": self.last_checked_at,
             "last_changed_at": self.last_changed_at,
             "last_error": self.last_error,
+            "error_count": self.error_count,
+            "first_error_at": self.first_error_at,
             "created_at": self.created_at,
         }
 
@@ -281,6 +297,7 @@ class Watch:
         except ValueError:
             return None
         enabled = record.get("enabled")
+        error_count = _as_int(record.get("error_count"))
         return cls(
             id=watch_id,
             title=title,
@@ -295,6 +312,11 @@ class Watch:
             last_checked_at=str(record.get("last_checked_at") or ""),
             last_changed_at=str(record.get("last_changed_at") or ""),
             last_error=str(record.get("last_error") or ""),
+            # 失敗の記録が壊れていても見張り自体は落とさない
+            # （届け方の読み込みと同じ考え方）
+            error_count=(error_count if error_count is not None
+                         and error_count > 0 else 0),
+            first_error_at=str(record.get("first_error_at") or ""),
             created_at=str(record.get("created_at") or _now()),
         )
 
@@ -418,6 +440,11 @@ class WatchBoard:
 
         hash が None のときは前回のハッシュを保つ（確認失敗時）。
         変化があったとき（changed）だけ last_changed_at を更新する。
+        確認に失敗した場合は、連続失敗の記録（error_count /
+        first_error_at）も合わせて更新する。成功したら連続失敗
+        の記録は 0 / 空に戻す。この記録は「繰り返す確認失敗を
+        知らせるか」の判断材料であり、知らせる仕組み自体は
+        この段では作らない（モジュール冒頭の項目説明を参照）。
         """
         self._watches = self._load()
         watch = self.get(watch_id)
@@ -428,6 +455,13 @@ class WatchBoard:
             watch.last_hash = hash
             watch.last_summary = summary
         watch.last_error = error
+        if error:
+            if not watch.first_error_at:
+                watch.first_error_at = now.isoformat(timespec="seconds")
+            watch.error_count = max(watch.error_count, 0) + 1
+        else:
+            watch.error_count = 0
+            watch.first_error_at = ""
         if changed:
             watch.last_changed_at = now.isoformat(timespec="seconds")
         self._save()

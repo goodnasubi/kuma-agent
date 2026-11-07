@@ -1,4 +1,4 @@
-"""通知の取捨（見張りの変化を朝の知らせへ寄せる置き場）。
+"""通知の取捨（見張りの変化と定期ジョブの結果を朝の知らせへ寄せる置き場）。
 
 能動発信の通知を重要度で振り分ける仕組み。見張りごとに届け方
 （watches.Watch.delivery）を持ち、digest（朝のまとめに寄せる）
@@ -15,6 +15,14 @@ parse_triage_verdict が担い、採用できない判定（形式不正・
 ／digest を明示した見張りでは判定自体を行わない（決め手の
 優先順位は decide_watch_route を参照）。
 
+第3段（0.86.0）では、定期ジョブの成功結果へも届け方を広げた。
+ジョブごとに届け方（jobs.Job.delivery、値は見張りと共通）を
+持ち、digest / auto で朝へ寄せた成功結果は、見張りの変化と
+同じ置き場・同じ朝のまとめの材料の仕組みに乗る（朝の知らせ
+の上限は、見張りとジョブを合わせた出来事の件数で数える）。
+ジョブの失敗は届け方の対象外で、設定にかかわらず即時に知ら
+せる（強制規則）。決め手の優先順位は decide_job_route を参照。
+
 置き場は利用者の置き場の notification_queue.jsonl で、活動の
 記録（activity.jsonl）やフィード（feed.jsonl）と同じ1行1件の
 JSONL。同じ出来事の状態変化（配信済み化）も新しい行として
@@ -28,18 +36,26 @@ proactive.py が担う）。
 出来事1件の形（設計 §3.2）:
 - id: 出来事を一意にする文字列。見張りでは
   "watch:<見張りID>:<前回確認時刻>:<新しいハッシュの先頭12字>"
-  で、基準更新前に同じ変化を再検出しても同じ ID になる
+  で、基準更新前に同じ変化を再検出しても同じ ID になる。
+  定期ジョブでは "job:<ジョブID>:<実行時刻>" で、1 回の実行
+  につき 1 件になる（実行時刻の記録で同じ予定の再実行は
+  しないため、再検出の重複は起きない）
 - status: pending（未配信）/ delivered（朝の知らせ等で配信
   済み）/ superseded（明示的に取り消されたもの）
 - recorded_at / occurred_at: 記録した時刻／発生した時刻
   （サーバーのローカル時刻、ISO 8601）
-- source_kind / source_id / source_title: 発生源（第1段は
-  watch だけ）と、その ID・名前
+- source_kind / source_id / source_title: 発生源（watch=
+  見張り、job=定期ジョブ）と、その ID・名前
 - title: 知らせの見出し相当の文
 - old_summary / new_summary: 材料（見張りの前回・今回の要約、
   各最大400字）。対象の URL・検索語・ファイルパスは置き場へ
   重ねて保存しない（発生源の ID から元の見張りを引ける）
-- source_note: 知らせるときの指示（見張りの note）
+- result_text / result_truncated: 定期ジョブの成功結果の要点
+  （第3段）。結果は本文全体ではなく上限
+  （MAX_JOB_RESULT_CHARS 字）までを保存し、上限を超えて
+  切り詰めた場合は result_truncated でそのことを記録する
+- source_note: 知らせるときの指示（見張りの note。ジョブでは
+  使わない）
 - decision / decision_by / decision_reason: どの経路に、誰が
   （規則／設定／既定／モデル）、なぜ決めたか。理由は短い
   コードで残し、材料の全文は写さない
@@ -65,6 +81,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .jobs import Job
 from .watches import Watch
 
 QUEUE_FILE = "notification_queue.jsonl"
@@ -80,8 +97,16 @@ RETENTION_DAYS = 90
 
 # 朝の知らせへ入れる寄せた変化の上限（古い順）。朝のまとめを
 # 「読める長さ」に保つための上限で、溢れた分は消さず未配信の
-# まま翌日以降へ回す
+# まま翌日以降へ回す。第3段（0.86.0）以降は、見張りの変化と
+# 定期ジョブの結果を合わせた出来事の件数で数える（設計 §4.2:
+# 「5件は出来事の件数であり、見張りの種類数ではない」）
 MAX_BRIEFING_EVENTS = 5
+
+# 置き場へ保存する定期ジョブの成功結果の上限（文字数）。結果の
+# 本文全体ではなく要点を朝のまとめへ渡すため、この上限までを
+# 保存する（設計 第3段 項目3）。超えた分は切り詰め、
+# result_truncated で切り詰めたことを記録する
+MAX_JOB_RESULT_CHARS = 1000
 
 # 朝のまとめの材料へ入れる際の、要約1件あたりの切り詰め。
 # 置き場の原本（最大400字）は保持し、指示文へ入れる分だけ短く
@@ -94,6 +119,11 @@ _MATERIAL_TOTAL_CHARS = 2000
 # 判断理由のコード（設計 §2.2）
 REASON_WATCH_SETTING_DIGEST = "watch_setting_digest"
 REASON_WATCH_SETTING_IMMEDIATE = "watch_setting_immediate"
+# 定期ジョブ（第3段、0.86.0）の、ジョブの明示設定による理由
+# コード。即時／朝へ寄せる以外の理由コード（置き場の保存失敗・
+# 朝の経路なし・振り分け無効化・モデル判定）は見張りと共通
+REASON_JOB_SETTING_DIGEST = "job_setting_digest"
+REASON_JOB_SETTING_IMMEDIATE = "job_setting_immediate"
 REASON_QUEUE_FAILED_IMMEDIATE = "queue_failed_immediate"
 REASON_NO_DIGEST_ROUTE_IMMEDIATE = "no_digest_route_immediate"
 REASON_TRIAGE_DISABLED_IMMEDIATE = "triage_disabled_immediate"
@@ -151,6 +181,37 @@ def decide_watch_route(watch: Watch, *, mode: str,
     return ROUTE_IMMEDIATE, REASON_WATCH_SETTING_IMMEDIATE
 
 
+def decide_job_route(job: Job, *, mode: str,
+                     triage_enabled: bool) -> tuple[str, str]:
+    """定期ジョブの成功結果の届け方を決め、(経路, 理由コード) を返す。
+
+    決め方の優先順位は見張り（decide_watch_route）と同じ:
+
+    1. 強制規則: スレッドモード（wall）では朝の知らせの経路が
+       無いため、digest / auto の指定でも即時に倒す（auto の
+       判定も行わない）。ジョブの失敗はこの関数の対象自体に
+       含めない（呼び出し側が設定にかかわらず即時に知らせる）
+    2. 切り戻し: 振り分け自体が無効化されている間
+       （KUMA_NOTIFICATION_TRIAGE=0）は即時に倒す（auto の
+       判定も行わない）。既に置き場にある未配信分は見張りと
+       同じく読み続けて届ける（呼び出し側の扱い）
+    3. ジョブの明示設定: immediate / digest はそのまま経路に
+       なる。モデル判定で上書きはしない
+    4. モデル判定: auto のときだけ ROUTE_AUTO を返し、実際の
+       判定は巡回側が振り分け判定役を呼んで行う。理由コードは
+       見張りと共通（判定結果で決まる）
+    """
+    if mode != "ledger":
+        return ROUTE_IMMEDIATE, REASON_NO_DIGEST_ROUTE_IMMEDIATE
+    if not triage_enabled:
+        return ROUTE_IMMEDIATE, REASON_TRIAGE_DISABLED_IMMEDIATE
+    if job.delivery == "digest":
+        return ROUTE_DIGEST, REASON_JOB_SETTING_DIGEST
+    if job.delivery == "auto":
+        return ROUTE_AUTO, ""
+    return ROUTE_IMMEDIATE, REASON_JOB_SETTING_IMMEDIATE
+
+
 def watch_event_id(watch: Watch, new_hash: str) -> str:
     """見張りの変化1件の出来事 ID を決める。
 
@@ -175,6 +236,8 @@ class QueueEvent:
     title: str = ""
     old_summary: str = ""
     new_summary: str = ""
+    result_text: str = ""
+    result_truncated: bool = False
     source_note: str = ""
     decision: str = ""
     decision_by: str = ""
@@ -194,6 +257,8 @@ class QueueEvent:
             "title": self.title,
             "old_summary": self.old_summary,
             "new_summary": self.new_summary,
+            "result_text": self.result_text,
+            "result_truncated": self.result_truncated,
             "source_note": self.source_note,
             "decision": self.decision,
             "decision_by": self.decision_by,
@@ -225,6 +290,10 @@ class QueueEvent:
             title=str(record.get("title") or ""),
             old_summary=str(record.get("old_summary") or ""),
             new_summary=str(record.get("new_summary") or ""),
+            # 第3段より前の行には無い項目（見張りの出来事では
+            # 使わない）。壊れた値でも出来事自体は落とさない
+            result_text=str(record.get("result_text") or ""),
+            result_truncated=record.get("result_truncated") is True,
             source_note=str(record.get("source_note") or ""),
             decision=str(record.get("decision") or ""),
             decision_by=str(record.get("decision_by") or ""),
@@ -257,6 +326,49 @@ def build_watch_event(watch: Watch, old_summary: str, new_summary: str,
         old_summary=old_summary,
         new_summary=new_summary,
         source_note=watch.note,
+        decision=ROUTE_DIGEST,
+        decision_by=decision_by,
+        decision_reason=reason,
+    )
+
+
+def job_event_id(job: Job, now: datetime) -> str:
+    """定期ジョブの成功結果1件の出来事 ID を決める。
+
+    ジョブ ID＋実行時刻から作る。ジョブは実行のたびに
+    last_run_at が更新され、同じ予定では再実行しないため、
+    1 回の実行は 1 件の出来事にだけなる。
+    """
+    return f"job:{job.id}:{now.isoformat(timespec='seconds')}"
+
+
+def build_job_event(job: Job, result: str, now: datetime,
+                    reason: str,
+                    decision_by: str = "setting") -> QueueEvent:
+    """定期ジョブの成功結果から、置き場へ入れる出来事を組み立てる。
+
+    結果は本文全体ではなく、上限（MAX_JOB_RESULT_CHARS 字）
+    までの要点を result_text として持つ。上限を超えて切り
+    詰めた場合は result_truncated でそのことを記録する
+    （設計 第3段 項目3）。decision_by / decision_reason の
+    意味は build_watch_event と同じ。
+    """
+    stamp = now.isoformat(timespec="seconds")
+    body = str(result or "").strip()
+    truncated = len(body) > MAX_JOB_RESULT_CHARS
+    if truncated:
+        body = body[:MAX_JOB_RESULT_CHARS]
+    return QueueEvent(
+        id=job_event_id(job, now),
+        status=STATUS_PENDING,
+        recorded_at=stamp,
+        occurred_at=stamp,
+        source_kind="job",
+        source_id=job.id,
+        source_title=job.title,
+        title=f"定期ジョブ「{job.title}」の結果です",
+        result_text=body,
+        result_truncated=truncated,
         decision=ROUTE_DIGEST,
         decision_by=decision_by,
         decision_reason=reason,
@@ -384,6 +496,31 @@ def triage_feed_note(watch_title: str, reason: str,
                 "へ保存できなかったため、その場でお知らせしました")
     else:  # REASON_MODEL_INVALID_IMMEDIATE 等
         base = (f"見張り「{watch_title}」の変化は、おまかせ判定を"
+                "使えなかったため、その場でお知らせしました")
+    detail = f"判定の理由: {model_reason}（{reason}）" if model_reason \
+        else f"理由コード: {reason}"
+    return f"{base}（{detail}）。"
+
+
+def job_triage_feed_note(job_title: str, reason: str,
+                         model_reason: str = "") -> str:
+    """auto の判定で即時になったジョブ結果について、フィードへ残す判定の記録。
+
+    triage_feed_note の定期ジョブ版。即時の出来事は置き場の
+    対象外のため、判定の理由はこちらに残す（朝へ寄せた出来事
+    は置き場の decision / decision_reason が正）。
+    """
+    if reason == REASON_MODEL_IMMEDIATE:
+        base = (f"定期ジョブ「{job_title}」の結果は、おまかせ判定で"
+                "その場でお知らせしました")
+    elif reason == REASON_MODEL_UNCERTAIN_IMMEDIATE:
+        base = (f"定期ジョブ「{job_title}」の結果は、おまかせ判定が"
+                "定まらなかったため、その場でお知らせしました")
+    elif reason == REASON_QUEUE_FAILED_IMMEDIATE:
+        base = (f"定期ジョブ「{job_title}」の結果は、朝へ寄せる置き場"
+                "へ保存できなかったため、その場でお知らせしました")
+    else:  # REASON_MODEL_INVALID_IMMEDIATE 等
+        base = (f"定期ジョブ「{job_title}」の結果は、おまかせ判定を"
                 "使えなかったため、その場でお知らせしました")
     detail = f"判定の理由: {model_reason}（{reason}）" if model_reason \
         else f"理由コード: {reason}"
@@ -528,6 +665,16 @@ def _event_date_prefix(event: QueueEvent, now: datetime) -> str:
 def _event_line(event: QueueEvent, now: datetime,
                 summary_chars: int) -> str:
     """出来事1件を節の1行にする（材料文と日報で同じ形）。"""
+    if event.source_kind == "job":
+        # 定期ジョブの結果は、結果の要点（置き場に保存した分）
+        # を1行にする。置き場の段階で切り詰めた結果は、その
+        # ことが分かるよう添える
+        line = (f"・{_event_date_prefix(event, now)}"
+                f"定期ジョブ「{event.source_title}」の結果: "
+                f"{_clip(event.result_text, summary_chars)}")
+        if event.result_truncated:
+            line += "（結果が長いため一部のみ）"
+        return line
     line = (f"・{_event_date_prefix(event, now)}"
             f"見張り「{event.source_title}」: "
             f"今回は {_clip(event.new_summary, summary_chars)}"
@@ -549,10 +696,11 @@ def _join_lines(events: list[QueueEvent], now: datetime) -> str:
 
 def build_digest_material(events: list[QueueEvent],
                           now: datetime) -> str | None:
-    """朝のまとめの材料にする、寄せた変化の節の文面。
+    """朝のまとめの材料にする、寄せた出来事の節の文面。
 
-    出来事ごとの行（検出日・見張りの名前・前回と今回の要約・
-    指示）を古い順に並べる。対象が無ければ None。
+    出来事ごとの行（検出日・発生源の名前・材料。見張りは前回
+    と今回の要約と指示、定期ジョブは結果の要点）を古い順に
+    並べる。対象が無ければ None。
     """
     if not events:
         return None
@@ -561,7 +709,7 @@ def build_digest_material(events: list[QueueEvent],
 
 def build_digest_daily_section(events: list[QueueEvent],
                                now: datetime) -> str | None:
-    """日報の組み立てに足す、寄せた変化の節（コードで決まった形）。
+    """日報の組み立てに足す、寄せた出来事の節（コードで決まった形）。
 
     朝のまとめの子が失敗・「なし」・モデルなしの場合でも届ける
     ための倒し込みで、用事が無くてもこの節だけで日報になる。

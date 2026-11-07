@@ -121,6 +121,32 @@ error の結果はすべて即時へ倒す（知らせが消える事故を避�
 朝へ寄せた出来事は置き場（decision_by=model と理由コード）
 に、即時になった場合はフィードの記録に残す。
 
+定期ジョブの成功結果にも届け方がある（通知の取捨 第3段、
+0.86.0）: ジョブごとに delivery を持ち、immediate（既定）は
+従来どおりその場で投稿し、digest は結果の要点を同じ置き場
+（notification_queue.jsonl）へ残して朝の知らせでまとめて
+届ける。朝の知らせの上限（古い順に最大 5 件）は、見張りの
+変化とジョブの結果を合わせた出来事の件数で数える。auto は
+見張りと同じ振り分け判定役が、ジョブの名前・実行した指示・
+結果の要点・実行時刻から判定し（結果 1 件につき最大 1 回）、
+判定が使えなければ即時へ倒す。判定の知らせ文候補は使わない
+（ジョブの結果そのものが届ける内容のため、即時の投稿は通常
+の結果文で組み立てる）。置き場へ保存する結果は上限
+（notification_triage.MAX_JOB_RESULT_CHARS 字）までとし、
+切り詰めた場合はそのことを出来事に記録する。**失敗は届け方
+の対象外**で、delivery の値にかかわらず従来どおりその場で
+失敗の知らせを投稿する（強制規則）。実行時刻の記録
+（last_run_at）は届け方と独立で、成功・失敗・寄せた場合の
+いずれでも従来どおり更新する。スレッドモードや振り分けの
+無効化中は、見張りと同じく即時へ倒す。
+
+見張りの確認失敗については、連続失敗の記録（回数
+error_count と、連続が始まった時刻 first_error_at）を
+watches.json に残すところまでをこの段で行う。繰り返す失敗を
+知らせる仕組み自体は作らない（設計の第3段は検討に留まり、
+実施には失敗回数を数える項目の別途設計が要るとされていた
+ため、その項目だけを判断材料として先に足す）。
+
 朝のまとめの材料には、main の会話の作業の手順の残り（AF-3）も
 足す: 終わっていない手順のうち進行中・停滞のもの（最大 3 件）を、
 状態と「その状態になってからの日数」（Step.updated_at から数える）
@@ -206,13 +232,15 @@ def _watch_notice_executor(session: Session, prompt: str) -> str:
                               role="notice")
 
 
-def _watch_triage_executor(session: Session, prompt: str) -> str:
-    """見張りの auto 判定用の委任の実行役（内部専用の振り分け判定役）。
+def _triage_executor(session: Session, prompt: str) -> str:
+    """auto 判定用の委任の実行役（内部専用の振り分け判定役）。
 
-    判定は、巡回が集めた材料（名前・種別・前回と今回の要約・
-    利用者の指示・検出時刻）だけで足りるため、道具を持たない
-    内部専用の型（triage）で子を作る。立て直しはしない（判定は
-    変化 1 件につき最大 1 回まで。失敗時の受け皿は即時への
+    判定は、巡回が集めた材料（見張りなら名前・種別・前回と
+    今回の要約・利用者の指示・検出時刻、定期ジョブなら名前・
+    実行した指示・結果の要点・実行時刻）だけで足りるため、道具
+    を持たない内部専用の型（triage）で子を作る。見張り（0.85.0）
+    と定期ジョブ（0.86.0）で共用する。立て直しはしない（判定は
+    出来事 1 件につき最大 1 回まで。失敗時の受け皿は即時への
     倒し込みで、呼び出し側が持つ）。
     """
     return run_delegated_task(session, prompt, retry=False,
@@ -254,10 +282,13 @@ from .notification_triage import (
     auto_cleanup_queue,
     build_digest_daily_section,
     build_digest_material,
+    build_job_event,
     build_watch_event,
+    decide_job_route,
     decide_watch_route,
     enqueue_event,
     has_event,
+    job_triage_feed_note,
     mark_delivered,
     parse_triage_verdict,
     pending_events,
@@ -681,11 +712,13 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
     いる期限のある記憶」として材料に足し、まとめの中で自然に
     期限が近いことに触れるよう指示する。こちらも日報の組み立て
     には混ぜない。
-    digest_text（通知の取捨 0.84.0 の、朝へ寄せた見張りの変化）
-    があれば、「まとめて知らせる変化」として材料に足し、知らせ
-    の中に必ず含めるよう指示する。寄せた変化は一度きりの出来事
-    で再び集め直せないため、他の材料と違い、日報への倒し込み
-    にも専用の節として含める（倒し込み側は _daily_message）。
+    digest_text（通知の取捨の、朝へ寄せた出来事。第1段 0.84.0
+    は見張りの変化、第3段 0.86.0 で定期ジョブの成功結果も同じ
+    節に乗る）があれば、「まとめて知らせる変化」として材料に
+    足し、知らせの中に必ず含めるよう指示する。寄せた出来事は
+    一度きりで再び集め直せないため、他の材料と違い、日報への
+    倒し込みにも専用の節として含める（倒し込み側は
+    _daily_message）。
     """
     date_text = (f"{now.year}年{now.month}月{now.day}日"
                  f"（{_WEEKDAY_NAMES[now.weekday()]}）")
@@ -761,7 +794,7 @@ def build_briefing_prompt(open_tasks: list[Task], now: datetime,
     if digest_text:
         lines.append(
             "- まとめて知らせる変化があれば、知らせの中に必ず"
-            "含めてください。各見張りは原則1行で、変化の要点"
+            "含めてください。各出来事は原則1行で、要点"
             "だけを伝えてください。材料に無い原因・重要度・"
             "影響は推測しないでください。")
     if steps_text:
@@ -819,10 +852,11 @@ def _daily_message(cfg: Config, now: datetime, visible_tasks: list[Task],
     None を返す（投稿と声かけ枠の消費は呼び出し側の仕事）。
     配信済みの印付け自体も呼び出し側が投稿の確定後に行う。
 
-    digest_events は、朝へ寄せた見張りの変化（通知の取捨
-    0.84.0）のうち材料に選んだ分（古い順、最大
-    MAX_BRIEFING_EVENTS 件。呼び出し側で選ぶ）。他の材料と
-    性質が違い、一度きりの出来事で翌日に集め直せないため:
+    digest_events は、朝へ寄せた出来事（見張りの変化と定期
+    ジョブの成功結果。通知の取捨）のうち材料に選んだ分
+    （古い順、最大 MAX_BRIEFING_EVENTS 件＝見張りとジョブを
+    合わせた件数。呼び出し側で選ぶ）。他の材料と性質が違い、
+    一度きりの出来事で翌日に集め直せないため:
     - 朝のまとめの材料に「まとめて知らせる変化」の節として足す
     - 日報への倒し込みにも、専用の節（コードで組み立てる形）
       として含める。用事が無くても、この節だけの日報を投稿
@@ -978,27 +1012,85 @@ def build_job_failure_message(job: Job, result: str) -> str:
     return text
 
 
+def build_job_triage_prompt(job: Job, result: str, now: datetime) -> str:
+    """auto の定期ジョブの成功結果を判定させるための、判定役への指示文。
+
+    判定に渡す材料は、ジョブの名前・実行した指示・結果の要点・
+    実行時刻だけに絞る（見張りの判定と同じ流儀。設計 §2.5）。
+    実行した指示は利用者本人が書いたもので、見張りの note と
+    同じく利用者の指示として扱う。結果は全文ではなく要点として
+    切り詰めて渡す（材料を小さく保つため）。返し方の約束
+    （JSON だけを返す）は判定役の指示（TRIAGE_NOTICE）にも
+    あるが、ここでも形を示して崩れにくくする。
+    """
+    prompt_text = " ".join(job.prompt.split())[:200]
+    result_text = " ".join(str(result).split())[:800]
+    lines = [
+        "定期ジョブの実行が終わり、結果が届きました。"
+        "その場で知らせるべきか、朝の知らせにまとめてよいか"
+        "判定してください。",
+        f"定期ジョブの名前: {job.title}",
+        f"実行した指示: {prompt_text}",
+        f"実行時刻: {now.isoformat(timespec='seconds')}",
+        f"結果: {result_text}",
+        "返答は次の形の JSON だけにしてください: "
+        "{\"route\": \"immediate\" または \"digest\", "
+        "\"certain\": true または false, "
+        "\"reason\": \"判定の短い理由\", "
+        "\"notice\": \"その場で知らせる場合の知らせ文（任意）\"}",
+    ]
+    return "\n".join(lines)
+
+
 def run_due_jobs(cfg: Config, now: datetime, get_session: Callable[[], Session],
                  job_executor: Callable[[Session, str], str] | None = None,
                  notify: NotifyCallback | None = None,
+                 triage_executor: Callable[[Session, str], str] | None = None,
                  ) -> list[str]:
-    """期限の来た定期ジョブを実行し、結果を main の会話へ投稿する。
+    """期限の来た定期ジョブを実行し、結果を届ける。
 
     get_session は投稿先（そのユーザーの main）の Session を引く
     ための関数で、期限の来たジョブがあるときだけ呼ばれる。実行は
     job_executor（親 Session と指示文を受けて結果を返す関数）で、
     既定は委任の仕組み（delegate.run_delegated_task: 子セッションが
     仕事をして最終応答を返す）。実行したら成功・失敗にかかわらず
-    last_run_at を実行時刻に更新する。実行の例外や error の結果は
-    失敗として扱い、短い失敗の知らせを投稿する。投稿した文面の
-    一覧を返す。notify があれば、投稿した文面（結果・失敗の知らせ
-    とも）をその都度通知コールバックへも渡す。
+    last_run_at を実行時刻に更新する（実行の消費は届け方と
+    独立。設計 第3段「変えないもの」）。実行の例外や error の
+    結果は失敗として扱う。
+
+    届け方（成功結果だけが対象。通知の取捨 第3段、0.86.0）:
+
+    - 失敗は、ジョブの届け方の設定にかかわらず短い失敗の知らせ
+      をその場で投稿する（強制規則。失敗を朝へ回す設定は無い）
+    - immediate（既定）: 成功結果を main の会話へその場で投稿
+      する（従来どおり）
+    - digest: その場では投稿せず、結果の要点を置き場
+      （notification_queue.jsonl）へ残して朝の知らせでまとめて
+      届ける（見張りと同じ置き場・同じ仕組み。朝の知らせの
+      上限は見張りと合わせた出来事の件数で数える）。置き場へ
+      保存できなければ即時へ倒す。スレッドモードや振り分けの
+      無効化中は即時に倒す（notification_triage.decide_job_route）
+    - auto: triage_executor（既定は委任の仕組みの内部専用の
+      振り分け判定役）へ判定を頼む。呼び出しは結果 1 件につき
+      最大 1 回。判定が採用できればその経路にし（digest なら
+      置き場へ、immediate ならその場で投稿）、形式不正・例外・
+      確信なしなど判定が使えなければ理由コードを残して即時へ
+      倒す。判定の知らせ文候補（notice）は使わない（ジョブの
+      結果そのものが届ける内容であり、即時の投稿は通常の結果
+      文で組み立てる）。スレッドモードや無効化中は判定自体を
+      行わず即時へ倒す（decide_job_route）
+
+    投稿した文面の一覧を返す（digest で寄せた分は含まない）。
+    notify があれば、投稿した文面（結果・失敗の知らせとも）を
+    その都度通知コールバックへも渡す。
     """
     board = JobBoard(cfg.user_data_dir)
     due = [job for job in board.list() if is_due(job, now)]
     if not due:
         return []
     executor = job_executor if job_executor is not None else _sweep_executor
+    triage = triage_executor if triage_executor is not None \
+        else _triage_executor
     posted: list[str] = []
     for job in due:
         session = get_session()
@@ -1014,15 +1106,82 @@ def run_due_jobs(cfg: Config, now: datetime, get_session: Callable[[], Session],
         if not isinstance(result, str):
             result = str(result)
         if result.startswith("error:"):
+            # 失敗は届け方の設定にかかわらず即時（強制規則）
             text = build_job_failure_message(job, result)
-        else:
-            text = build_job_result_message(job, result)
+            try:
+                session.post_proactive_message(text)
+            finally:
+                # 投稿まで進んだら、成否にかかわらず実行済みを記録する
+                board.mark_run(job.id, now)
+            append_feed_entry(cfg.user_data_dir, KIND_PROACTIVE, text)
+            posted.append(text)
+            _notify(notify, cfg.tenant, cfg.user, text)
+            continue
+        # 成功結果は届け方で振り分ける
+        route, reason = decide_job_route(
+            job, mode=normalize_mode(cfg.mode),
+            triage_enabled=cfg.notification_triage_enabled)
+        # auto の判定が実際に走った場合だけ、最終的な理由コード
+        # とモデルの短い理由をここへ残す（記録用。見張りと同じ）
+        judged_reason: str | None = None
+        judged_model_reason = ""
+        if route == ROUTE_AUTO:
+            # モデル判定（auto）: 判定役の呼び出しは結果 1 件に
+            # つき最大 1 回。判定できない・迷う・形式が壊れて
+            # いる場合は、理由コードを残して即時へ倒す
+            triage_prompt = build_job_triage_prompt(job, result, now)
+            try:
+                raw_verdict = triage(session, triage_prompt)
+            except Exception as e:  # 判定の失敗で巡回全体は落とさない
+                raw_verdict = f"error: {e}"
+            verdict, reason, judged_model_reason = \
+                parse_triage_verdict(raw_verdict)
+            judged_reason = reason
+            if verdict is not None and verdict.route == ROUTE_DIGEST:
+                route = ROUTE_DIGEST
+            # verdict が immediate / None の場合は、このまま
+            # 即時の投稿へ進む（理由コードは reason に残っている）
+        if route == ROUTE_DIGEST:
+            # 朝へ寄せる: 置き場へ保存できた場合だけ寄せたことに
+            # する。保存できなければ即時へ倒して下へ続ける
+            event = build_job_event(
+                job, result, now, reason,
+                decision_by="model" if judged_reason is not None
+                else "setting")
+            already = has_event(cfg.user_data_dir, event.id)
+            if enqueue_event(cfg.user_data_dir, event):
+                if not already:
+                    # 初めて入った出来事だけ、発生時の短い記録を
+                    # フィードに残す（見張りと同じ。朝まで何も
+                    # 起きていないように見えないように）
+                    note = (f"（おまかせ判定: {judged_model_reason}）"
+                            if judged_reason is not None
+                            and judged_model_reason else "")
+                    append_feed_entry(
+                        cfg.user_data_dir, KIND_PROACTIVE,
+                        f"定期ジョブ「{job.title}」の結果は、"
+                        "朝の知らせでまとめてお知らせします。"
+                        f"{note}")
+                board.mark_run(job.id, now)
+                continue
+            reason = REASON_QUEUE_FAILED_IMMEDIATE
+            if judged_reason is not None:
+                judged_reason = reason
+        text = build_job_result_message(job, result)
         try:
             session.post_proactive_message(text)
         finally:
             # 投稿まで進んだら、成否にかかわらず実行済みを記録する
             board.mark_run(job.id, now)
         append_feed_entry(cfg.user_data_dir, KIND_PROACTIVE, text)
+        if judged_reason is not None:
+            # auto の判定で即時になった記録は、置き場ではなく
+            # フィードに残す（即時の出来事は置き場の対象外の
+            # ため。digest の出来事は置き場の理由コードが正）
+            append_feed_entry(
+                cfg.user_data_dir, KIND_PROACTIVE,
+                job_triage_feed_note(job.title, judged_reason,
+                                     judged_model_reason))
         posted.append(text)
         _notify(notify, cfg.tenant, cfg.user, text)
     return posted
@@ -1143,7 +1302,7 @@ def run_due_watches(cfg: Config, now: datetime,
     executor = watch_executor if watch_executor is not None \
         else _watch_notice_executor
     triage = triage_executor if triage_executor is not None \
-        else _watch_triage_executor
+        else _triage_executor
     posted: list[str] = []
     for watch in due:
         try:
@@ -1301,8 +1460,10 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     既定は委任の仕組み（run_due_jobs を参照）。watch_executor は
     見張りの知らせ文の作成関数の差し替え（テスト用）で、既定は
     同じく委任の仕組み（run_due_watches を参照）。triage_executor は
-    見張りの auto 判定の実行関数の差し替え（テスト用）で、既定は
-    同じく委任の仕組み（run_due_watches を参照）。briefing_executor は
+    auto（おまかせ）の振り分け判定の実行関数の差し替え（テスト用）
+    で、見張りの変化と定期ジョブの成功結果の判定に共用し、既定は
+    同じく委任の仕組み（run_due_watches / run_due_jobs を参照）。
+    briefing_executor は
     朝のまとめの実行関数の差し替え（テスト用）で、既定は同じく
     委任の仕組み。notify があれば、投稿した文面をその都度通知
     コールバックへも渡す（Telegram への配信など。渡すのはこの
@@ -1408,7 +1569,8 @@ def check_and_post(cfg: Config, now: datetime | None = None,
     # 定期ジョブは用事とは独立の仕組みで、モードも静かな時間帯も
     # 問わず、期限が来ていれば先に実行して結果を投稿する
     posted.extend(run_due_jobs(cfg, now, get_session,
-                               job_executor=job_executor, notify=notify))
+                               job_executor=job_executor, notify=notify,
+                               triage_executor=triage_executor))
 
     # 見張りも定期ジョブと同じくモードを問わず、間隔が来ていれば
     # 確認し、変化があった分だけ知らせを投稿する
@@ -1487,12 +1649,14 @@ def check_and_post(cfg: Config, now: datetime | None = None,
                 calendar_briefing_materials(cfg, visible_tasks, now)
         except Exception:
             calendar_text, task_notes, calendar_empty = None, {}, False
-        # 朝へ寄せた見張りの変化（通知の取捨 0.84.0）: この巡回
-        # の見張り処理が終わった後に未配信分を古い順に最大
-        # MAX_BRIEFING_EVENTS 件選ぶ（同じ巡回で検出した変化も、
-        # その日の朝の知らせがまだなら材料に入る）。振り分けが
-        # 無効化されている間も、既にある未配信分は読み続けて
-        # 届ける。読み取りの失敗で日報自体は落とさない
+        # 朝へ寄せた出来事（見張りの変化と定期ジョブの成功結果。
+        # 通知の取捨）: この巡回のジョブ・見張り処理が終わった
+        # 後に未配信分を古い順に最大 MAX_BRIEFING_EVENTS 件選ぶ
+        # （同じ巡回で検出した変化・実行した結果も、その日の朝の
+        # 知らせがまだなら材料に入る。上限は見張りとジョブを
+        # 合わせた出来事の件数で数える）。振り分けが無効化され
+        # ている間も、既にある未配信分は読み続けて届ける。
+        # 読み取りの失敗で日報自体は落とさない
         digest_events: list[QueueEvent] = []
         try:
             digest_events = pending_events(

@@ -79,6 +79,7 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "list_jobs": "定期ジョブを確認中",
     "delete_job": "定期ジョブを記録中",
     "set_job_enabled": "定期ジョブを記録中",
+    "set_job_delivery": "定期ジョブを記録中",
     "create_watch": "見張りを記録中",
     "list_watches": "見張りを確認中",
     "delete_watch": "見張りを記録中",
@@ -579,7 +580,14 @@ class ToolBox:
             "weekly（毎週）/ interval（間隔）のいずれか。daily は "
             "time（HH:MM）、weekly は time と weekday（月曜=0 〜 "
             "日曜=6）、interval は hours（何時間ごと）が必要で、"
-            "種別に合わない項目を一緒に渡すとエラーになる。",
+            "種別に合わない項目を一緒に渡すとエラーになる。"
+            "delivery は成功結果の届け方で、immediate（結果を"
+            "その場で知らせる、省略時）か digest（結果を朝の"
+            "まとめでまとめて知らせる）か auto（その場で知らせる"
+            "か朝のまとめに寄せるかを、結果の内容で判定する。"
+            "判定できないときはその場で知らせる）か。"
+            "実行に失敗した場合は、届け方にかかわらずその場で"
+            "知らせる。",
             {"type": "object", "properties": {
                 "title": {"type": "string",
                           "description": "定期ジョブの名前"},
@@ -593,13 +601,17 @@ class ToolBox:
                 "weekday": {"type": "integer",
                             "description": "曜日（月曜=0 〜 日曜=6、weekly 用）"},
                 "hours": {"type": "integer",
-                          "description": "間隔（時間、interval 用）"}},
+                          "description": "間隔（時間、interval 用）"},
+                "delivery": {"type": "string",
+                             "enum": ["immediate", "digest", "auto"],
+                             "description": "成功結果の届け方（省略時は immediate）"}},
              "required": ["title", "prompt", "kind"]},
             self._create_job,
         ))
         self.register(Tool(
             "list_jobs",
-            "登録した定期ジョブを、予定・ON/OFF・前回実行付きですべて返す。",
+            "登録した定期ジョブを、予定・ON/OFF・届け方・前回実行"
+            "付きですべて返す。",
             {"type": "object", "properties": {}},
             self._list_jobs,
         ))
@@ -624,18 +636,39 @@ class ToolBox:
              "required": ["job", "enabled"]},
             self._set_job_enabled,
         ))
+        self.register(Tool(
+            "set_job_delivery",
+            "定期ジョブの成功結果の届け方を切り替える。job には"
+            "名前または ID を、delivery には immediate（その場で"
+            "知らせる）か digest（朝のまとめに寄せる）か auto"
+            "（その場か朝かを判定に任せる）を入れること。実行に"
+            "失敗した場合は、届け方にかかわらずその場で知らせる"
+            "（切り替えでは変わらない）。",
+            {"type": "object", "properties": {
+                "job": {"type": "string",
+                        "description": "切り替える定期ジョブの名前または ID"},
+                "delivery": {"type": "string",
+                             "enum": ["immediate", "digest", "auto"],
+                             "description": "成功結果の届け方"}},
+             "required": ["job", "delivery"]},
+            self._set_job_delivery,
+        ))
 
     def _create_job(self, title: str, prompt: str, kind: str,
                     time: str | None = None, weekday: int | None = None,
-                    hours: int | None = None) -> str:
+                    hours: int | None = None,
+                    delivery: str = "immediate") -> str:
         assert self.job_board is not None
         try:
             schedule = build_schedule(kind, time, weekday, hours)
-            job = self.job_board.add(title, prompt, schedule)
+            delivery_name = validate_delivery(delivery)
+            job = self.job_board.add(title, prompt, schedule,
+                                     delivery=delivery_name)
         except ValueError as e:
             return f"error: {e}"
         return (f"登録しました: #{job.id} {job.title}"
-                f"（{schedule_description(job.schedule)}）")
+                f"（{schedule_description(job.schedule)}、"
+                f"知らせ方: {DELIVERY_LABELS[job.delivery]}）")
 
     def _format_jobs(self, jobs: list[Job]) -> str:
         if not jobs:
@@ -646,6 +679,7 @@ class ToolBox:
             lines.append(
                 f"#{job.id} {job.title}"
                 f"（{schedule_description(job.schedule)}、{state}、"
+                f"知らせ方: {DELIVERY_LABELS.get(job.delivery, job.delivery)}、"
                 f"前回実行: {format_last_run(job.last_run_at)}）")
             lines.append(f"  指示: {job.prompt}")
         return "\n".join(lines)
@@ -670,6 +704,18 @@ class ToolBox:
             return f"error: 定期ジョブ「{job}」が見つかりません"
         state = "ON" if updated.enabled else "OFF"
         return f"更新しました: #{updated.id} {updated.title}（{state}）"
+
+    def _set_job_delivery(self, job: str, delivery: str) -> str:
+        assert self.job_board is not None
+        try:
+            delivery_name = validate_delivery(delivery)
+        except ValueError as e:
+            return f"error: {e}"
+        updated = self.job_board.set_delivery(job, delivery_name)
+        if updated is None:
+            return f"error: 定期ジョブ「{job}」が見つかりません"
+        return (f"更新しました: #{updated.id} {updated.title}"
+                f"（知らせ方: {DELIVERY_LABELS[updated.delivery]}）")
 
     def _register_watch_tools(self) -> None:
         # 見張りの道具は定期ジョブと同じくモードを問わず登録する
