@@ -13,14 +13,15 @@
 #      https://〜.trycloudflare.com の URL を開く
 #   URL は起動のたびに変わります。恒常的な公開には向きません。
 #
-# 注意: ホスト側のポート（8765）も、信頼できないネットワークへは
-# そのまま開けないでください。
+# ホスト側のポートは、この PC からだけ届くよう 127.0.0.1 に
+# 絞ってある（同じネットワークの他の機器からは直接開けない）。
+# 外からはトンネル経由で開くこと。
 
 services:
   kuma-agent:
     build: .
     ports:
-      - "8765:8765"
+      - "127.0.0.1:8765:8765"
     env_file:
       - .env
     volumes:
@@ -29,6 +30,8 @@ services:
 
   # Cloudflare の Quick Tunnel（アカウント不要のお試し公開）。
   # プロファイルを指定したときだけ起動する。
+  # コンテナ同士の通信で kuma-agent へ繋ぐので、ホスト側のポートを
+  # 127.0.0.1 に絞ってもトンネルの動きは変わらない。
   cloudflared:
     image: cloudflare/cloudflared:latest
     command: tunnel --no-autoupdate --url http://kuma-agent:8765

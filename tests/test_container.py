@@ -49,7 +49,8 @@ def test_dockerfile_points() -> None:
 def test_compose_points() -> None:
     text = _read("docker-compose.yml")
     assert "build: ." in text
-    assert '"8765:8765"' in text
+    # ホスト側は 127.0.0.1 に絞る（外からはトンネル経由だけ）
+    assert '"127.0.0.1:8765:8765"' in text
     assert "env_file" in text
     assert "- .env" in text
     assert ":/data" in text
