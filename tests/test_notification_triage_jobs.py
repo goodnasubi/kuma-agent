@@ -51,6 +51,23 @@ from kuma_agent.watches import WatchBoard
 NOW = datetime(2026, 11, 7, 12, 0, 0)
 MORNING = datetime(2026, 11, 7, 8, 0, 0)
 
+
+def _pin_created_at(data_dir: Path, when: datetime) -> None:
+    """保存済みの見張りの作成時刻を固定する。
+
+    WatchBoard.add は実時計で作成時刻を刻むため、そのままだと
+    固定した NOW との期限判定（作成時刻＋間隔）が実時計の進み
+    方に依存してしまう。種を作った直後に作成時刻を NOW 基準
+    へ寄せ、判定を実時計から切り離す（定期ジョブのテストが
+    jobs.json に作成時刻を明示して用意する流儀と同じ）。
+    """
+    path = data_dir / "watches.json"
+    records = json.loads(path.read_text(encoding="utf-8"))
+    for record in records:
+        record["created_at"] = when.isoformat(timespec="seconds")
+    path.write_text(json.dumps(records, ensure_ascii=False),
+                    encoding="utf-8")
+
 DIGEST_JSON = json.dumps(
     {"route": "digest", "certain": True, "reason": "日常的な集計結果です"},
     ensure_ascii=False)
@@ -709,6 +726,8 @@ def test_repeated_watch_failures_are_recorded_not_notified(
     board = WatchBoard(tmp_path)
     board.add("ページ", "web", "https://example.com", interval_hours=1,
               delivery="digest")
+    # NOW の時点で最初の確認が来ているよう、作成時刻を固定する
+    _pin_created_at(tmp_path, NOW - timedelta(hours=2))
     cfg = Config(data_dir=tmp_path)
     session = _FakeSession()
     assert run_due_watches(cfg, NOW, lambda: session) == []  # 基準の記録

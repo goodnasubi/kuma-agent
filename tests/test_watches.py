@@ -28,6 +28,23 @@ from kuma_agent.watches import (
 NOW = datetime(2026, 11, 7, 12, 0, 0)
 
 
+def _pin_created_at(data_dir: Path, when: datetime) -> None:
+    """保存済みの見張りの作成時刻を固定する。
+
+    WatchBoard.add は実時計で作成時刻を刻むため、そのままだと
+    固定した NOW との期限判定（作成時刻＋間隔）が実時計の進み
+    方に依存してしまう。種を作った直後に作成時刻を NOW 基準
+    へ寄せ、判定を実時計から切り離す（定期ジョブのテストが
+    jobs.json に作成時刻を明示して用意する流儀と同じ）。
+    """
+    path = data_dir / "watches.json"
+    records = json.loads(path.read_text(encoding="utf-8"))
+    for record in records:
+        record["created_at"] = when.isoformat(timespec="seconds")
+    path.write_text(json.dumps(records, ensure_ascii=False),
+                    encoding="utf-8")
+
+
 class _EchoModel:
     def chat(self, system_prompt, messages, tools):
         return Message("assistant", f"返答: {messages[-1].content}")
@@ -178,6 +195,8 @@ def _seed_watch(tmp_path: Path, monkeypatch, text: str) -> WatchBoard:
     monkeypatch.setattr(watches_mod, "fetch_page", lambda url: state["text"])
     board = WatchBoard(tmp_path)
     board.add("ページ", "web", "https://example.com", interval_hours=1)
+    # NOW の時点で最初の確認が来ているよう、作成時刻を固定する
+    _pin_created_at(tmp_path, NOW - timedelta(hours=2))
     return board
 
 
@@ -229,6 +248,7 @@ def test_check_failure_records_error(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(watches_mod, "fetch_page", broken)
     board = WatchBoard(tmp_path)
     board.add("ページ", "web", "https://example.com")
+    _pin_created_at(tmp_path, NOW - timedelta(hours=2))
     cfg = Config(data_dir=tmp_path)
     session = _FakeSession()
     assert run_due_watches(cfg, NOW, lambda: session) == []
@@ -265,6 +285,7 @@ def test_check_and_post_includes_watches(tmp_path: Path, monkeypatch):
     cfg = Config(data_dir=tmp_path)
     board = WatchBoard(tmp_path)
     board.add("ファイル", "file", "note.txt", interval_hours=1)
+    _pin_created_at(tmp_path, NOW - timedelta(hours=2))
     session = Session(cfg, _EchoModel())
     # 最初の巡回は基準の記録だけ
     assert check_and_post(cfg, now=NOW, session_provider=lambda: session,
