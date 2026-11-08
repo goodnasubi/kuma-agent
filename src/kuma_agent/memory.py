@@ -473,7 +473,40 @@ def related_memory_text(text: str, query: str, full_limit: int,
 
 
 # 発話に付けられるリアクションの絵文字（画面と保存の両方でこの範囲に限る）
-REACTION_EMOJIS: tuple[str, ...] = ("👍", "❤️", "😂", "😮", "🎉", "🙏")
+# 👎 は「次のアクション」の提案を見送る合図にも使う（0.92.0 で追加）
+REACTION_EMOJIS: tuple[str, ...] = ("👍", "👎", "❤️", "😂", "😮", "🎉", "🙏")
+
+# 「次のアクション」の提案（0.92.0）: 頭脳が返事の末尾に付ける専用
+# マーカーと、提案の状態・合図に使う絵文字
+NEXT_ACTION_MARKER = re.compile(r"\[\[next:\s*(?P<text>.*?)\s*\]\]",
+                                re.DOTALL)
+PROPOSAL_STATES: tuple[str, ...] = ("pending", "done", "dismissed")
+PROPOSAL_APPROVE_EMOJI = "👍"
+PROPOSAL_DISMISS_EMOJI = "👎"
+
+
+def extract_next_action(content: str) -> tuple[str, str | None]:
+    """返事の本文から「次のアクション」のマーカーを取り除き、提案を返す。
+
+    マーカー（[[next: …]]）が無ければ本文はそのままで提案は None。
+    提案が空のときと、取り除いた後の本文が空になるときはマーカー
+    扱いしない（本文をそのまま残す）。提案は前後の空白を除いた
+    自然文で返す。
+    """
+    match = NEXT_ACTION_MARKER.search(content)
+    if match is None:
+        return content, None
+    text = match.group("text").strip()
+    body = (content[:match.start()] + content[match.end():]).strip()
+    if not text or not body:
+        return content, None
+    return body, text
+
+
+def proposal_instruction(text: str) -> str:
+    """👍 で承認された提案を実行させるための利用者発話の文面。"""
+    return ("👍 リアクションで承認。提案された次のアクションを"
+            f"実行してください: {text}")
 
 
 class Memory:
@@ -679,6 +712,90 @@ class Memory:
             encoding="utf-8")
         self._sync_agent_reaction(record_index, current)
         return current
+
+    @property
+    def proposals_file(self) -> Path:
+        """「次のアクション」の提案の保存ファイル。
+
+        会話記録（JSONL）とは別に置く。キーは記録での位置で、値は
+        {"text": 提案の自然文, "state": 状態}。状態は pending
+        （保留中）/ done（実行済み）/ dismissed（見送り）。
+        """
+        return self.conversations_dir / f"{self.session_id}.proposals.json"
+
+    def load_proposals(self) -> dict[int, dict[str, str]]:
+        """提案を {記録の位置: {"text": …, "state": …}} で返す。
+
+        壊れた内容や未知の状態は読み飛ばす（表示側を壊さない）。
+        """
+        if not self.proposals_file.exists():
+            return {}
+        try:
+            raw = json.loads(self.proposals_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        proposals: dict[int, dict[str, str]] = {}
+        if not isinstance(raw, dict):
+            return proposals
+        for key, value in raw.items():
+            try:
+                index = int(key)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            text = value.get("text")
+            state = value.get("state")
+            if isinstance(text, str) and text and state in PROPOSAL_STATES:
+                proposals[index] = {"text": text, "state": state}
+        return proposals
+
+    def _save_proposals(self, proposals: dict[int, dict[str, str]]) -> None:
+        self.conversations_dir.mkdir(parents=True, exist_ok=True)
+        payload = {str(k): v for k, v in sorted(proposals.items())}
+        self.proposals_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=1) + "\n",
+            encoding="utf-8")
+
+    def set_proposal(self, record_index: int, text: str) -> None:
+        """相棒の発話に「次のアクション」の提案を保留中で付ける。
+
+        宛先は assistant のレコードに限る。満たさなければ
+        ValueError（リアクションの宛先検証と同じ流儀）。
+        """
+        turns = self.load_turns()
+        if not 0 <= record_index < len(turns) \
+                or turns[record_index].get("role") != "assistant":
+            raise ValueError("宛先の発話がありません")
+        proposals = self.load_proposals()
+        proposals[record_index] = {"text": text, "state": "pending"}
+        self._save_proposals(proposals)
+
+    def react_to_proposal(self, record_index: int, emoji: str,
+                          turned_on: bool) -> str | None:
+        """提案のある発話へのリアクションを提案の状態へ反映する。
+
+        保留中の提案に 👍 が付いた（トグルで ON になった）ときだけ
+        提案を実行済み（done）にし、実行を促す利用者発話の文面
+        （proposal_instruction）を返す。👎 が付いたら見送り
+        （dismissed）にする（文面は返さないので会話は進まない）。
+        外す操作・保留中でない提案・提案の無い発話では何もせず
+        None を返すため、実行は一回限りになる。
+        """
+        if not turned_on or emoji not in (PROPOSAL_APPROVE_EMOJI,
+                                          PROPOSAL_DISMISS_EMOJI):
+            return None
+        proposals = self.load_proposals()
+        proposal = proposals.get(record_index)
+        if proposal is None or proposal["state"] != "pending":
+            return None
+        if emoji == PROPOSAL_APPROVE_EMOJI:
+            proposal["state"] = "done"
+            self._save_proposals(proposals)
+            return proposal_instruction(proposal["text"])
+        proposal["state"] = "dismissed"
+        self._save_proposals(proposals)
+        return None
 
     def append_summary(self, content: str) -> None:
         """圧縮で作った要約を記録する（role は "summary"）。"""

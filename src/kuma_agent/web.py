@@ -480,6 +480,17 @@ _PAGE_TEMPLATE = """\
   .reactionChip.agentChip .agentMark img { width: 14px; height: 14px;
                border-radius: 50%; object-fit: cover;
             display: block; }
+  .proposalChip { display: inline-flex; align-items: center; gap: 6px;
+            padding: 2px 9px; font-size: 13px; line-height: 1.5;
+            background: var(--quote-bg); color: var(--ink);
+            border: 1px solid __HONEY__; border-radius: 8px; }
+  .proposalChip[data-state="done"],
+  .proposalChip[data-state="dismissed"] { border-color: var(--line);
+            opacity: 0.75; }
+  .proposalChip .proposalBtn { padding: 0 2px; font-size: 14px;
+            line-height: 1.4; background: transparent; border: none;
+            cursor: pointer; }
+  .proposalChip .proposalHint { opacity: 0.75; font-size: 12px; }
   #reactionPalette { position: fixed; z-index: 60; display: flex; gap: 2px;
             background: var(--surface); border: 1px solid var(--line);
             border-radius: 8px; padding: 6px;
@@ -1032,7 +1043,8 @@ function clearQuote() {
 clearQuoteBtn.addEventListener('click', clearQuote);
 
 function addMsg(role, text, quote = null, quoteSource = null,
-                rid = null, reactions = [], agentReaction = null) {
+                rid = null, reactions = [], agentReaction = null,
+                proposal = null) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
   if (quote) {
@@ -1064,6 +1076,7 @@ function addMsg(role, text, quote = null, quoteSource = null,
   div.appendChild(actions);
   if (rid !== null && rid !== undefined) {
     attachReactions(div, rid, reactions, agentReaction);
+    if (proposal) renderProposalChip(div, rid, proposal);
   }
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
@@ -1072,7 +1085,7 @@ function addMsg(role, text, quote = null, quoteSource = null,
 
 // リアクション: 発話に絵文字を付け外しする。保存はサーバー側
 // （/api/reactions）で、宛先は会話記録での位置（rid）
-const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '🎉', '🙏'];
+const REACTION_EMOJIS = ['👍', '👎', '❤️', '😂', '😮', '🎉', '🙏'];
 let reactionPalette = null;
 
 function renderReactionChips(box, rid, reactions, agentReaction) {
@@ -1128,6 +1141,59 @@ function attachReactions(div, rid, reactions, agentReaction) {
   renderReactionChips(box, rid, reactions || [], agentReaction || null);
 }
 
+// 「次のアクション」の提案チップ: 提案のある相棒の発話の操作行に
+// 出す。保留中は 👍（実行）と 👎（見送り）のボタンも付け、押すと
+// 通常のリアクションの付け外しと同じ経路（toggleReaction）で
+// サーバーへ伝わる。状態（実行済み・見送り）も文面で分かるように
+// する
+function renderProposalChip(div, rid, proposal) {
+  let row = div.querySelector('.msgActions');
+  if (!row) {
+    row = document.createElement('div');
+    row.className = 'msgActions';
+    div.appendChild(row);
+  }
+  let chip = row.querySelector('.proposalChip');
+  if (!chip) {
+    chip = document.createElement('span');
+    chip.className = 'proposalChip';
+    row.appendChild(chip);
+  }
+  chip.innerHTML = '';
+  chip.dataset.state = proposal.state;
+  const label = document.createElement('span');
+  label.className = 'proposalText';
+  label.textContent = '次のアクション: ' + proposal.text
+    + (proposal.state === 'done' ? '（実行済み）'
+       : proposal.state === 'dismissed' ? '（見送り）' : '');
+  chip.appendChild(label);
+  if (proposal.state === 'pending') {
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.className = 'proposalBtn';
+    go.textContent = '👍';
+    go.title = '提案を実行する';
+    go.setAttribute('aria-label', '提案を実行する');
+    go.addEventListener('click',
+      () => toggleReaction(rid, '👍', div._reactionBox));
+    chip.appendChild(go);
+    const no = document.createElement('button');
+    no.type = 'button';
+    no.className = 'proposalBtn';
+    no.textContent = '👎';
+    no.title = '提案を見送る';
+    no.setAttribute('aria-label', '提案を見送る');
+    no.addEventListener('click',
+      () => toggleReaction(rid, '👎', div._reactionBox));
+    chip.appendChild(no);
+    const hint = document.createElement('span');
+    hint.className = 'proposalHint';
+    hint.textContent = '👍で実行';
+    chip.appendChild(hint);
+  }
+  return chip;
+}
+
 function openReactionPalette(anchor, div, rid) {
   closeReactionPalette();
   const palette = document.createElement('div');
@@ -1176,7 +1242,55 @@ async function toggleReaction(rid, emoji, box) {
     const data = await res.json();
     if (box) renderReactionChips(box, rid, data.reactions || [],
                                  data.agent_reaction || null);
+    const div = box ? box.closest('.msg') : null;
+    if (div && data.proposal) {
+      renderProposalChip(div, rid, data.proposal);
+    }
+    if (data.action) {
+      // 👍 で承認された提案: サーバーが組み立てた指示文を、通常の
+      // チャット送信と同じ流れで送って実行に移す
+      await sendInstructionMessage(data.action);
+    }
   } catch (e) { /* 付け外しに失敗したら表示はそのままにする */ }
+}
+
+// リアクション経由の実行指示を、通常の送信と同じ見た目・流れで
+// /api/chat へ送る（利用者発話として表示する）
+async function sendInstructionMessage(text) {
+  const userDiv = addMsg('user', text);
+  send.disabled = true;
+  showStatus('考え中');
+  const poller = setInterval(pollStatus, 400);
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: text,
+                            session: currentSession,
+                            tenant: currentTenant, user: currentUser}),
+    });
+    const data = await res.json();
+    const replyDiv = addMsg('assistant',
+      data.reply || ('エラー: ' + (data.error || res.status)));
+    if (data.user_rid !== undefined && data.user_rid !== null) {
+      attachReactions(userDiv, data.user_rid, []);
+    }
+    if (data.rid !== undefined && data.rid !== null) {
+      attachReactions(replyDiv, data.rid, []);
+      if (data.proposal) {
+        renderProposalChip(replyDiv, data.rid, data.proposal);
+      }
+    }
+  } catch (e) {
+    addMsg('assistant', '通信に失敗しました');
+  } finally {
+    clearInterval(poller);
+    showStatus('');
+    pollApprovals();
+    pollChoices();
+    send.disabled = false;
+    input.focus();
+  }
 }
 
 // 読み上げ: ブラウザの speechSynthesis（ja-JP）で読む。読み上げ中に
@@ -1233,7 +1347,7 @@ async function loadHistory() {
         const shown = describe(m.content, m.attachments);
         addMsg(m.role, shown, m.quote || null, m.content || shown,
                (m.rid === undefined ? null : m.rid), m.reactions || [],
-               m.agent_reaction || null);
+               m.agent_reaction || null, m.proposal || null);
       }
     }
   } catch (e) { /* 履歴が取れなくても会話は続けられる */ }
@@ -3236,6 +3350,9 @@ form.addEventListener('submit', async (ev) => {
     }
     if (data.rid !== undefined && data.rid !== null) {
       attachReactions(replyDiv, data.rid, []);
+      if (data.proposal) {
+        renderProposalChip(replyDiv, data.rid, data.proposal);
+      }
     }
   } catch (e) {
     addMsg('assistant', '通信に失敗しました');
@@ -4823,6 +4940,7 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 session = store.get(_first(query.get("session")))
                 reactions = session.memory.load_reactions()
                 agent_reactions = session.memory.load_agent_reactions()
+                proposals = session.memory.load_proposals()
                 messages = []
                 for m in session.history:
                     entry: dict = {"role": m.role, "content": m.content}
@@ -4839,6 +4957,10 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                         if agent_reactions.get(m.record_index):
                             entry["agent_reaction"] = \
                                 agent_reactions[m.record_index]
+                        if proposals.get(m.record_index):
+                            # 「次のアクション」の提案がある発話だけ、
+                            # 提案の本文と状態を足す（チップ表示用）
+                            entry["proposal"] = proposals[m.record_index]
                     messages.append(entry)
                 self._send_json(200, {"messages": messages})
             else:
@@ -5523,6 +5645,13 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                     payload["user_rid"] = m.record_index
                 if "rid" in payload and "user_rid" in payload:
                     break
+            if "rid" in payload:
+                # 返事に「次のアクション」の提案が付いていたら、
+                # 画面がその場で提案チップを出せるよう一緒に返す
+                proposal = session.memory.load_proposals().get(
+                    payload["rid"])
+                if proposal is not None:
+                    payload["proposal"] = proposal
             self._send_json(200, payload)
 
         def _generate_ideas(self) -> None:
@@ -5867,7 +5996,8 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
             Memory.toggle_reaction が担い、その発話の最新の並びを返す。
             応答にはクマのリアクション（リアクション返し、変化後。
             無ければ null）も含め、画面が再読み込みなしで反映できる
-            ようにする。
+            ようにする。提案のある発話では、提案の状態（proposal）と、
+            👍 で承認されたときだけ実行指示文（action）も含める。
             """
             data = self._read_json_body()
             if data is None:
@@ -5887,11 +6017,24 @@ def make_handler(tenants: TenantStore, page: str, auth: AuthGate,
                 try:
                     current = session.memory.toggle_reaction(rid, emoji)
                     agent = session.memory.load_agent_reactions().get(rid)
+                    # 「次のアクション」の提案への合図（👍 で実行・
+                    # 👎 で見送り）。付けた（ON になった）ときだけ
+                    # 効き、実行のときは指示文が返る
+                    action = session.memory.react_to_proposal(
+                        rid, emoji, emoji in current)
+                    proposal = session.memory.load_proposals().get(rid)
                 except ValueError as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
-            self._send_json(200, {"rid": rid, "reactions": current,
-                                  "agent_reaction": agent})
+            payload: dict = {"rid": rid, "reactions": current,
+                             "agent_reaction": agent}
+            if proposal is not None:
+                payload["proposal"] = proposal
+            if action is not None:
+                # 画面はこの指示文を通常の /api/chat で送り、実行は
+                # 通常の会話ターンとして進む（承認ロック等が効く）
+                payload["action"] = action
+            self._send_json(200, payload)
 
     return Handler
 

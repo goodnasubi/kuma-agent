@@ -63,6 +63,7 @@ from .mcp_client import McpManager, get_shared_manager, resolve_config_dir
 from .memory import (
     DEFAULT_SESSION_ID,
     Memory,
+    extract_next_action,
     format_conversation_hit,
     memory_inject_text,
     normalize_session_id,
@@ -211,6 +212,21 @@ def _with_failure_hint(result: str) -> str:
     hint = (_FAILURE_HINT_NOT_FOUND if kind == ERROR_KIND_NOT_FOUND
             else _FAILURE_HINT)
     return f"{result}\n{hint}"
+
+# 「次のアクション」の提案の約束（0.92.0）。頭脳が返事の末尾に
+# 専用マーカー行を付けたら、エンジンが本文から取り除いて、その
+# 発話に紐づく保留中の提案として保存する（Memory の proposals）。
+# 利用者が 👍 を付けたときだけ、通常の会話ターンとして実行される
+_NEXT_ACTION_GUIDE = (
+    "# 次のアクションの提案\n"
+    "明確な次の一手があるときだけ、返事の最後に次の形式の行を"
+    "1行だけ付けて、次にやることを提案できます。\n"
+    "[[next: 次にやることを自然な文で1つ]]\n"
+    "提案したときは、本文でも「よければ 👍 で進めます」と一言"
+    "触れてください。提案は利用者が 👍 を付けたときだけ実行され、"
+    "👎 で見送られます。次の一手が定かでないときや、利用者の判断"
+    "が要るときは付けないでください。"
+)
 
 # 要約役に渡す専用プロンプト（人格プロンプトとは分ける）
 _SUMMARY_SYSTEM = (
@@ -911,15 +927,22 @@ class Session:
                 # 現在日時は発話のたびに新しいものを添える（リマインダーの
                 # 絶対時刻への変換に使う）
                 self._notify(THINKING)
-                prompt = (f"{self.system_prompt}\n\n# 現在日時\n"
-                          f"{current_time_text()}")
+                prompt = (f"{self.system_prompt}\n\n{_NEXT_ACTION_GUIDE}"
+                          f"\n\n# 現在日時\n{current_time_text()}")
                 if related_section:
                     prompt += f"\n\n{related_section}"
                 reply = self._call_model(prompt, self.history, self.tools.schemas())
                 self.history.append(reply)
                 if not reply.tool_calls:
+                    # 「次のアクション」のマーカーは本文・記録・履歴の
+                    # どれにも残さず、提案として別に保存する
+                    text, proposal_text = extract_next_action(reply.content)
+                    reply.content = text
                     reply.record_index = self.memory.append_turn(
                         "assistant", reply.content)
+                    if proposal_text is not None:
+                        self.memory.set_proposal(
+                            reply.record_index, proposal_text)
                     self._maybe_compact()
                     return reply.content
                 for call in reply.tool_calls:
@@ -1090,26 +1113,43 @@ class Session:
         return reply.content.strip()
 
     def _with_reaction_notes(self, messages: list[Message]) -> list[Message]:
-        """モデルへ渡す直前に、リアクションの注記を付けた写しを返す。
+        """モデルへ渡す直前に、リアクションと提案の注記を付けた写しを返す。
 
         利用者が付けたリアクションは、会話記録（JSONL）にも履歴の
         発話そのものにも混ぜず、モデルへの入力を作るこの一点でのみ
         「（この発話に利用者が❤️を付けた）」の注記として添える。
-        履歴表示（/api/history は履歴の発話を読む）には出ない。
-        リアクションの付いていない発話はそのまま（写しを作らない）。
+        「次のアクション」の提案も同じ扱いで、相棒の発話の写しに
+        「（この発話で次のアクションを提案した: …）」を添え、状態
+        （実行済み／見送られた）も伝える。履歴表示（/api/history は
+        履歴の発話を読む）には出ない。注記の無い発話はそのまま
+        （写しを作らない）。
         """
         reactions = self.memory.load_reactions()
-        if not reactions:
+        proposals = self.memory.load_proposals()
+        if not reactions and not proposals:
             return messages
         annotated: list[Message] = []
         for msg in messages:
-            emojis = (reactions.get(msg.record_index)
-                      if msg.record_index is not None else None)
-            if emojis and msg.role in ("user", "assistant"):
-                note = ("（この発話に利用者が"
-                        + "と".join(emojis) + "を付けた）")
-                annotated.append(
-                    replace(msg, content=msg.content + "\n" + note))
+            notes: list[str] = []
+            if msg.record_index is not None \
+                    and msg.role in ("user", "assistant"):
+                emojis = reactions.get(msg.record_index)
+                if emojis:
+                    notes.append("（この発話に利用者が"
+                                 + "と".join(emojis) + "を付けた）")
+                proposal = (proposals.get(msg.record_index)
+                            if msg.role == "assistant" else None)
+                if proposal is not None:
+                    note = ("（この発話で次のアクションを提案した: "
+                            + proposal["text"])
+                    if proposal["state"] == "done":
+                        note += "／実行済み"
+                    elif proposal["state"] == "dismissed":
+                        note += "／見送られた"
+                    notes.append(note + "）")
+            if notes:
+                annotated.append(replace(
+                    msg, content=msg.content + "\n" + "\n".join(notes)))
             else:
                 annotated.append(msg)
         return annotated
