@@ -15,6 +15,21 @@ def test_persona_reads_files(tmp_path: Path):
     assert "テスト人格" in load_persona(tmp_path)
 
 
+def test_session_prompt_includes_conduct(tmp_path: Path):
+    from kuma_agent.llm import Message
+    from kuma_agent.session import Session
+
+    class _Stub:
+        def chat(self, system_prompt, messages, tools):
+            return Message("assistant", "ok")
+
+    session = Session(Config(data_dir=tmp_path), _Stub())
+    assert "# クマの作法" in session.system_prompt
+    assert "## 行動の原則" in session.system_prompt
+    assert "## 文体" in session.system_prompt
+    assert "## 記憶の作法" in session.system_prompt
+
+
 def test_memory_roundtrip(tmp_path: Path):
     mem = Memory(tmp_path)
     mem.remember("好きな食べ物は寿司")

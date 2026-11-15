@@ -72,7 +72,7 @@ from .memory import (
     normalize_user_name,
 )
 from .outputs import OutputBoard
-from .persona import load_persona
+from .persona import CONDUCT, load_persona
 from .settings import approvals_enabled_for
 from .skills import load_skills
 from .spaces import SpaceStore
@@ -446,6 +446,8 @@ class Session:
         self._memory_text = memory_text
         self._memory_partial = False
         self.system_prompt = load_persona(data_dir)
+        # クマの作法（行動原則・文体・記憶の作法）は人格に続けて常に足す
+        self.system_prompt += f"\n\n{CONDUCT}"
         if memory_text:
             # 記憶が閾値以下なら全文を、超えたら新しい方の項目だけを
             # 注入する（項目の途中で切らない。memory_inject_text）
