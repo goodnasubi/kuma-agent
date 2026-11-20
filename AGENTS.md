@@ -3,7 +3,13 @@
 - 言語は Python 3.11+。依存は最小限（httpx のみ）に保つ
 - テストは `python -m pytest`。型注釈を付け、`from __future__ import annotations` を使う
 - API キー・トークンは環境変数からのみ読む。コードやログに出さない
-- コミット末尾にトレーラーを付ける（`Agent: <名前>` / `Agent-Env: <環境>`）
+- コミット末尾にトレーラーを付ける（`Agent: <名前>` / `Agent-Env: <環境>` / `Verified: <値>`。`Verified:` の値は `docs/VERIFY.md` の定義に従う: `pytest-full` / `pytest-full+ui-assets` / `docs-only` / `none`）
+
+## push 前レビューと検証
+
+- **push 前レビュー（observe モード）**: コード変更を伴う push は、push の前にレビューを行う。レビュー役は実装と別セッションのサブエージェントを基本とし、必要時に agy／Codex を呼ぶ。レビュー役は HEAD との差分を、直前のコミット済み版の `docs/REVIEW.md` に従って読む（レビュー対象の変更に含まれる版は読まない）。指摘は Important／Nit／Pre-existing で返す。observe モードの間は指摘があっても push を止めず、レビュー結果は日次ログ相当の記録に残して誤検知の具合を見る。Important の指摘があった push は、修正を続報コミットで push する。文書だけ・資産だけの push は対象外。
+- **検証**: push 前に `docs/VERIFY.md` のチェックを行う（pytest 全量、UI 変更時は実画面確認＋README 画面資産の撮り直しを E2E の証拠として扱う、振る舞いに触れる変更は1往復の実動記録を完了報告へ添える）。
+- **3ラウンドで人間に上げる**: 同じテスト失敗の修正が3ラウンド続いたら、粘らず止めて人間に報告する。
 
 ## 作業の委任
 
